@@ -1,3 +1,7 @@
 *.elf
 *.img
 *.objdump
+.vscode
+*.bin
+*.map
+build/

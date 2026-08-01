@@ -1,0 +1,47 @@
+#include "config.h"
+
+.section .text.bl1, "ax", @progbits
+.globl _start
+.type _start, @function
+.align 2
+_start:
+    /* BL0 leaves the hart id in a0. Harts outside this image stay parked. */
+    li      t0, CONFIG_HART_COUNT
+    bgeu    a0, t0, .Lpark
+
+    /* Each hart gets a disjoint stack. The RISC-V ABI requires 16-byte sp. */
+    la      sp, __stack_start
+    li      t0, CONFIG_STACK_SIZE
+    addi    t1, a0, 1
+    mul     t0, t0, t1
+    add     sp, sp, t0
+    andi    sp, sp, -16
+
+    /* The initial tp is this hart's init thread at CPU-local offset zero. */
+    la      tp, __cpu_start
+    li      t0, CONFIG_CPU_LOCAL_SIZE
+    mul     t1, a0, t0
+    add     tp, tp, t1
+    mv      t1, tp
+.Lzero_cpu:
+    sd      zero, 0(t1)
+    addi    t1, t1, 8
+    addi    t0, t0, -8
+    bnez    t0, .Lzero_cpu
+    sd      tp, 8(tp)       /* init.cpu points back to the CPU-local block */
+    sd      sp, 16(tp)      /* init.sp records the boot stack */
+
+    /* Enable and reset the single-precision floating-point context. */
+    li      t0, 0x6000
+    csrs    mstatus, t0
+    csrw    fcsr, zero
+
+    call    init
+    call    scheduler
+
+.Lpark:
+    wfi
+    j       .Lpark
+.size _start, . - _start
+
+.section .note.GNU-stack, "", @progbits

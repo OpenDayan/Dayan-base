@@ -1,0 +1,22 @@
+#ifndef NPU_CONFIG_H
+#define NPU_CONFIG_H
+
+#ifndef CONFIG_HART_COUNT
+#define CONFIG_HART_COUNT 4
+#endif
+
+#ifndef CONFIG_CPU_LOCAL_SIZE
+#define CONFIG_CPU_LOCAL_SIZE 0x1000
+#endif
+
+#ifndef CONFIG_STACK_SIZE
+#define CONFIG_STACK_SIZE 0x10000
+#endif
+
+#ifndef CONFIG_HEAP_SIZE
+#define CONFIG_HEAP_SIZE 0x100000
+#endif
+
+#define CONFIG_CACHE_LINE_SIZE 64
+
+#endif
