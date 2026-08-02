@@ -37,8 +37,9 @@ void sche_init(void)
     init->pc = 0;
     init->type = THREAD_TYPE_BASE;
     INIT_LIST_HEAD(&sche->ready);
-    INIT_LIST_HEAD(&sche->wait_internal_event);
-    INIT_LIST_HEAD(&sche->wait_external_event);
+    INIT_LIST_HEAD(&sche->wait_poll);
+    INIT_LIST_HEAD(&sche->wait_event);
+    sche->event_waiters = 0;
     sche->next_id = 1;
 }
 
@@ -98,8 +99,8 @@ int proc_vinit(struct proc *proc, proc_fn entry,
     proc->thread.pc = (uintptr_t)proc_bootstrap +
                       PROC_BOOTSTRAP_PC_OFFSET(argc);
     INIT_LIST_HEAD(&proc->node);
-    proc->ready = 0;
-    proc->ready_arg = 0;
+    proc->poll = 0;
+    proc->poll_arg = 0;
     proc->thread.state = THREAD_READY;
     list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
     return 0;
@@ -129,40 +130,71 @@ int proc_wake(struct proc *proc)
     if (proc->thread.cpu != cpu)
         return -EPERM;
     if (proc->thread.type != THREAD_TYPE_PROC ||
-        proc->thread.state != THREAD_WAIT_EXTERNAL_EVENT)
+        proc->thread.state != THREAD_WAIT_EVENT)
         return -EBUSY;
-    proc->ready = 0;
-    proc->ready_arg = 0;
+    if (!sche->event_waiters)
+        return -EINVAL;
+    proc->poll = 0;
+    proc->poll_arg = 0;
     proc->thread.state = THREAD_READY;
+    --sche->event_waiters;
     list_move_tail(&proc->node, &sche->ready);
     return 0;
 }
 
-int proc_wait_internal(proc_ready_fn ready, void *arg)
+size_t proc_event_wake_one(struct list_head *event)
+{
+    struct proc *proc;
+
+    if (!event || list_empty(event))
+        return 0;
+    proc = list_first_entry(event, struct proc, node);
+    return proc_wake(proc) == 0;
+}
+
+size_t proc_event_wake_all(struct list_head *event)
+{
+    size_t count = 0;
+
+    while (proc_event_wake_one(event))
+        ++count;
+    return count;
+}
+
+int proc_wait_poll(proc_poll_fn poll, void *arg)
 {
     struct proc *proc = current_proc();
 
-    if (!ready)
+    if (!poll)
         return -EINVAL;
     if (!proc)
         return -EPERM;
-    proc->ready = ready;
-    proc->ready_arg = arg;
-    proc->thread.state = THREAD_WAIT_INTERNAL_EVENT;
+    proc->poll = poll;
+    proc->poll_arg = arg;
+    proc->thread.state = THREAD_WAIT_POLL;
     switch_to_scheduler(&proc->thread);
     return 0;
 }
 
-void proc_wait_external(void)
+int proc_wait_event(struct list_head *event)
 {
     struct proc *proc = current_proc();
+    struct sche_state *sche;
 
     if (!proc)
-        return;
-    proc->ready = 0;
-    proc->ready_arg = 0;
-    proc->thread.state = THREAD_WAIT_EXTERNAL_EVENT;
+        return -EPERM;
+    if (!list_empty(&proc->node))
+        return -EBUSY;
+    sche = &proc->thread.cpu->sche;
+    if (!event)
+        event = &sche->wait_event;
+    proc->poll = 0;
+    proc->poll_arg = 0;
+    proc->thread.state = THREAD_WAIT_EVENT;
+    ++sche->event_waiters;
+    list_add_tail(&proc->node, event);
     switch_to_scheduler(&proc->thread);
+    return 0;
 }
 
 void proc_yield(void)
@@ -171,8 +203,8 @@ void proc_yield(void)
 
     if (!proc)
         return;
-    proc->ready = 0;
-    proc->ready_arg = 0;
+    proc->poll = 0;
+    proc->poll_arg = 0;
     proc->thread.state = THREAD_READY;
     switch_to_scheduler(&proc->thread);
 }
@@ -200,13 +232,13 @@ _Noreturn void scheduler(void)
 
         proc_scan_produce();
 
-        list_for_each_safe(node, next, &sche->wait_internal_event) {
+        list_for_each_safe(node, next, &sche->wait_poll) {
             struct proc *waiting = list_entry(node, struct proc, node);
 
-            if (!waiting->ready(waiting, waiting->ready_arg))
+            if (!waiting->poll(waiting, waiting->poll_arg))
                 continue;
-            waiting->ready = 0;
-            waiting->ready_arg = 0;
+            waiting->poll = 0;
+            waiting->poll_arg = 0;
             waiting->thread.state = THREAD_READY;
             list_move_tail(node, &sche->ready);
         }
@@ -214,8 +246,7 @@ _Noreturn void scheduler(void)
         proc = list_first_entry_or_null(&sche->ready, struct proc, node);
 
         if (!proc) {
-            if (list_empty(&sche->wait_internal_event) &&
-                list_empty(&sche->wait_external_event))
+            if (list_empty(&sche->wait_poll) && !sche->event_waiters)
                 platform_idle();
             continue;
         }
@@ -227,10 +258,8 @@ _Noreturn void scheduler(void)
 
         if (proc->thread.state == THREAD_READY) {
             list_add_tail(&proc->node, &sche->ready);
-        } else if (proc->thread.state == THREAD_WAIT_INTERNAL_EVENT) {
-            list_add_tail(&proc->node, &sche->wait_internal_event);
-        } else if (proc->thread.state == THREAD_WAIT_EXTERNAL_EVENT) {
-            list_add_tail(&proc->node, &sche->wait_external_event);
+        } else if (proc->thread.state == THREAD_WAIT_POLL) {
+            list_add_tail(&proc->node, &sche->wait_poll);
         }
     }
 }

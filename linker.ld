@@ -4,6 +4,8 @@ ENTRY(_start)
 __hart_count = DEFINED(CONFIG_HART_COUNT) ? CONFIG_HART_COUNT : 4;
 __cpu_local_size = DEFINED(CONFIG_CPU_LOCAL_SIZE) ? CONFIG_CPU_LOCAL_SIZE : 0x1000;
 __stack_size = DEFINED(CONFIG_STACK_SIZE) ? CONFIG_STACK_SIZE : 0x10000;
+__rpc_stack_size = DEFINED(CONFIG_RPC_STACK_SIZE) ? CONFIG_RPC_STACK_SIZE : 0x1000;
+__trap_stack_size = DEFINED(CONFIG_TRAP_STACK_SIZE) ? CONFIG_TRAP_STACK_SIZE : 0x1000;
 __heap_size = DEFINED(CONFIG_HEAP_SIZE) ? CONFIG_HEAP_SIZE : 0x100000;
 __ram_base = DEFINED(CONFIG_RAM_BASE) ? CONFIG_RAM_BASE : 0x80000000;
 __ram_size = DEFINED(CONFIG_RAM_SIZE) ? CONFIG_RAM_SIZE : 0x04000000;
@@ -78,6 +80,20 @@ SECTIONS
         __stack_end = .;
     } > RAM
 
+    .rpc_stack ALIGN(64) (NOLOAD) :
+    {
+        __rpc_stack_start = .;
+        . += __hart_count * 2 * __rpc_stack_size;
+        __rpc_stack_end = .;
+    } > RAM
+
+    .trap_stack ALIGN(64) (NOLOAD) :
+    {
+        __trap_stack_start = .;
+        . += __hart_count * __trap_stack_size;
+        __trap_stack_end = .;
+    } > RAM
+
     .heap ALIGN(64) (NOLOAD) :
     {
         __heap_start = .;
@@ -114,6 +130,10 @@ SECTIONS
            "CPU_LOCAL_SIZE must be an 8-byte multiple")
     ASSERT((__stack_size % 16) == 0,
            "STACK_SIZE must be a 16-byte multiple")
+    ASSERT((__rpc_stack_size % 16) == 0,
+           "RPC_STACK_SIZE must be a 16-byte multiple")
+    ASSERT((__trap_stack_size % 16) == 0,
+           "TRAP_STACK_SIZE must be a 16-byte multiple")
     ASSERT((__heap_size % 16) == 0,
            "HEAP_SIZE must be a 16-byte multiple")
     ASSERT(SIZEOF(.data) == 0,

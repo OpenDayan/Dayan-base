@@ -6,7 +6,7 @@
 #include "errno.h"
 #include "sche.h"
 
-_Static_assert(sizeof(dayan_resource_t) == 16,
+_Static_assert(sizeof(dayan_resource_t) == 64,
                "dayan resource ABI must stay fixed");
 _Static_assert(sizeof(dayan_shared_resource_t) == 16,
                "dayan shared resource ABI must stay fixed");
@@ -33,8 +33,13 @@ static inline uintptr_t produce_pop(void)
 
 static int resource_lock(dayan_resource_t *resource)
 {
-    if (resource->lock)
-        return -EBUSY;
+    int status;
+
+    while (resource->lock) {
+        status = proc_wait_event(&resource->wait_lock);
+        if (status < 0)
+            return status;
+    }
     resource->lock = 1;
     return 0;
 }
@@ -42,6 +47,7 @@ static int resource_lock(dayan_resource_t *resource)
 static void resource_unlock(dayan_resource_t *resource)
 {
     resource->lock = 0;
+    (void)proc_event_wake_one(&resource->wait_lock);
 }
 
 static uint32_t resource_state(const dayan_resource_t *resource)
@@ -83,18 +89,6 @@ static int shared_resource_valid(
     return !(addr & (_Alignof(dayan_shared_resource_t) - 1));
 }
 
-static int resource_ready(struct proc *proc, void *arg)
-{
-    (void)proc;
-    return resource_state(arg) == DAYAN_RESOURCE_READY;
-}
-
-static int resource_free(struct proc *proc, void *arg)
-{
-    (void)proc;
-    return resource_state(arg) == DAYAN_RESOURCE_FREE;
-}
-
 static int shared_resource_ready(struct proc *proc, void *arg)
 {
     (void)proc;
@@ -115,25 +109,25 @@ void dayan_yield(void)
 void dayan_wait_lsu(void)
 {
     __asm__ volatile(".insn 4, 0x0000220b" ::: "memory");
-    proc_wait_external();
+    (void)proc_wait_event(0);
 }
 
 void dayan_wait_mat(void)
 {
     __asm__ volatile(".insn 4, 0x0000420b" ::: "memory");
-    proc_wait_external();
+    (void)proc_wait_event(0);
 }
 
 void dayan_wait_vec(void)
 {
     __asm__ volatile(".insn 4, 0x0000620b" ::: "memory");
-    proc_wait_external();
+    (void)proc_wait_event(0);
 }
 
 void dayan_wait_macro(void)
 {
     __asm__ volatile(".insn 4, 0x0000820b" ::: "memory");
-    proc_wait_external();
+    (void)proc_wait_event(0);
 }
 
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));
@@ -155,6 +149,9 @@ int dayan_resource_init(dayan_resource_t *resource)
     resource->producer_count = 0;
     resource->consumer_count = 0;
     resource->state = DAYAN_RESOURCE_FREE;
+    INIT_LIST_HEAD(&resource->wait_lock);
+    INIT_LIST_HEAD(&resource->wait_ready);
+    INIT_LIST_HEAD(&resource->wait_free);
     return 0;
 }
 
@@ -176,6 +173,8 @@ int dayan_resource_alloc(dayan_resource_t *resource,
         resource->consumer_count = consumer_count;
         resource->state = producer_count ? DAYAN_RESOURCE_BUSY :
                                            DAYAN_RESOURCE_READY;
+        if (!producer_count)
+            (void)proc_event_wake_all(&resource->wait_ready);
     }
     resource_unlock(resource);
     return status;
@@ -196,6 +195,7 @@ int dayan_resource_produce(dayan_resource_t *resource)
         status = -EBUSY;
     } else if (!--resource->producer_count) {
         resource->state = DAYAN_RESOURCE_READY;
+        (void)proc_event_wake_all(&resource->wait_ready);
     }
     resource_unlock(resource);
     return status;
@@ -216,6 +216,7 @@ int dayan_resource_consume(dayan_resource_t *resource)
         status = -EBUSY;
     } else if (!--resource->consumer_count) {
         resource->state = DAYAN_RESOURCE_FREE;
+        (void)proc_event_wake_all(&resource->wait_free);
     }
     resource_unlock(resource);
     return status;
@@ -228,7 +229,7 @@ int dayan_resource_wait_ready(dayan_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (resource_state(resource) != DAYAN_RESOURCE_READY) {
-        status = proc_wait_internal(resource_ready, resource);
+        status = proc_wait_event(&resource->wait_ready);
         if (status < 0)
             return status;
     }
@@ -242,7 +243,7 @@ int dayan_resource_wait_free(dayan_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (resource_state(resource) != DAYAN_RESOURCE_FREE) {
-        status = proc_wait_internal(resource_free, resource);
+        status = proc_wait_event(&resource->wait_free);
         if (status < 0)
             return status;
     }
@@ -350,7 +351,7 @@ int dayan_shared_resource_wait_ready(dayan_shared_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (shared_resource_state(resource) != DAYAN_RESOURCE_READY) {
-        status = proc_wait_internal(shared_resource_ready, resource);
+        status = proc_wait_poll(shared_resource_ready, resource);
         if (status < 0)
             return status;
     }
@@ -364,7 +365,7 @@ int dayan_shared_resource_wait_free(dayan_shared_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (shared_resource_state(resource) != DAYAN_RESOURCE_FREE) {
-        status = proc_wait_internal(shared_resource_free, resource);
+        status = proc_wait_poll(shared_resource_free, resource);
         if (status < 0)
             return status;
     }

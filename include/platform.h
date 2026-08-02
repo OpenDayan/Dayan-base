@@ -11,9 +11,12 @@ void platform_cache_init(void);
 void platform_cache_clean(const void *addr, size_t size);
 void platform_cache_invalidate(void *addr, size_t size);
 
-long platform_rpc(uint32_t service,
-                  const void *request, size_t request_size,
-                  void *response, size_t response_size);
+void platform_rpc_init(void);
+int platform_rpc_receive_pending(void);
+uint64_t platform_rpc_receive(void);
+void platform_rpc_receive_ack(void);
+int platform_rpc_send_ready(void);
+void platform_rpc_send(uint64_t command);
 
 void platform_idle(void);
 _Noreturn void platform_halt(void);

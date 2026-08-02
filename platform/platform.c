@@ -2,8 +2,37 @@
 #include <stdint.h>
 
 #include "config.h"
-#include "errno.h"
 #include "platform.h"
+#include "platform_regs.h"
+
+_Static_assert(CONFIG_HART_COUNT <= 32,
+               "RPC interrupt controller has only 32 lines");
+
+static volatile uint32_t *rpc_interrupt_reg(uintptr_t offset)
+{
+    return (volatile uint32_t *)((uintptr_t)CONFIG_CONTROL_BASE + offset);
+}
+
+static volatile uint64_t *rpc_mailbox(uintptr_t offset)
+{
+    uintptr_t hart = platform_hart_id();
+
+    return (volatile uint64_t *)((uintptr_t)CONFIG_CONTROL_BASE + offset +
+                                 hart * sizeof(uint64_t));
+}
+
+static volatile uint32_t *rpc_msip(void)
+{
+    uintptr_t hart = platform_hart_id();
+
+    return rpc_interrupt_reg(DAYAN_CLINT_MSIP_BASE +
+                             hart * sizeof(uint32_t));
+}
+
+static uint32_t rpc_interrupt_mask(void)
+{
+    return (uint32_t)1U << platform_hart_id();
+}
 
 void platform_init(void)
 {
@@ -74,18 +103,53 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
     __asm__ volatile("fence rw, rw" ::: "memory");
 }
 
-__attribute__((weak)) long platform_rpc(uint32_t service,
-                                        const void *request,
-                                        size_t request_size,
-                                        void *response,
-                                        size_t response_size)
+void platform_rpc_init(void)
 {
-    (void)service;
-    (void)request;
-    (void)request_size;
-    (void)response;
-    (void)response_size;
-    return -ENOSYS;
+    uint32_t mask = rpc_interrupt_mask();
+
+    *rpc_interrupt_reg(DAYAN_IRQ_STATUS_CLR) = mask;
+    *rpc_interrupt_reg(DAYAN_IRQ_ENABLE_SET) = mask;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+}
+
+int platform_rpc_receive_pending(void)
+{
+    return (*rpc_msip() & 1U) != 0;
+}
+
+uint64_t platform_rpc_receive(void)
+{
+    uint64_t command;
+
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    command = *rpc_mailbox(DAYAN_DEVICE_MAILBOX_BASE);
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    return command;
+}
+
+void platform_rpc_receive_ack(void)
+{
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    *rpc_msip() = 0;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+}
+
+int platform_rpc_send_ready(void)
+{
+    uint32_t status;
+
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    status = *rpc_interrupt_reg(DAYAN_IRQ_STATUS);
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    return !(status & rpc_interrupt_mask());
+}
+
+void platform_rpc_send(uint64_t command)
+{
+    *rpc_mailbox(DAYAN_IRQ_MAILBOX_BASE) = command;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    *rpc_interrupt_reg(DAYAN_IRQ_STATUS_SET) = rpc_interrupt_mask();
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
 }
 
 __attribute__((weak)) void platform_idle(void)

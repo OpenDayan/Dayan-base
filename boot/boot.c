@@ -5,6 +5,7 @@
 #include "config.h"
 #include "mem.h"
 #include "platform.h"
+#include "rpc.h"
 #include "sche.h"
 
 extern unsigned char __heap_start[];
@@ -17,5 +18,7 @@ void init(void)
     platform_init();
     sche_init();
     if (mem_init(heap, CONFIG_HEAP_SIZE) < 0)
+        platform_halt();
+    if (rpc_init() < 0)
         platform_halt();
 }

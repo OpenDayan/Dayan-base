@@ -34,6 +34,19 @@ _start:
     /* Scheduler/init owns no Host shared allocation. */
     mv      gp, zero
 
+    /* Synchronous exceptions use a per-hart stack; functional IRQs stay off. */
+    la      t0, __trap_stack_start
+    li      t1, CONFIG_TRAP_STACK_SIZE
+    addi    t2, a0, 1
+    mul     t1, t1, t2
+    add     t0, t0, t1
+    csrw    mscratch, t0
+    la      t0, trap_entry
+    csrw    mtvec, t0
+    csrw    mie, zero
+    li      t0, 0x8
+    csrc    mstatus, t0
+
     /* Enable and reset the single-precision floating-point context. */
     li      t0, 0x6000
     csrs    mstatus, t0

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "dayan_attrs.h"
+#include "dayan_list.h"
 
 /* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
 register void *shared __asm__("gp");
@@ -20,6 +21,9 @@ typedef struct dayan_resource {
     uint32_t producer_count;
     uint32_t consumer_count;
     volatile uint32_t lock;
+    struct list_head wait_lock;
+    struct list_head wait_ready;
+    struct list_head wait_free;
 } dayan_resource_t;
 
 /* Cross-hart resource. Place it within the allocation rooted at shared. */

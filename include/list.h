@@ -1,12 +1,8 @@
 #ifndef NPU_LIST_H
 #define NPU_LIST_H
 
+#include "api/dayan_list.h"
 #include "container_of.h"
-
-struct list_head {
-    struct list_head *next;
-    struct list_head *prev;
-};
 
 #define LIST_HEAD_INIT(name) { &(name), &(name) }
 #define LIST_HEAD(name) struct list_head name = LIST_HEAD_INIT(name)

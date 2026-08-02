@@ -7,7 +7,9 @@
 #include "config.h"
 #include "list.h"
 #include "rbtree.h"
+#include "rpc_internal.h"
 #include "thread.h"
+#include "trap.h"
 
 struct mem_state {
     struct rb_root free;
@@ -19,14 +21,17 @@ struct mem_state {
 struct sche_state {
     struct thread init;
     struct list_head ready;
-    struct list_head wait_internal_event;
-    struct list_head wait_external_event;
+    struct list_head wait_poll;
+    struct list_head wait_event;
+    size_t event_waiters;
     uint32_t next_id;
 };
 
 struct cpu {
     struct sche_state sche;
     struct mem_state mem;
+    struct rpc_state rpc;
+    struct trap_state trap;
 };
 
 _Static_assert(offsetof(struct cpu, sche) == 0,
