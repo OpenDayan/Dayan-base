@@ -81,6 +81,20 @@ int main(void)
                              &package, &package_size) < 0);
     assert(!package && !package_size);
     kernel.max_child_procs = 3;
+    kernel.stack_size = NPU_PACKAGE_PROC_MIN_STACK_SIZE - 1U;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) < 0);
+    assert(!package && !package_size);
+    kernel.stack_size = NPU_PACKAGE_PROC_STACK_SIZE + 1U;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) < 0);
+    assert(!package && !package_size);
+    kernel.stack_size = NPU_PACKAGE_PROC_STACK_SIZE;
+    kernel.printf_buffer_size = NPU_PACKAGE_PROC_PRINTF_SIZE + 1U;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) < 0);
+    assert(!package && !package_size);
+    kernel.printf_buffer_size = NPU_PACKAGE_PROC_PRINTF_SIZE;
     kernel.uram_size = NPU_PACKAGE_URAM_GRANULE + 1U;
     assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                              &package, &package_size) < 0);

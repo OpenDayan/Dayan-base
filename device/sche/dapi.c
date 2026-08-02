@@ -127,10 +127,28 @@ void dayan_yield(void)
 int dayan_create_proc(dayan_proc_entry_t entry, void *argument)
 {
     uint32_t proc_id;
+    int status;
 
     if (!entry)
         return -EINVAL;
-    return proc_create_child(proc_self(), (proc_fn)entry, argument, &proc_id);
+    status = proc_create_child(proc_self(), (proc_fn)entry, argument,
+                               &proc_id);
+    return status < 0 ? status : (int)proc_id;
+}
+
+int dayan_join(uint32_t proc_id, int64_t *result)
+{
+    return proc_join(proc_id, result);
+}
+
+int dayan_join_all(void)
+{
+    return proc_join_all();
+}
+
+DAYAN_NORETURN void dayan_proc_exit(int64_t result)
+{
+    proc_exit_status(result);
 }
 
 void *dayan_uram_base(void)
@@ -226,25 +244,25 @@ uint32_t dayan_task_mode(void)
 void dayan_wait_lsu(void)
 {
     __asm__ volatile(".insn 4, 0x0000220b" ::: "memory");
-    (void)proc_wait_event(0);
+    (void)proc_wait_produce();
 }
 
 void dayan_wait_mat(void)
 {
     __asm__ volatile(".insn 4, 0x0000420b" ::: "memory");
-    (void)proc_wait_event(0);
+    (void)proc_wait_produce();
 }
 
 void dayan_wait_vec(void)
 {
     __asm__ volatile(".insn 4, 0x0000620b" ::: "memory");
-    (void)proc_wait_event(0);
+    (void)proc_wait_produce();
 }
 
 void dayan_wait_macro(void)
 {
     __asm__ volatile(".insn 4, 0x0000820b" ::: "memory");
-    (void)proc_wait_event(0);
+    (void)proc_wait_produce();
 }
 
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));
@@ -254,7 +272,7 @@ void proc_scan_produce(void)
     uintptr_t token;
 
     while ((token = produce_pop()) != 0)
-        (void)proc_wake((struct proc *)token);
+        (void)proc_complete_produce((struct proc *)token);
 }
 
 int dayan_resource_init(dayan_resource_t *resource)

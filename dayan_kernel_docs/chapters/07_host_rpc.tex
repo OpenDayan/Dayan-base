@@ -4,7 +4,7 @@
 
 \section{Host RPC 服务}\label{sec:kernel-060}
 
-Dayan OS 主动请求的 opcode 1--5 必须由 Host 实现。Host 使用反方向的 RPC 发布新代码
+Dayan OS 主动请求的 opcode 1--6 必须由 Host 实现。Host 使用反方向的 RPC 发布新代码
 并启动 kernel；响应仍走 Device--Host mailbox。
 
 \subsection{服务列表}
@@ -16,18 +16,24 @@ Dayan OS 主动请求的 opcode 1--5 必须由 Host 实现。Host 使用反方�
   3 & \code{RPC_HEAP_ACQUIRE} & Device $\rightarrow$ Host & 为一个 hart 分配私有堆 region。 \\
   4 & \code{RPC_HEAP_RELEASE} & Device $\rightarrow$ Host & 归还此前分配的私有堆 region。 \\
   5 & \code{RPC_TRAP_REPORT} & Device $\rightarrow$ Host & 上报同步异常现场。 \\
+  6 & \code{RPC_PROC_EXIT} & Device $\rightarrow$ Host & 上报 Host root proc 的退出值。 \\
   \code{0x0100} & \code{RPC_PROC_CREATE} & Host $\rightarrow$ Device & 在目标 hart 创建 kernel proc。 \\
   \code{0x0101} & \code{RPC_ICACHE_FLUSH} & Host $\rightarrow$ Device & 在目标 hart 执行一次 \code{fence.i}。 \\
+  \code{0x0102} & \code{RPC_PROC_PS} & Host $\rightarrow$ Device & 同步目标 hart 的 proc 快照。 \\
+  \code{0x0103} & \code{RPC_PROC_KILL_ALL} & Host $\rightarrow$ Device & 终止目标 hart 的所有非系统 proc。 \\
   \code{0x8100} & \code{RPC_PROC_CREATE_RESPONSE} & Device $\rightarrow$ Host & 确认 create 请求已处理。 \\
   \code{0x8101} & \code{RPC_ICACHE_FLUSH_RESPONSE} & Device $\rightarrow$ Host & 确认本 hart 的 I-cache 刷新完成。 \\
+  \code{0x8102} & \code{RPC_PROC_PS_RESPONSE} & Device $\rightarrow$ Host & proc 快照完成。 \\
+  \code{0x8103} & \code{RPC_PROC_KILL_ALL_RESPONSE} & Device $\rightarrow$ Host & kill-all 请求完成。 \\
 \end{dayantable}
 
-Service 的 output 与 trap callback 分别接收 WRITE/CLEAR 和 TRAP REPORT。堆服务
-使用 HAL 的普通 Device RAM allocation，并按 Cluster、Core 和 hart owner 记录所有权。
+Service 的 output、trap 和 proc-exit callback 分别接收 WRITE/CLEAR、TRAP REPORT 和
+root 退出事件。堆服务使用 HAL 的普通 Device RAM allocation，并按 Cluster、Core 和
+hart owner 记录所有权。
 
 \subsection{通用 packet}
 
-WRITE、CLEAR、HEAP ACQUIRE 和 HEAP RELEASE 的 command argument 指向 40-byte
+WRITE、CLEAR、HEAP ACQUIRE、HEAP RELEASE 和 PROC EXIT 的 command argument 指向 40-byte
 \code{rpc_packet}：
 
 \begin{dayantable}{\code{rpc_packet}}{tab:kernel-061}{X[17,l] X[29,l] X[18,l] X[36,l]}
@@ -54,7 +60,8 @@ WRITE 和 CLEAR 的 request 都是 24-byte \code{rpc_print_request}：
   16 & \code{data_size} & \code{uint64_t} & WRITE 数据长度；CLEAR 为 0。 \\
 \end{dayantable}
 
-Host 按 Cluster/Core/proc 区分输出流。当前 Service 将单次 WRITE 限制为 1 MiB，并在读取前
+Host 按 Cluster/Core/Host-root-proc 区分输出流；子 proc 的独立 Device printf buffer
+也归并到所属 root ID，因而无需向 Host发布子 proc 生命周期。当前 Service 将单次 WRITE 限制为 1 MiB，并在读取前
 检查整个数据范围位于 Device RAM。Server 根据正在执行的 proc 将数据放入对应 Runtime
 Session 的队列；Runtime 在 Event 查询、等待或 Stream 同步后通过
 \code{NPU_IPC_OUTPUT_READ} 取回数据，并在应用线程调用 output callback。因此算子输出
@@ -93,14 +100,35 @@ Host 把 208-byte v3 \code{rpc_proc_create_request} 放在普通 Device RAM，�
   kernel resources & 184--207 & 最大子 proc 数、reserved、URAM base 和 size。 \\
 \end{dayantable}
 
-Dayan OS 校验描述符和地址范围，分配托管 proc/栈/输出缓冲，把状态改为
+Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot 池取得 root，把状态改为
 \code{RUNNING}，并返回 opcode \code{0x8100} 与同一描述符地址。该响应表示创建完成，
 不表示 kernel 已退出。scheduler cleanup 最后写入 \code{EXITED} 或 \code{FAILED}。
 
-stack size 范围为 1 KiB--16 MiB，printf buffer 不超过 1 MiB，参数数量不超过 8。
+stack size 范围为 1--64 KiB，printf buffer 不超过 4 KiB，参数数量不超过 8。
+root 与最多 15 个子 proc 共用 16 个算子 slot；init 与 RPC proc 不计入。
 shared 区域为空时 base/size 同时为 0；非空时必须位于 coherent window 且 16-byte 对齐。
 URAM 区域为空时 base/size 同时为 0；非空时必须落在请求来源 hart 的 URAM window，
-base 和 size 都按 1 KiB 对齐。最大子 proc 数当前不超过 64。
+base 和 size 都按 1 KiB 对齐。最大子 proc 数当前不超过 15。
+
+\subsection{退出通知与管理 RPC}
+
+每个 proc 退出都会先尝试 WRITE 剩余输出并发送 CLEAR。只有
+\code{RPC_PROC_CREATE} 创建的 root 再发送 opcode 6；40-byte
+\code{rpc_proc_exit_request} 含 version/size、hart/proc ID、必须为 0 的 parent ID、
+root flag、\code{int64_t result} 和 launch cookie。Service 的 proc-exit callback 用
+Cluster/Core/proc/cookie 定位 Host 资源。子 proc 的创建和退出完全在 Device family
+内完成，不发送该 RPC。
+
+\code{RPC_PROC_PS} 的参数指向 1488-byte v1 快照。48-byte header 含 hart、record 数、
+全局空闲 slot、reserved slot 和 status，后接最多 18 条 80-byte record：两个系统 RPC
+proc 加最多 16 个算子 proc。record 包含 proc/parent ID、thread state、root/child/zombie/
+kill-wait flags、直属子计数、slot、Host root ID、logical task、返回值、PC 和 cookie。Host Service 通过
+\code{npu_service_rpc_ps(device,target,...)} 显式指定 Cluster/Core。
+
+\code{RPC_PROC_KILL_ALL} 使用 48-byte v1 result，返回 killed root/child 数、已经释放的
+slot 数和仍处于 Produce 延迟回收的数量。系统 proc 永不被终止；每个被终止 root 以
+\code{-ECANCELED} 完成 Host 描述符并发送一次 root exit callback。Service 对应接口为
+\code{npu_service_rpc_kill_all(device,target,...)}。
 
 \subsection{发布新代码}
 

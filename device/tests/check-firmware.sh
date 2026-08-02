@@ -18,6 +18,9 @@ harts=${HARTS:-4}
 stack_size=${STACK_SIZE:-0x10000}
 rpc_stack_size=${RPC_STACK_SIZE:-0x1000}
 trap_stack_size=${TRAP_STACK_SIZE:-0x1000}
+proc_slot_count=${PROC_SLOT_COUNT:-16}
+proc_stack_size=${PROC_STACK_SIZE:-0x10000}
+proc_printf_size=${PROC_PRINTF_SIZE:-0x1000}
 
 fail()
 {
@@ -93,9 +96,14 @@ grep -Eq 'frcsr[[:space:]]+t0' <<<"$trap_dump" ||
     fail "trap entry does not save fcsr"
 
 stack_sections=$($readelf --sections --wide "$elf" | \
-    grep -Ec '\.(stack|rpc_stack|trap_stack)[[:space:]]+NOBITS')
-[ "$stack_sections" -eq 3 ] ||
+    grep -Ec '\.(stack|rpc_stack|trap_stack|proc_stack)[[:space:]]+NOBITS')
+[ "$stack_sections" -eq 4 ] ||
     fail "per-hart stacks must be NOBITS sections"
+for section in proc_slots proc_printf; do
+    $readelf --sections --wide "$elf" | \
+        grep -Eq "\\.${section}[[:space:]]+NOBITS" ||
+        fail ".${section} must be a NOBITS section"
+done
 
 symbol_address()
 {
@@ -109,9 +117,17 @@ rpc_start=$(symbol_address __rpc_stack_start)
 rpc_end=$(symbol_address __rpc_stack_end)
 trap_start=$(symbol_address __trap_stack_start)
 trap_end=$(symbol_address __trap_stack_end)
+proc_stack_start=$(symbol_address __proc_stack_start)
+proc_stack_end=$(symbol_address __proc_stack_end)
+proc_printf_start=$(symbol_address __proc_printf_start)
+proc_printf_end=$(symbol_address __proc_printf_end)
 [ $((stack_end - stack_start)) -eq $((harts * stack_size)) ] &&
     [ $((rpc_end - rpc_start)) -eq $((harts * 2 * rpc_stack_size)) ] &&
-    [ $((trap_end - trap_start)) -eq $((harts * trap_stack_size)) ] ||
+    [ $((trap_end - trap_start)) -eq $((harts * trap_stack_size)) ] &&
+    [ $((proc_stack_end - proc_stack_start)) -eq \
+        $((harts * proc_slot_count * proc_stack_size)) ] &&
+    [ $((proc_printf_end - proc_printf_start)) -eq \
+        $((harts * proc_slot_count * proc_printf_size)) ] ||
     fail "linked per-hart stack reservation has the wrong size"
 
 dapi_raw=$($objdump --disassemble "$build/sche/dapi.o")

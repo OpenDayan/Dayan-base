@@ -246,8 +246,8 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
-有符号 status。当前 opcode 1–5 分别为字符串输出、清空输出缓冲、申请堆 region、
-归还堆 region 和异常报告。前四类使用 packet；异常报告的低 48 位参数直接指向一份
+有符号 status。当前 opcode 1–6 分别为字符串输出、清空输出缓冲、申请堆 region、
+归还堆 region、异常报告和 root proc 退出通知。除异常报告外均使用 packet；异常报告的低 48 位参数直接指向一份
 稳定的 320-byte `struct trap_record`。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
@@ -258,10 +258,17 @@ Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Devi
 0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 proc 数、URAM
 base/size 以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
-回复 opcode `0x8100`。算子
-退出后，scheduler 已回到自己的栈，才调用 cleanup 释放 proc 私有资源，并把描述符从
-`RUNNING` 更新为 `EXITED` 或 `FAILED`。因此 Host 必须保留描述符直到终态，不能只把
-create response 当作算子执行完成。
+回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_procs` 个静态 slot；
+子孙创建、退出与 join 不再经过 Host。每个 proc 退出都 flush/CLEAR 自己的输出；只有
+Host root 通过 40-byte `RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。随后
+scheduler 在自己的栈上调用 cleanup，把描述符从 `RUNNING` 更新为 `EXITED` 或
+`FAILED`。因此 Host 必须保留描述符直到终态，不能只把 create response 当作执行完成。
+
+Host 管理目标 Hart 使用 `RPC_PROC_PS` (`0x0102`) 和 `RPC_PROC_KILL_ALL` (`0x0103`)，
+响应分别为 `0x8102`、`0x8103`。PS 固定返回两个系统 RPC proc 和至多 16 个算子 proc
+的状态、父 ID、直属子计数、logical task、返回值与 cookie。kill-all 保留 init/RPC
+proc，摘除其它 proc 的 ready/poll/event/system-wait 节点；非 Produce slot 立即释放，
+等待 Produce 的 slot 进入 `THREAD_KILL_WAIT_PRODUCE`，收到硬件 token 后才释放。
 
 Host 更新算子 text 后使用独立的 `RPC_ICACHE_FLUSH` (`0x0101`) 发布代码，并等待
 `0x8101` 响应。`fence.i` 只作用于当前 hart，因此模块 loader 会在发布 entry 前逐个
@@ -312,10 +319,15 @@ scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队
 链表，scheduler 不遍历它；事件所有者调用 `proc_event_wake_one/all()` 或
 `proc_wake()` 将等待者移回 ready queue。传入空指针会使用 scheduler 的默认外部事件
 链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。普通 proc 仍由
-所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留子 proc slot。
+所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留 `1 + max_children`
+个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init 和两个 RPC
+proc 不计入，因此单个 kernel 最多声明 15 个子 proc。
 `dayan_create_proc()` 创建的子 proc 保持在同一 hart，继承 logical task、`gp/shared`
-与 URAM；父 proc 退出前等待自己的子 proc，因此 root 进入终态时整棵子树已经完成。
-托管 cleanup 在退出后回收 proc、栈和输出缓冲。当前没有抢占或跨 hart 迁移。
+与 URAM，并返回正的 proc ID。`dayan_join(id, &result)` 精确等待直属子 proc，
+`dayan_join_all()` 等待全部直属子 proc；每个 proc 退出前都会隐式 join-all，因此 root
+进入终态时整棵子树已经完成。`dayan_proc_exit(result)` 可显式设置 64-bit 返回值。
+托管 cleanup 在退出后把 slot 归还静态池；slot 的 64 KiB 栈和 4 KiB 输出缓冲在
+固件链接时已经按 Hart 预留，不走运行时堆分配。当前没有抢占或跨 hart 迁移。
 
 ## 算子 API 与同步
 
@@ -387,8 +399,9 @@ section。
 `fabsf/copysignf/fminf/fmaxf/sqrtf/rsqrtf/expf/logf`。浮点格式化暂未实现，
 `printf/puts/putchar` 共享当前 proc 在创建时配置的有限缓冲区；缓冲恰好填满时自动通过
 RPC 发送，未填满的内容跨调用保留，直到 `fflush(stdout)` 或 `fflush(NULL)`。RPC
-失败时普通 flush 会保留缓冲内容以便重试。proc 退出时会做一次 best-effort flush；若
-要求确认尾部输出已经送达，仍应在返回前显式调用并检查 `fflush`。
+失败时普通 flush 会保留缓冲内容以便重试。proc 退出时会做一次 best-effort flush，
+随后发送 CLEAR 清理该 kernel root 的 Host 输出流；若要求确认尾部输出已经送达，仍应
+在返回前显式调用并检查 `fflush`。
 
 ## Host 用户态驱动
 
@@ -408,7 +421,8 @@ Device 算子通过 `dayan_task_id/dim/mode()` 获取逻辑坐标，不感知物
 每个 `__kernel__` 旁必须定义
 `DAYAN_KERNEL_DESC(kernel, max_children, atomic_bytes, uram_bytes)`。dycc 在 Device
 object 中保留 `<kernel>__desc`，并把相同资源值写入 Package。Server 对同一 Core 上
-所有 resident kernel 的子 proc、atomic cache 和 URAM 声明求和后再调度。
+所有 resident kernel 的 proc slot、atomic cache 和 URAM 声明求和后再调度。每个
+invocation 占用 `1 + max_children` 个 slot，同一 Hart 的总和不得超过 16。
 
 Runtime 与 Server 使用 Unix socket 控制协议。H2D/D2H payload 不进入 socket：Runtime
 先在 data socket 申请受范围和方向约束的 token，再用 HELLO 时经 `SCM_RIGHTS` 导入的

@@ -159,6 +159,11 @@ int main(void)
                     directory) > 0);
 
     dayan_server_options_init(&server_options);
+    assert(server_options.max_procs_per_hart == NPU_PACKAGE_HART_MAX_PROCS);
+    server_options.max_procs_per_hart = NPU_PACKAGE_HART_MAX_PROCS + 1U;
+    assert(dayan_server_create(&server, &server_options) == -EINVAL);
+    assert(!server);
+    server_options.max_procs_per_hart = NPU_PACKAGE_HART_MAX_PROCS - 1U;
     server_options.socket_path = socket_path;
     server_options.hal.device_prefix = directory;
     server_options.hal.memory_regions = regions;
@@ -291,6 +296,25 @@ int main(void)
         kernel.entry_symbol = "resource_kernel";
         kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
         kernel.max_tasks_per_core = 1;
+        kernel.max_child_procs = NPU_PACKAGE_MAX_CHILD_PROCS;
+        assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                                 &package, &package_size) == 0);
+        assert(npu_module_load(context, package, package_size, &module) == 0);
+        assert(npu_module_get_kernel(module, "resource_kernel",
+                                     &resource_kernel) == 0);
+        npu_launch_desc_init(&launch);
+        assert(npu_kernel_launch(stream, resource_kernel, &launch,
+                                 &unexpected) == -ENOSPC);
+        assert(!unexpected);
+        assert(npu_kernel_release(resource_kernel) == 0);
+        assert(npu_module_unload(module) == 0);
+        npu_package_free(package);
+
+        resource_kernel = 0;
+        module = 0;
+        package = 0;
+        package_size = 0;
+        kernel.max_child_procs = 0;
         kernel.uram_size = 1024;
         assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                                  &package, &package_size) == 0);

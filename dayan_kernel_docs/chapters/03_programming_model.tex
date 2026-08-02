@@ -87,7 +87,8 @@ Device module 则按 Context 缓存。首次调用通过
 dycc 在 Device object 中保留外部 C 符号 \code{<kernel>\_\_desc}，并把相同常量写入
 Host Package。三个资源值分别表示一个实例允许同时存活的子 proc 上限、由
 \code{shared/gp} 寻址的 atomic-cache allocation 和本 Core 私有 URAM；URAM 大小
-必须是 1 KiB 的整数倍。
+必须是 1 KiB 的整数倍。子 proc 上限为 15；root 也占一个 proc slot，Runtime 保证
+同一 Hart 上所有 resident invocation 的 \code{1 + child\_procs} 总和不超过 16。
 
 \subsection{启动 kernel}\label{sec:kernel-023}
 

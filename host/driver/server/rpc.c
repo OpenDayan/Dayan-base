@@ -269,6 +269,42 @@ static int service_trap(npu_service_device_t *device, npu_hal_core_t core,
     return 0;
 }
 
+static int service_proc_exit(npu_service_device_t *device,
+                             npu_hal_core_t core, uint64_t argument)
+{
+    struct rpc_proc_exit_request request;
+    struct rpc_packet packet;
+    int status;
+
+    status = read_packet(device, core, argument, &packet);
+    if (status < 0)
+        return status;
+    if (!packet_layout_valid(device, core, &packet, sizeof(request), 0)) {
+        status = -EPROTO;
+        goto finish;
+    }
+    status = copy_from_device(device, core, &request, packet.request_addr,
+                              sizeof(request));
+    if (status < 0)
+        goto finish;
+    if (request.version != RPC_PROC_EXIT_VERSION ||
+        request.size != sizeof(request) || request.hart_id != core.core ||
+        !request.proc_id || request.parent_proc_id ||
+        request.flags != RPC_PROC_EXIT_ROOT) {
+        status = -EPROTO;
+        goto finish;
+    }
+    device->options.proc_exit(device->options.callback_context,
+                              core.cluster, core.core, request.proc_id,
+                              request.result, request.cookie);
+    status = 0;
+
+finish:
+    if (finish_packet(device, core, argument, status) < 0 && status == 0)
+        status = -EIO;
+    return status;
+}
+
 int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
                      uint64_t command)
 {
@@ -287,6 +323,8 @@ int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
         return service_heap_release(device, core, argument);
     case RPC_TRAP_REPORT:
         return service_trap(device, core, argument);
+    case RPC_PROC_EXIT:
+        return service_proc_exit(device, core, argument);
     default:
         return -ENOSYS;
     }

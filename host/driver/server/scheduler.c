@@ -179,23 +179,12 @@ void server_cancel_context_locked(dayan_server_t *server,
 
 static uint64_t launch_resident_size(const npu_package_kernel_t *metadata)
 {
-    uint64_t stack = metadata->stack_size ? metadata->stack_size :
-                                             SERVER_DEFAULT_STACK_SIZE;
-    uint64_t printf_size = metadata->printf_buffer_size ?
-        metadata->printf_buffer_size : SERVER_DEFAULT_PRINTF_SIZE;
-    uint64_t proc_count = (uint64_t)metadata->max_child_procs + 1U;
-    uint64_t per_proc;
-    uint64_t proc_memory;
+    return metadata->resident_memory;
+}
 
-    if (printf_size > UINT64_MAX - stack)
-        return UINT64_MAX;
-    per_proc = stack + printf_size;
-    if (per_proc && proc_count > UINT64_MAX / per_proc)
-        return UINT64_MAX;
-    proc_memory = per_proc * proc_count;
-    if (metadata->resident_memory > UINT64_MAX - proc_memory)
-        return UINT64_MAX;
-    return metadata->resident_memory + proc_memory;
+static uint32_t launch_reserved_procs(const npu_package_kernel_t *metadata)
+{
+    return metadata->max_child_procs + 1U;
 }
 
 static int slot_accepts(const dayan_server_t *server,
@@ -207,6 +196,7 @@ static int slot_accepts(const dayan_server_t *server,
     const npu_package_kernel_t *metadata = kernel->metadata;
     uint64_t resident = launch_resident_size(metadata);
     uint64_t atomic_cache = 0;
+    uint32_t procs = launch_reserved_procs(metadata);
     size_t index;
 
     if (calculate_shared_size(command, &atomic_cache) < 0)
@@ -220,9 +210,8 @@ static int slot_accepts(const dayan_server_t *server,
          resident > server->options.resident_limit_per_core -
                         slot->resident_memory))
         return 0;
-    if (slot->child_procs > server->options.max_child_procs_per_core ||
-        metadata->max_child_procs >
-            server->options.max_child_procs_per_core - slot->child_procs)
+    if (slot->reserved_procs > server->options.max_procs_per_hart ||
+        procs > server->options.max_procs_per_hart - slot->reserved_procs)
         return 0;
     if (slot->atomic_cache_memory > slot->atomic_cache_capacity ||
         atomic_cache > slot->atomic_cache_capacity -
@@ -316,8 +305,8 @@ static void reserve_slots_locked(dayan_server_t *server,
     for (index = 0; index < count; ++index) {
         ++server->slots[slots[index]].active_tasks;
         server->slots[slots[index]].resident_memory += resident;
-        server->slots[slots[index]].child_procs +=
-            metadata->max_child_procs;
+        server->slots[slots[index]].reserved_procs +=
+            launch_reserved_procs(metadata);
         server->slots[slots[index]].atomic_cache_memory += atomic_cache;
         server->slots[slots[index]].uram_memory += metadata->uram_size;
         ++command->data.launch.kernel->active_per_core[slots[index]];
@@ -342,10 +331,10 @@ static void release_slot_locked(dayan_server_t *server,
         slot->resident_memory -= resident;
     else
         slot->resident_memory = 0;
-    if (slot->child_procs >= metadata->max_child_procs)
-        slot->child_procs -= metadata->max_child_procs;
+    if (slot->reserved_procs >= launch_reserved_procs(metadata))
+        slot->reserved_procs -= launch_reserved_procs(metadata);
     else
-        slot->child_procs = 0;
+        slot->reserved_procs = 0;
     if (slot->atomic_cache_memory >= atomic_cache)
         slot->atomic_cache_memory -= atomic_cache;
     else
@@ -402,8 +391,8 @@ static int empty_slot_accepts(const dayan_server_t *server,
     if (!slot->enabled ||
         (server->options.resident_limit_per_core &&
          resident > server->options.resident_limit_per_core) ||
-        metadata->max_child_procs >
-            server->options.max_child_procs_per_core ||
+        launch_reserved_procs(metadata) >
+            server->options.max_procs_per_hart ||
         atomic_cache > slot->atomic_cache_capacity ||
         metadata->uram_size > slot->uram_capacity)
         return 0;
@@ -1101,7 +1090,7 @@ static int poll_invocation(dayan_server_t *server,
 {
     npu_service_launch_info_t info;
     int terminal = 0;
-    int completion = 0;
+    int64_t completion = 0;
     int status;
 
     memset(&info, 0, sizeof(info));
@@ -1111,8 +1100,7 @@ static int poll_invocation(dayan_server_t *server,
         (info.state == NPU_SERVICE_LAUNCH_EXITED ||
          info.state == NPU_SERVICE_LAUNCH_FAILED)) {
         terminal = 1;
-        completion = info.status < INT32_MIN || info.status > INT32_MAX ?
-            -EIO : (int)info.status;
+        completion = info.status;
         status = npu_service_launch_release(invocation->launch);
         if (status < 0)
             completion = status;

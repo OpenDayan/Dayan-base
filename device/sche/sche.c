@@ -11,26 +11,72 @@
 #include "rpc.h"
 #include "sche.h"
 #include "stdlib.h"
+#include "string.h"
 
 extern void proc_bootstrap(void);
 
-struct proc_slot {
-    struct proc proc;
-    struct proc_slot *all_next;
-    struct proc_slot *free_next;
-    void *stack;
-    void *printf_buffer;
-};
-
 struct proc_family {
     struct proc *root;
+    struct proc *owner;
+    struct cpu *cpu;
     struct proc_slot *slots;
     struct proc_slot *free_slots;
+    struct proc_family *free_next;
     uint32_t max_child_procs;
     uint32_t active_child_procs;
+    uint32_t reserved_proc_slots;
+    uint32_t killed;
+    uint32_t pending_produce;
     size_t child_stack_size;
     size_t child_printf_size;
 };
+
+struct proc_slot {
+    struct proc proc;
+    struct proc_slot *free_next;
+    struct proc_slot *family_next;
+    struct proc_family *family_owner;
+    struct cpu *cpu;
+    size_t stack_size;
+    size_t printf_size;
+    void *stack;
+    void *printf_buffer;
+    uint32_t state;
+};
+
+enum proc_slot_state {
+    PROC_SLOT_GLOBAL_FREE = 0,
+    PROC_SLOT_ROOT = 1,
+    PROC_SLOT_FAMILY_FREE = 2,
+    PROC_SLOT_CHILD = 3,
+    PROC_SLOT_ZOMBIE = 4,
+    PROC_SLOT_KILL_WAIT_PRODUCE = 5,
+    PROC_SLOT_KILLED = 6,
+};
+
+static struct proc_slot
+    hart_proc_slots[CONFIG_HART_COUNT][CONFIG_PROC_SLOT_COUNT]
+    __attribute__((section(".proc_slots"), aligned(64)));
+static struct proc_family
+    hart_proc_families[CONFIG_HART_COUNT][CONFIG_PROC_SLOT_COUNT]
+    __attribute__((section(".proc_slots"), aligned(64)));
+static unsigned char
+    hart_proc_stacks[CONFIG_HART_COUNT][CONFIG_PROC_SLOT_COUNT]
+                    [CONFIG_PROC_STACK_SIZE]
+    __attribute__((section(".proc_stack"), aligned(64)));
+static unsigned char
+    hart_proc_printf[CONFIG_HART_COUNT][CONFIG_PROC_SLOT_COUNT]
+                    [CONFIG_PROC_PRINTF_SIZE]
+    __attribute__((section(".proc_printf"), aligned(64)));
+
+_Static_assert(CONFIG_PROC_SLOT_COUNT == DAYAN_HART_MAX_PROCS,
+               "Device and public proc-slot counts must match");
+_Static_assert(CONFIG_PROC_SLOT_COUNT == RPC_PROC_SLOTS_PER_HART,
+               "Device and RPC proc-slot counts must match");
+_Static_assert(CONFIG_PROC_STACK_SIZE == RPC_PROC_MAX_STACK_SIZE,
+               "static proc stack capacity must match RPC validation");
+_Static_assert(CONFIG_PROC_PRINTF_SIZE == RPC_PROC_MAX_PRINTF_SIZE,
+               "static proc printf capacity must match RPC validation");
 
 struct proc *proc_self(void)
 {
@@ -53,6 +99,11 @@ void sche_init(void)
 {
     struct thread *init = current;
     struct sche_state *sche = &init->cpu->sche;
+    uintptr_t hart = platform_hart_id();
+    uint32_t index;
+
+    if (hart >= CONFIG_HART_COUNT)
+        platform_halt();
 
     init->id = 0;
     init->state = THREAD_RUNNING;
@@ -63,6 +114,117 @@ void sche_init(void)
     INIT_LIST_HEAD(&sche->wait_event);
     sche->event_waiters = 0;
     sche->next_id = 1;
+    sche->free_proc_slots = 0;
+    sche->free_proc_slot_count = 0;
+    sche->reserved_proc_slot_count = 0;
+    sche->free_proc_families = 0;
+    sche->free_proc_family_count = 0;
+    for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
+        struct proc_slot *slot = &hart_proc_slots[hart][index];
+        struct proc_family *family = &hart_proc_families[hart][index];
+
+        memset(slot, 0, sizeof(*slot));
+        slot->cpu = init->cpu;
+        slot->stack = hart_proc_stacks[hart][index];
+        slot->printf_buffer = hart_proc_printf[hart][index];
+        slot->free_next = sche->free_proc_slots;
+        sche->free_proc_slots = slot;
+        ++sche->free_proc_slot_count;
+        memset(family, 0, sizeof(*family));
+        family->free_next = sche->free_proc_families;
+        sche->free_proc_families = family;
+        ++sche->free_proc_family_count;
+    }
+}
+
+static struct proc_slot *global_slot_pop(struct cpu *cpu)
+{
+    struct sche_state *sche = &cpu->sche;
+    struct proc_slot *slot = sche->free_proc_slots;
+
+    if (!slot)
+        return 0;
+    if (!sche->free_proc_slot_count || slot->state != PROC_SLOT_GLOBAL_FREE ||
+        slot->family_owner || slot->cpu != cpu)
+        platform_halt();
+    sche->free_proc_slots = slot->free_next;
+    --sche->free_proc_slot_count;
+    slot->free_next = 0;
+    return slot;
+}
+
+static void global_slot_push(struct proc_slot *slot)
+{
+    struct sche_state *sche;
+
+    if (!slot || !slot->cpu || slot->cpu != cpu_self() ||
+        slot->state != PROC_SLOT_GLOBAL_FREE || slot->family_owner ||
+        slot->family_next)
+        platform_halt();
+    sche = &slot->cpu->sche;
+    if (sche->free_proc_slot_count >= CONFIG_PROC_SLOT_COUNT)
+        platform_halt();
+    slot->free_next = sche->free_proc_slots;
+    sche->free_proc_slots = slot;
+    ++sche->free_proc_slot_count;
+}
+
+int proc_slot_acquire(size_t stack_size, size_t printf_size,
+                      struct proc **proc_out)
+{
+    struct cpu *cpu = cpu_self();
+    struct proc_slot *slot;
+
+    if (!proc_out || stack_size < sizeof(struct proc_frame) ||
+        stack_size > CONFIG_PROC_STACK_SIZE ||
+        printf_size > CONFIG_PROC_PRINTF_SIZE)
+        return -EINVAL;
+    *proc_out = 0;
+    slot = global_slot_pop(cpu);
+    if (!slot)
+        return -ENOMEM;
+    memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->stack_size = stack_size;
+    slot->printf_size = printf_size;
+    slot->state = PROC_SLOT_ROOT;
+    *proc_out = &slot->proc;
+    return 0;
+}
+
+int proc_slot_init_args(struct proc *proc, proc_fn entry, void *shared_base,
+                        size_t argc, const uintptr_t *args)
+{
+    struct proc_slot *slot;
+
+    if (!proc)
+        return -EINVAL;
+    slot = container_of(proc, struct proc_slot, proc);
+    if ((slot->state != PROC_SLOT_ROOT &&
+         slot->state != PROC_SLOT_CHILD) ||
+        slot->cpu != cpu_self())
+        return -EPERM;
+    return proc_init_args(proc, entry, slot->stack, slot->stack_size,
+                          shared_base,
+                          slot->printf_size ? slot->printf_buffer : 0,
+                          slot->printf_size, argc, args);
+}
+
+void proc_slot_release(struct proc *proc)
+{
+    struct proc_slot *slot;
+
+    if (!proc)
+        platform_halt();
+    slot = container_of(proc, struct proc_slot, proc);
+    if (slot->state != PROC_SLOT_ROOT || !slot->cpu ||
+        slot->cpu != cpu_self() || slot->family_owner || proc->family ||
+        proc->live_children)
+        platform_halt();
+    memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->stack_size = 0;
+    slot->printf_size = 0;
+    slot->state = PROC_SLOT_GLOBAL_FREE;
+    global_slot_push(slot);
 }
 
 int thread_init(struct thread *thread, uint32_t type)
@@ -72,7 +234,7 @@ int thread_init(struct thread *thread, uint32_t type)
 
     if (!thread || type == THREAD_TYPE_BASE)
         return -EINVAL;
-    if (!sche->next_id)
+    if (!sche->next_id || sche->next_id > INT32_MAX)
         return -EOVERFLOW;
 
     thread->id = sche->next_id++;
@@ -132,6 +294,7 @@ int proc_init_args(struct proc *proc, proc_fn entry,
     proc->printf_size = 0;
     proc->cleanup = 0;
     proc->cleanup_arg = 0;
+    proc->system_wait = 0;
     proc->exit_status = 0;
     proc->task_id[0] = 0;
     proc->task_id[1] = 0;
@@ -141,9 +304,14 @@ int proc_init_args(struct proc *proc, proc_fn entry,
     proc->task_dim[2] = 1;
     proc->task_mode = 1;
     proc->parent = 0;
+    proc->parent_id = 0;
     proc->family = 0;
     INIT_LIST_HEAD(&proc->wait_children);
     proc->live_children = 0;
+    proc->join_kind = 0;
+    proc->join_proc_id = 0;
+    proc->host_proc_id = 0;
+    proc->cookie = 0;
     proc->shared_base = shared_base;
     proc->shared_size = 0;
     proc->uram_base = 0;
@@ -224,67 +392,121 @@ int proc_set_task(struct proc *proc, const uint32_t task_id[3],
     return 0;
 }
 
-int proc_family_create(uint32_t max_child_procs, size_t child_stack_size,
+int proc_family_create(struct proc *owner, uint32_t max_child_procs,
+                       size_t child_stack_size,
                        size_t child_printf_size,
                        struct proc_family **family_out)
 {
+    struct proc_slot *root_slot;
     struct proc_family *family;
-    uint32_t index;
+    struct sche_state *sche;
+    uint32_t child_index;
+    uint32_t reservation;
 
-    if (!family_out || max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
-        child_stack_size < sizeof(struct proc_frame))
+    if (!owner || !family_out ||
+        max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
+        child_stack_size < sizeof(struct proc_frame) ||
+        child_stack_size > CONFIG_PROC_STACK_SIZE ||
+        child_printf_size > CONFIG_PROC_PRINTF_SIZE)
         return -EINVAL;
     *family_out = 0;
-    family = calloc(1, sizeof(*family));
-    if (!family)
+    root_slot = container_of(owner, struct proc_slot, proc);
+    if (root_slot->state != PROC_SLOT_ROOT || root_slot->family_owner ||
+        root_slot->cpu != cpu_self())
+        return -EPERM;
+    sche = &root_slot->cpu->sche;
+    reservation = max_child_procs + 1U;
+    if (sche->free_proc_slot_count < max_child_procs ||
+        !sche->free_proc_families || !sche->free_proc_family_count ||
+        sche->reserved_proc_slot_count > CONFIG_PROC_SLOT_COUNT ||
+        reservation > CONFIG_PROC_SLOT_COUNT -
+                          sche->reserved_proc_slot_count)
         return -ENOMEM;
+    family = sche->free_proc_families;
+    sche->free_proc_families = family->free_next;
+    --sche->free_proc_family_count;
+    memset(family, 0, sizeof(*family));
+    sche->reserved_proc_slot_count += reservation;
+    family->owner = owner;
+    family->cpu = root_slot->cpu;
     family->max_child_procs = max_child_procs;
+    family->reserved_proc_slots = reservation;
     family->child_stack_size = child_stack_size;
     family->child_printf_size = child_printf_size;
-    for (index = 0; index < max_child_procs; ++index) {
-        struct proc_slot *slot = calloc(1, sizeof(*slot));
+    root_slot->family_owner = family;
+    for (child_index = 0; child_index < max_child_procs; ++child_index) {
+        struct proc_slot *child_slot = global_slot_pop(root_slot->cpu);
 
-        if (slot)
-            slot->stack = malloc(child_stack_size);
-        if (slot && child_printf_size)
-            slot->printf_buffer = malloc(child_printf_size);
-        if (!slot || !slot->stack ||
-            (child_printf_size && !slot->printf_buffer)) {
-            if (slot) {
-                free(slot->printf_buffer);
-                free(slot->stack);
-                free(slot);
-            }
-            proc_family_destroy(family);
-            return -ENOMEM;
-        }
-        slot->all_next = family->slots;
-        family->slots = slot;
-        slot->free_next = family->free_slots;
-        family->free_slots = slot;
+        if (!child_slot)
+            platform_halt();
+        child_slot->family_owner = family;
+        child_slot->family_next = family->slots;
+        family->slots = child_slot;
+        child_slot->free_next = family->free_slots;
+        family->free_slots = child_slot;
+        child_slot->stack_size = child_stack_size;
+        child_slot->printf_size = child_printf_size;
+        child_slot->state = PROC_SLOT_FAMILY_FREE;
     }
     *family_out = family;
     return 0;
 }
 
+static void proc_family_return(struct proc_family *family)
+{
+    struct sche_state *sche;
+    struct proc_slot *slot;
+
+    if (family->active_child_procs || !family->cpu ||
+        family->cpu != cpu_self() ||
+        family->pending_produce)
+        platform_halt();
+    sche = &family->cpu->sche;
+    if (sche->reserved_proc_slot_count < family->reserved_proc_slots)
+        platform_halt();
+    for (slot = family->slots; slot;) {
+        struct proc_slot *next = slot->family_next;
+
+        if (slot->state != PROC_SLOT_FAMILY_FREE ||
+            slot->family_owner != family)
+            platform_halt();
+        memset(&slot->proc, 0, sizeof(slot->proc));
+        slot->family_owner = 0;
+        slot->family_next = 0;
+        slot->free_next = 0;
+        slot->stack_size = 0;
+        slot->printf_size = 0;
+        slot->state = PROC_SLOT_GLOBAL_FREE;
+        global_slot_push(slot);
+        slot = next;
+    }
+    sche->reserved_proc_slot_count -= family->reserved_proc_slots;
+    memset(family, 0, sizeof(*family));
+    family->free_next = sche->free_proc_families;
+    sche->free_proc_families = family;
+    if (sche->free_proc_family_count >= CONFIG_PROC_SLOT_COUNT)
+        platform_halt();
+    ++sche->free_proc_family_count;
+}
+
 void proc_family_destroy(struct proc_family *family)
 {
-    struct proc_slot *slot;
+    struct proc *owner;
+    struct proc_slot *root_slot;
 
     if (!family)
         return;
-    if (family->active_child_procs)
+    owner = family->owner;
+    if (!owner || (family->root && family->root != owner))
         platform_halt();
-    slot = family->slots;
-    while (slot) {
-        struct proc_slot *next = slot->all_next;
-
-        free(slot->printf_buffer);
-        free(slot->stack);
-        free(slot);
-        slot = next;
-    }
-    free(family);
+    root_slot = container_of(owner, struct proc_slot, proc);
+    if (root_slot->state != PROC_SLOT_ROOT ||
+        root_slot->family_owner != family)
+        platform_halt();
+    root_slot->family_owner = 0;
+    if (owner->family == family)
+        owner->family = 0;
+    proc_family_return(family);
 }
 
 int proc_set_resources(struct proc *proc, struct proc_family *family,
@@ -296,6 +518,7 @@ int proc_set_resources(struct proc *proc, struct proc_family *family,
     if (!proc || !family || proc->thread.cpu != cpu_self() ||
         proc->thread.type != THREAD_TYPE_PROC ||
         proc->thread.state != THREAD_READY || proc->family || family->root ||
+        family->owner != proc || family->cpu != proc->thread.cpu ||
         (!proc->shared_base != !shared_size) ||
         (!uram_base != !uram_size) ||
         (uram_size &&
@@ -311,30 +534,87 @@ int proc_set_resources(struct proc *proc, struct proc_family *family,
     return 0;
 }
 
+static struct proc_slot *family_slot_acquire(struct proc_family *family)
+{
+    struct proc_slot *slot;
+
+    if (!family || family->cpu != cpu_self())
+        return 0;
+    slot = family->free_slots;
+    if (!slot)
+        return 0;
+    if (slot->state != PROC_SLOT_FAMILY_FREE ||
+        slot->family_owner != family)
+        platform_halt();
+    family->free_slots = slot->free_next;
+    slot->free_next = 0;
+    memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->state = PROC_SLOT_CHILD;
+    return slot;
+}
+
+static void family_slot_release(struct proc_slot *slot)
+{
+    struct proc_family *family;
+
+    if (!slot || !slot->family_owner || slot->cpu != cpu_self() ||
+        (slot->state != PROC_SLOT_CHILD &&
+         slot->state != PROC_SLOT_ZOMBIE &&
+         slot->state != PROC_SLOT_KILLED))
+        platform_halt();
+    family = slot->family_owner;
+    memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->state = PROC_SLOT_FAMILY_FREE;
+    slot->free_next = family->free_slots;
+    family->free_slots = slot;
+}
+
+static struct proc_slot *find_direct_child(struct proc *parent,
+                                           uint32_t proc_id)
+{
+    struct proc_slot *slot;
+
+    if (!parent || !parent->family)
+        return 0;
+    for (slot = parent->family->slots; slot; slot = slot->family_next) {
+        if ((slot->state == PROC_SLOT_CHILD ||
+             slot->state == PROC_SLOT_ZOMBIE ||
+             slot->state == PROC_SLOT_KILL_WAIT_PRODUCE) &&
+            slot->proc.parent == parent &&
+            slot->proc.thread.id == proc_id)
+            return slot;
+    }
+    return 0;
+}
+
 static void child_proc_cleanup(struct proc *proc, void *arg)
 {
-    struct proc_slot *slot = arg;
     struct proc_family *family = proc->family;
     struct proc *parent = proc->parent;
+    struct proc_slot *slot = container_of(proc, struct proc_slot, proc);
 
-    if (!slot || !family || !parent || !family->active_child_procs ||
-        !parent->live_children)
+    (void)arg;
+    if (!family || !parent || !family->active_child_procs ||
+        !parent->live_children || slot->state != PROC_SLOT_CHILD ||
+        slot->family_owner != family)
         platform_halt();
     --family->active_child_procs;
     --parent->live_children;
+    slot->state = PROC_SLOT_ZOMBIE;
     if (proc->exit_status < 0 && parent->exit_status == 0)
         parent->exit_status = proc->exit_status;
-    if (!parent->live_children)
+    if ((parent->join_kind == 1U &&
+         parent->join_proc_id == proc->thread.id) ||
+        (parent->join_kind == 2U && !parent->live_children))
         (void)proc_event_wake_all(&parent->wait_children);
-    slot->free_next = family->free_slots;
-    family->free_slots = slot;
 }
 
 int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
                       uint32_t *proc_id_out)
 {
     struct proc_family *family;
-    struct proc_slot *slot;
+    struct proc_slot *child_slot;
+    struct proc *child;
     uintptr_t args[1];
     int status;
 
@@ -346,34 +626,465 @@ int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
     if (family->active_child_procs >= family->max_child_procs ||
         !family->free_slots)
         return -ENOMEM;
-    slot = family->free_slots;
-    family->free_slots = slot->free_next;
+    child_slot = family_slot_acquire(family);
+    if (!child_slot)
+        return -ENOMEM;
+    child = &child_slot->proc;
     args[0] = (uintptr_t)argument;
-    status = proc_init_args(&slot->proc, entry, slot->stack,
-                            family->child_stack_size, parent->shared_base,
-                            slot->printf_buffer, family->child_printf_size,
-                            1, args);
+    status = proc_slot_init_args(child, entry, parent->shared_base, 1, args);
     if (status < 0) {
-        slot->free_next = family->free_slots;
-        family->free_slots = slot;
+        family_slot_release(child_slot);
         return status;
     }
-    slot->proc.parent = parent;
-    slot->proc.family = family;
-    slot->proc.shared_size = parent->shared_size;
-    slot->proc.uram_base = parent->uram_base;
-    slot->proc.uram_size = parent->uram_size;
-    status = proc_set_task(&slot->proc, parent->task_id, parent->task_dim,
+    child->parent = parent;
+    child->parent_id = parent->thread.id;
+    child->family = family;
+    child->shared_size = parent->shared_size;
+    child->uram_base = parent->uram_base;
+    child->uram_size = parent->uram_size;
+    child->host_proc_id = parent->host_proc_id;
+    child->cookie = parent->cookie;
+    status = proc_set_task(child, parent->task_id, parent->task_dim,
                            parent->task_mode);
     if (status < 0)
         platform_halt();
-    status = proc_set_cleanup(&slot->proc, child_proc_cleanup, slot);
+    status = proc_set_cleanup(child, child_proc_cleanup, 0);
     if (status < 0)
         platform_halt();
     ++parent->live_children;
     ++family->active_child_procs;
-    *proc_id_out = slot->proc.thread.id;
+    *proc_id_out = child->thread.id;
     return 0;
+}
+
+int proc_join(uint32_t proc_id, int64_t *result)
+{
+    struct proc *parent = proc_self();
+    struct proc_slot *slot;
+    int status;
+
+    if (!parent || !parent->family)
+        return -EPERM;
+    if (!proc_id || proc_id == parent->thread.id)
+        return -ECHILD;
+    slot = find_direct_child(parent, proc_id);
+    if (!slot)
+        return -ECHILD;
+    while (slot->state != PROC_SLOT_ZOMBIE) {
+        parent->join_kind = 1U;
+        parent->join_proc_id = proc_id;
+        status = proc_wait_event(&parent->wait_children);
+        parent->join_kind = 0;
+        parent->join_proc_id = 0;
+        if (status < 0)
+            return status;
+        slot = find_direct_child(parent, proc_id);
+        if (!slot)
+            return -ECHILD;
+    }
+    if (result)
+        *result = slot->proc.exit_status;
+    family_slot_release(slot);
+    return 0;
+}
+
+int proc_join_all(void)
+{
+    struct proc *parent = proc_self();
+    struct proc_slot *slot;
+    int status;
+
+    if (!parent || !parent->family)
+        return -EPERM;
+    while (parent->live_children) {
+        parent->join_kind = 2U;
+        parent->join_proc_id = 0;
+        status = proc_wait_event(&parent->wait_children);
+        parent->join_kind = 0;
+        if (status < 0)
+            return status;
+    }
+    for (slot = parent->family->slots; slot; slot = slot->family_next) {
+        if (slot->state == PROC_SLOT_ZOMBIE &&
+            slot->proc.parent == parent)
+            family_slot_release(slot);
+    }
+    return 0;
+}
+
+static void snapshot_proc(struct rpc_proc_info *record,
+                          const struct proc *proc, uint32_t flags,
+                          uint32_t slot_index)
+{
+    memset(record, 0, sizeof(*record));
+    record->proc_id = proc->thread.id;
+    record->parent_proc_id = proc->parent_id;
+    record->state = proc->thread.state;
+    record->flags = flags;
+    record->live_children = proc->live_children;
+    record->slot_index = slot_index;
+    record->task_mode = proc->task_mode;
+    record->host_proc_id = proc->host_proc_id;
+    memcpy(record->task_id, proc->task_id, sizeof(record->task_id));
+    memcpy(record->task_dim, proc->task_dim, sizeof(record->task_dim));
+    record->result = proc->exit_status;
+    record->pc = proc->thread.pc;
+    record->cookie = proc->cookie;
+}
+
+int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot)
+{
+    struct cpu *cpu = cpu_self();
+    uintptr_t hart = platform_hart_id();
+    uint32_t count = 0;
+    uint32_t index;
+
+    if (!snapshot || snapshot->version != RPC_PROC_PS_VERSION ||
+        snapshot->size != sizeof(*snapshot) || snapshot->flags ||
+        snapshot->capacity != RPC_PROC_PS_MAX_RECORDS ||
+        snapshot->reserved)
+        return -EINVAL;
+    memset(snapshot->records, 0, sizeof(snapshot->records));
+    snapshot_proc(&snapshot->records[count++], &cpu->rpc.receive,
+                  RPC_PROC_INFO_SYSTEM, UINT32_MAX);
+    snapshot_proc(&snapshot->records[count++], &cpu->rpc.send,
+                  RPC_PROC_INFO_SYSTEM, UINT32_MAX);
+    for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
+        struct proc_slot *slot = &hart_proc_slots[hart][index];
+        uint32_t flags;
+
+        if (slot->state == PROC_SLOT_ROOT) {
+            if (!slot->proc.family)
+                continue;
+            flags = RPC_PROC_INFO_HOST_ROOT;
+        } else if (slot->state == PROC_SLOT_CHILD) {
+            flags = RPC_PROC_INFO_CHILD;
+        } else if (slot->state == PROC_SLOT_ZOMBIE) {
+            flags = RPC_PROC_INFO_CHILD | RPC_PROC_INFO_ZOMBIE;
+        } else if (slot->state == PROC_SLOT_KILL_WAIT_PRODUCE) {
+            flags = (slot->proc.parent_id ? RPC_PROC_INFO_CHILD :
+                                                   RPC_PROC_INFO_HOST_ROOT) |
+                    RPC_PROC_INFO_KILL_WAIT_PRODUCE;
+        } else {
+            continue;
+        }
+        if (count >= RPC_PROC_PS_MAX_RECORDS)
+            platform_halt();
+        snapshot_proc(&snapshot->records[count++], &slot->proc,
+                      flags, index);
+    }
+    snapshot->hart_id = (uint32_t)hart;
+    snapshot->count = count;
+    snapshot->global_free_slots = cpu->sche.free_proc_slot_count;
+    snapshot->reserved_slots = cpu->sche.reserved_proc_slot_count;
+    snapshot->status = 0;
+    return 0;
+}
+
+static void kill_unlink_proc(struct proc *proc)
+{
+    struct sche_state *sche = &proc->thread.cpu->sche;
+
+    switch (proc->thread.state) {
+    case THREAD_READY:
+    case THREAD_WAIT_POLL:
+        if (list_empty(&proc->node))
+            platform_halt();
+        list_del_init(&proc->node);
+        break;
+    case THREAD_WAIT_EVENT:
+    case THREAD_WAIT_PRODUCE:
+        if (list_empty(&proc->node) || !sche->event_waiters)
+            platform_halt();
+        list_del_init(&proc->node);
+        --sche->event_waiters;
+        break;
+    case THREAD_WAIT_EXIT:
+    case THREAD_WAIT_START:
+        if (!list_empty(&proc->node))
+            platform_halt();
+        break;
+    default:
+        platform_halt();
+    }
+    proc->poll = 0;
+    proc->poll_arg = 0;
+}
+
+static void kill_mark_slot(struct proc_family *family,
+                           struct proc_slot *slot)
+{
+    struct proc *proc = &slot->proc;
+    int waiting_produce;
+
+    if (slot->state == PROC_SLOT_ZOMBIE) {
+        slot->state = PROC_SLOT_KILLED;
+        proc->exit_status = -ECANCELED;
+        return;
+    }
+    if (slot->state != PROC_SLOT_ROOT &&
+        slot->state != PROC_SLOT_CHILD)
+        platform_halt();
+    waiting_produce = proc->thread.state == THREAD_WAIT_PRODUCE;
+    kill_unlink_proc(proc);
+    proc->exit_status = -ECANCELED;
+    proc->live_children = 0;
+    proc->join_kind = 0;
+    proc->join_proc_id = 0;
+    if (proc->parent_id)
+        proc->cleanup = 0;
+    proc->cleanup_arg = proc->parent_id ? 0 : proc->cleanup_arg;
+    if (waiting_produce) {
+        proc->thread.state = THREAD_KILL_WAIT_PRODUCE;
+        slot->state = PROC_SLOT_KILL_WAIT_PRODUCE;
+        ++family->pending_produce;
+    } else {
+        proc->thread.state = THREAD_WAIT_EXIT;
+        slot->state = PROC_SLOT_KILLED;
+        if (proc->parent_id) {
+            if (!family->active_child_procs)
+                platform_halt();
+            --family->active_child_procs;
+        }
+    }
+}
+
+static void kill_drain_system_wait(struct proc *proc)
+{
+    int status;
+
+    while ((status = rpc_proc_wait_cancel(proc)) > 0)
+        proc_yield();
+    if (status < 0)
+        platform_halt();
+}
+
+static void kill_release_child_slot(struct proc_family *family,
+                                    struct proc_slot *slot)
+{
+    struct sche_state *sche = &family->cpu->sche;
+    struct proc_slot **link = &family->slots;
+
+    if ((slot->state != PROC_SLOT_FAMILY_FREE &&
+         slot->state != PROC_SLOT_KILLED) ||
+        slot->family_owner != family || !family->reserved_proc_slots ||
+        !sche->reserved_proc_slot_count)
+        platform_halt();
+    while (*link && *link != slot)
+        link = &(*link)->family_next;
+    if (!*link)
+        platform_halt();
+    *link = slot->family_next;
+    memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->family_owner = 0;
+    slot->family_next = 0;
+    slot->free_next = 0;
+    slot->stack_size = 0;
+    slot->printf_size = 0;
+    slot->state = PROC_SLOT_GLOBAL_FREE;
+    --family->reserved_proc_slots;
+    --sche->reserved_proc_slot_count;
+    global_slot_push(slot);
+}
+
+static void kill_release_root_slot(struct proc_family *family)
+{
+    struct proc *root = family->root;
+    struct proc_slot *slot;
+    struct sche_state *sche = &family->cpu->sche;
+
+    if (!root || root->parent_id || !family->reserved_proc_slots ||
+        !sche->reserved_proc_slot_count)
+        platform_halt();
+    slot = container_of(root, struct proc_slot, proc);
+    if (slot->state != PROC_SLOT_KILLED ||
+        slot->family_owner != family)
+        platform_halt();
+    family->root = 0;
+    family->owner = 0;
+    --family->reserved_proc_slots;
+    --sche->reserved_proc_slot_count;
+    slot->family_owner = 0;
+    root->family = 0;
+    root->live_children = 0;
+    slot->state = PROC_SLOT_ROOT;
+    proc_slot_release(root);
+}
+
+static void kill_flush_output(struct proc *proc)
+{
+    uint32_t output_proc = proc->host_proc_id ? proc->host_proc_id :
+                                                proc->thread.id;
+
+    if (proc->printf_size)
+        (void)rpc_write_proc(output_proc, proc->printf_buffer,
+                             proc->printf_size);
+    proc->printf_size = 0;
+    (void)rpc_clear_proc(output_proc);
+}
+
+static void kill_complete_root(struct proc_family *family)
+{
+    struct proc *root = family->root;
+    proc_cleanup_fn cleanup;
+    void *cleanup_arg;
+
+    if (!root)
+        platform_halt();
+    kill_flush_output(root);
+    (void)rpc_proc_exit(root->thread.id, 0, -ECANCELED, root->cookie,
+                        RPC_PROC_EXIT_ROOT);
+    cleanup = root->cleanup;
+    cleanup_arg = root->cleanup_arg;
+    root->cleanup = 0;
+    root->cleanup_arg = 0;
+    if (!cleanup)
+        platform_halt();
+    cleanup(root, cleanup_arg);
+}
+
+static void kill_release_ready_slots(struct proc_family *family,
+                                     struct rpc_proc_kill_result *result)
+{
+    struct proc_slot *slot = family->slots;
+
+    while (slot) {
+        struct proc_slot *next = slot->family_next;
+
+        if (slot->state == PROC_SLOT_FAMILY_FREE ||
+            slot->state == PROC_SLOT_KILLED) {
+            kill_release_child_slot(family, slot);
+            ++result->released_slots;
+        }
+        slot = next;
+    }
+    if (family->root) {
+        struct proc_slot *root_slot = container_of(
+            family->root, struct proc_slot, proc);
+
+        if (root_slot->state == PROC_SLOT_KILLED) {
+            kill_release_root_slot(family);
+            ++result->released_slots;
+        }
+    }
+    if (!family->pending_produce) {
+        if (family->active_child_procs || family->root || family->slots)
+            platform_halt();
+        proc_family_return(family);
+    }
+}
+
+int proc_kill_all(struct rpc_proc_kill_result *result)
+{
+    struct cpu *cpu = cpu_self();
+    uintptr_t hart = platform_hart_id();
+    uint32_t index;
+
+    if (!result || result->version != RPC_PROC_KILL_ALL_VERSION ||
+        result->size != sizeof(*result) || result->flags ||
+        result->reserved)
+        return -EINVAL;
+    result->hart_id = (uint32_t)hart;
+    result->status = 0;
+    result->killed_roots = 0;
+    result->killed_children = 0;
+    result->released_slots = 0;
+    result->waiting_produce = 0;
+
+    /* First make every operator proc unschedulable before outbound RPCs. */
+    for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
+        struct proc_family *family = &hart_proc_families[hart][index];
+        struct proc_slot *slot;
+
+        if (family->cpu != cpu || family->killed || !family->root)
+            continue;
+        family->killed = 1;
+        family->free_slots = 0;
+        for (slot = family->slots; slot; slot = slot->family_next) {
+            if (slot->state == PROC_SLOT_CHILD ||
+                slot->state == PROC_SLOT_ZOMBIE) {
+                ++result->killed_children;
+                kill_mark_slot(family, slot);
+            } else if (slot->state != PROC_SLOT_FAMILY_FREE) {
+                platform_halt();
+            }
+        }
+        ++result->killed_roots;
+        kill_mark_slot(family,
+                       container_of(family->root, struct proc_slot, proc));
+    }
+
+    for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
+        struct proc_family *family = &hart_proc_families[hart][index];
+        struct proc_slot *slot;
+
+        if (family->cpu != cpu || family->killed != 1)
+            continue;
+        for (slot = family->slots; slot; slot = slot->family_next) {
+            if ((slot->state == PROC_SLOT_KILLED ||
+                 slot->state == PROC_SLOT_KILL_WAIT_PRODUCE) &&
+                slot->proc.thread.id)
+                kill_drain_system_wait(&slot->proc);
+        }
+        kill_drain_system_wait(family->root);
+        for (slot = family->slots; slot; slot = slot->family_next) {
+            if ((slot->state == PROC_SLOT_KILLED ||
+                 slot->state == PROC_SLOT_KILL_WAIT_PRODUCE) &&
+                slot->proc.thread.id)
+                kill_flush_output(&slot->proc);
+        }
+        kill_complete_root(family);
+        family->killed = 2;
+        kill_release_ready_slots(family, result);
+    }
+    for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
+        struct proc_family *family = &hart_proc_families[hart][index];
+
+        if (family->cpu == cpu && family->killed)
+            result->waiting_produce += family->pending_produce;
+    }
+    return 0;
+}
+
+static void kill_complete_produce(struct proc *proc)
+{
+    struct proc_slot *slot = container_of(proc, struct proc_slot, proc);
+    struct proc_family *family = slot->family_owner;
+    int child = !!proc->parent_id;
+
+    if (slot->state != PROC_SLOT_KILL_WAIT_PRODUCE || !family ||
+        !family->killed || !family->pending_produce)
+        platform_halt();
+    slot->state = PROC_SLOT_KILLED;
+    proc->thread.state = THREAD_WAIT_EXIT;
+    --family->pending_produce;
+    if (child) {
+        if (!family->active_child_procs)
+            platform_halt();
+        --family->active_child_procs;
+    }
+    if (family->killed == 1)
+        return;
+    if (child)
+        kill_release_child_slot(family, slot);
+    else
+        kill_release_root_slot(family);
+    if (!family->pending_produce) {
+        if (family->active_child_procs || family->root || family->slots)
+            platform_halt();
+        proc_family_return(family);
+    }
+}
+
+int proc_complete_produce(struct proc *proc)
+{
+    if (!proc)
+        return -EINVAL;
+    if (proc->thread.state == THREAD_KILL_WAIT_PRODUCE) {
+        kill_complete_produce(proc);
+        return 0;
+    }
+    return proc_wake(proc);
 }
 
 int proc_wake(struct proc *proc)
@@ -386,7 +1097,8 @@ int proc_wake(struct proc *proc)
     if (proc->thread.cpu != cpu)
         return -EPERM;
     if (proc->thread.type != THREAD_TYPE_PROC ||
-        proc->thread.state != THREAD_WAIT_EVENT)
+        (proc->thread.state != THREAD_WAIT_EVENT &&
+         proc->thread.state != THREAD_WAIT_PRODUCE))
         return -EBUSY;
     if (!sche->event_waiters)
         return -EINVAL;
@@ -453,6 +1165,25 @@ int proc_wait_event(struct list_head *event)
     return 0;
 }
 
+int proc_wait_produce(void)
+{
+    struct proc *proc = proc_self();
+    struct sche_state *sche;
+
+    if (!proc)
+        return -EPERM;
+    if (!list_empty(&proc->node))
+        return -EBUSY;
+    sche = &proc->thread.cpu->sche;
+    proc->poll = 0;
+    proc->poll_arg = 0;
+    proc->thread.state = THREAD_WAIT_PRODUCE;
+    ++sche->event_waiters;
+    list_add_tail(&proc->node, &sche->wait_event);
+    switch_to_scheduler(&proc->thread);
+    return 0;
+}
+
 void proc_yield(void)
 {
     struct proc *proc = proc_self();
@@ -465,19 +1196,23 @@ void proc_yield(void)
     switch_to_scheduler(&proc->thread);
 }
 
-_Noreturn void proc_exit_status(int status)
+_Noreturn void proc_exit_status(int64_t status)
 {
     struct proc *proc = proc_self();
 
     if (proc) {
-        if (proc->printf_size &&
-            rpc_write(proc->printf_buffer, proc->printf_size) >= 0)
-            proc->printf_size = 0;
         /* Preserve a failure already propagated by a completed child. */
         if (status < 0 || proc->exit_status >= 0)
             proc->exit_status = status;
-        while (proc->live_children)
-            (void)proc_wait_event(&proc->wait_children);
+        if (proc->family && proc_join_all() < 0 && proc->exit_status >= 0)
+            proc->exit_status = -EIO;
+        if (proc->printf_size)
+            (void)rpc_write(proc->printf_buffer, proc->printf_size);
+        proc->printf_size = 0;
+        (void)rpc_clear();
+        if (!proc->parent && proc->family)
+            (void)rpc_proc_exit(proc->thread.id, 0, proc->exit_status,
+                                proc->cookie, RPC_PROC_EXIT_ROOT);
         proc->thread.state = THREAD_WAIT_EXIT;
         switch_to_scheduler(&proc->thread);
     }
@@ -533,10 +1268,16 @@ _Noreturn void scheduler(void)
                    proc->cleanup) {
             proc_cleanup_fn cleanup = proc->cleanup;
             void *cleanup_arg = proc->cleanup_arg;
+            struct proc_family *family = proc->family;
+            int root = !proc->parent && family;
 
             proc->cleanup = 0;
             proc->cleanup_arg = 0;
             cleanup(proc, cleanup_arg);
+            if (root) {
+                proc_family_destroy(family);
+                proc_slot_release(proc);
+            }
         }
     }
 }

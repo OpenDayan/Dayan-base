@@ -11,7 +11,8 @@
 register void *shared __asm__("gp");
 
 #define DAYAN_KERNEL_RESOURCE_DESC_VERSION 1U
-#define DAYAN_KERNEL_MAX_CHILD_PROCS        64U
+#define DAYAN_HART_MAX_PROCS                16U
+#define DAYAN_KERNEL_MAX_CHILD_PROCS        (DAYAN_HART_MAX_PROCS - 1U)
 #define DAYAN_URAM_ALLOCATION_GRANULE       1024U
 
 #ifndef DAYAN_KERNEL_RESOURCE_DESC_DEFINED
@@ -70,8 +71,12 @@ extern "C" {
 #endif
 
 DAYAN_API void dayan_yield(void);
-/* Creates a child of the current proc on the same physical Core. */
+/* Creates a child on the same physical Core and returns its positive ID. */
 DAYAN_API int dayan_create_proc(dayan_proc_entry_t entry, void *argument);
+/* Only direct children can be joined. result may be null. */
+DAYAN_API int dayan_join(uint32_t proc_id, int64_t *result);
+DAYAN_API int dayan_join_all(void);
+DAYAN_API DAYAN_NORETURN void dayan_proc_exit(int64_t result);
 /* The returned range belongs to the current resident kernel instance. */
 DAYAN_API void *dayan_uram_base(void);
 DAYAN_API size_t dayan_uram_size(void);

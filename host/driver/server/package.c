@@ -144,6 +144,10 @@ int npu_package_view_init(struct npu_package_view *view,
             (kernel->supported_task_modes & ~NPU_PACKAGE_TASK_MODE_ALL) ||
             !kernel->max_tasks_per_core ||
             kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
+            (kernel->stack_size &&
+             kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
+            kernel->stack_size > NPU_PACKAGE_PROC_STACK_SIZE ||
+            kernel->printf_buffer_size > NPU_PACKAGE_PROC_PRINTF_SIZE ||
             (kernel->uram_size & (NPU_PACKAGE_URAM_GRANULE - 1U)) ||
             kernel->argument_count > NPU_PACKAGE_MAX_ARGS ||
             kernel->first_argument > header->argument_count ||

@@ -44,7 +44,7 @@ struct server_core_slot {
     uint32_t enabled;
     uint32_t active_tasks;
     uint64_t resident_memory;
-    uint64_t child_procs;
+    uint32_t reserved_procs;
     uint64_t atomic_cache_memory;
     uint64_t atomic_cache_capacity;
     uint64_t uram_memory;
@@ -182,7 +182,7 @@ struct server_command {
             uint64_t next_unit;
             uint64_t total_units;
             uint64_t completed_units;
-            int32_t aggregate_status;
+            int64_t aggregate_status;
             uint64_t cookie;
             struct server_launch_group *groups;
             struct server_invocation *invocations;
@@ -244,6 +244,7 @@ struct dayan_server {
     struct server_session *sessions;
     struct server_package_cache *packages;
     npu_service_trap_fn service_trap;
+    npu_service_proc_exit_fn service_proc_exit;
     void *service_callback_context;
     size_t pending_output_bytes;
     struct server_output *pending_outputs;

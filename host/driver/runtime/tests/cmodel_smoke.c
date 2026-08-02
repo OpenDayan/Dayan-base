@@ -7,16 +7,129 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "npu_package.h"
 #include "npu_runtime.h"
-#include "server.h"
+#include "server_internal.h"
 
 struct run_state {
     dayan_server_t *server;
     int status;
 };
+
+struct proc_exit_capture {
+    unsigned count;
+    unsigned returned;
+    unsigned cancelled;
+    unsigned bad;
+};
+
+static void capture_proc_exit(void *context, uint32_t cluster,
+                              uint32_t core, uint32_t proc,
+                              int64_t result, uint64_t cookie)
+{
+    struct proc_exit_capture *capture = context;
+
+    (void)cluster;
+    (void)core;
+    (void)cookie;
+    if (!proc)
+        __atomic_add_fetch(&capture->bad, 1U, __ATOMIC_RELAXED);
+    if (result == -ECANCELED) {
+        __atomic_add_fetch(&capture->cancelled, 1U, __ATOMIC_RELAXED);
+    } else if (result > INT32_MAX) {
+        __atomic_add_fetch(&capture->returned, 1U, __ATOMIC_RELAXED);
+    } else {
+        __atomic_add_fetch(&capture->bad, 1U, __ATOMIC_RELAXED);
+    }
+    __atomic_add_fetch(&capture->count, 1U, __ATOMIC_RELAXED);
+}
+
+static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
+                         npu_kernel_t *kernel, npu_buffer_t *buffer)
+{
+    npu_service_kill_result_t killed;
+    npu_service_proc_snapshot_t snapshot;
+    npu_launch_desc_t launch;
+    npu_event_info_t info;
+    npu_event_t *event = 0;
+    npu_hal_core_t target = { 0, 0 };
+    uint64_t value = UINT64_C(0x9876543210);
+    unsigned attempt;
+    int found = 0;
+    int status;
+
+    npu_launch_desc_init(&launch);
+    launch.config.task_dim = (NPUTaskDim3){ 1, 1, 1 };
+    launch.config.task_mode = (NPUTaskMode)1;
+    launch.arg_count = 2;
+    npu_kernel_arg_buffer(&launch.args[0], buffer, 0,
+                          NPU_KERNEL_ARG_WRITE);
+    npu_kernel_arg_value(&launch.args[1], value, sizeof(value));
+    status = npu_kernel_launch(stream, kernel, &launch, &event);
+    if (status < 0)
+        return status;
+    for (attempt = 0; attempt < 500U && !found; ++attempt) {
+        uint32_t cluster;
+
+        for (cluster = 0; cluster < server->hal_info.cluster_count &&
+                          !found; ++cluster) {
+            uint32_t core;
+
+            for (core = 0; core < server->hal_info.cores_per_cluster;
+                 ++core) {
+                uint32_t record;
+
+                target.cluster = cluster;
+                target.core = core;
+                status = npu_service_rpc_ps(server->device, target,
+                                            &snapshot);
+                if (status < 0)
+                    continue;
+                for (record = 0; record < snapshot.count; ++record) {
+                    if (snapshot.records[record].flags &
+                        NPU_SERVICE_PROC_HOST_ROOT) {
+                        if (snapshot.records[record].host_proc_id !=
+                                snapshot.records[record].proc_id ||
+                            snapshot.records[record].parent_proc_id ||
+                            snapshot.reserved_slots != 1U ||
+                            snapshot.global_free_slots != 15U)
+                            return -EIO;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (found)
+                    break;
+            }
+        }
+        if (!found) {
+            const struct timespec delay = { 0, 1000000L };
+
+            (void)nanosleep(&delay, 0);
+        }
+    }
+    if (!found)
+        return -ETIMEDOUT;
+    status = npu_service_rpc_kill_all(server->device, target, &killed);
+    if (status < 0)
+        return status;
+    if (killed.killed_roots != 1U || killed.killed_children ||
+        killed.released_slots != 1U || killed.waiting_produce)
+        return -EIO;
+    status = npu_service_rpc_ps(server->device, target, &snapshot);
+    if (status < 0 || snapshot.count != 2U ||
+        snapshot.global_free_slots != 16U || snapshot.reserved_slots)
+        return status < 0 ? status : -EIO;
+    status = npu_event_wait(event, 10000, &info);
+    if (status < 0)
+        return status;
+    if (info.status != -ECANCELED)
+        return -EIO;
+    return npu_event_destroy(event);
+}
 
 static void *run_server(void *argument)
 {
@@ -139,7 +252,7 @@ static int run_grid(npu_stream_t *stream, npu_kernel_t *kernel,
 int main(int argc, char **argv)
 {
     npu_package_argument_t arguments[2];
-    npu_package_kernel_desc_t kernel_desc;
+    npu_package_kernel_desc_t kernel_desc[2];
     dayan_server_options_t server_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
@@ -147,9 +260,11 @@ int main(int argc, char **argv)
     npu_stream_t *stream = 0;
     npu_module_t *module = 0;
     npu_kernel_t *kernel = 0;
+    npu_kernel_t *killable_kernel = 0;
     npu_runtime_t *runtime = 0;
     dayan_server_t *server = 0;
     struct run_state run;
+    struct proc_exit_capture exits = { 0, 0, 0, 0 };
     pthread_t server_thread;
     void *object = 0;
     void *package = 0;
@@ -183,17 +298,21 @@ int main(int argc, char **argv)
     arguments[0].access = NPU_PACKAGE_ARG_WRITE;
     arguments[1].kind = NPU_PACKAGE_ARG_VALUE;
     arguments[1].size = 8;
-    memset(&kernel_desc, 0, sizeof(kernel_desc));
-    kernel_desc.name = "grid_kernel";
-    kernel_desc.entry_symbol = "grid_kernel";
-    kernel_desc.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
-    kernel_desc.max_tasks_per_core = 1;
-    kernel_desc.max_child_procs = 1;
-    kernel_desc.atomic_cache_size = 64;
-    kernel_desc.uram_size = 0x180000;
-    kernel_desc.arguments = arguments;
-    kernel_desc.argument_count = 2;
-    status = npu_package_build(object, object_size, &kernel_desc, 1, 0,
+    memset(kernel_desc, 0, sizeof(kernel_desc));
+    kernel_desc[0].name = "grid_kernel";
+    kernel_desc[0].entry_symbol = "grid_kernel";
+    kernel_desc[0].supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+    kernel_desc[0].max_tasks_per_core = 1;
+    kernel_desc[0].max_child_procs = NPU_PACKAGE_MAX_CHILD_PROCS;
+    kernel_desc[0].atomic_cache_size = 64;
+    kernel_desc[0].uram_size = 0x180000;
+    kernel_desc[0].arguments = arguments;
+    kernel_desc[0].argument_count = 2;
+    kernel_desc[1] = kernel_desc[0];
+    kernel_desc[1].name = "kill_kernel";
+    kernel_desc[1].entry_symbol = "kill_kernel";
+    kernel_desc[1].max_child_procs = 0;
+    status = npu_package_build(object, object_size, kernel_desc, 2, 0,
                                &package, &package_size);
     free(object);
     if (status < 0)
@@ -206,10 +325,36 @@ int main(int argc, char **argv)
     server_options.api_elf_path = argv[2];
     server_options.enabled_core_mask = (UINT32_C(1) << core_count) - 1U;
     server_options.hal.device_prefix = device_prefix;
+    server_options.service.proc_exit = capture_proc_exit;
+    server_options.service.callback_context = &exits;
     status = dayan_server_create(&server, &server_options);
     if (status < 0) {
         fprintf(stderr, "server create failed: %d\n", status);
         return 1;
+    }
+    {
+        npu_service_kill_result_t killed;
+        npu_service_proc_snapshot_t snapshot;
+        npu_hal_core_t target = { 0, 0 };
+
+        status = npu_service_rpc_ps(server->device, target, &snapshot);
+        if (status == 0 &&
+            (snapshot.count != 2U || snapshot.global_free_slots != 16U ||
+             snapshot.reserved_slots))
+            status = -EIO;
+        if (status == 0)
+            status = npu_service_rpc_kill_all(server->device, target,
+                                              &killed);
+        if (status == 0 &&
+            (killed.killed_roots || killed.killed_children ||
+             killed.released_slots || killed.waiting_produce))
+            status = -EIO;
+        if (status < 0) {
+            fprintf(stderr, "admin RPC smoke failed: %d\n", status);
+            dayan_server_destroy(server);
+            npu_package_free(package);
+            return 1;
+        }
     }
     run.server = server;
     run.status = -1;
@@ -241,6 +386,11 @@ int main(int argc, char **argv)
         status = npu_module_get_kernel(module, "grid_kernel", &kernel);
     }
     if (status == 0) {
+        stage = "kill kernel lookup";
+        status = npu_module_get_kernel(module, "kill_kernel",
+                                       &killable_kernel);
+    }
+    if (status == 0) {
         npu_launch_desc_t invalid;
         npu_event_t *unexpected = 0;
 
@@ -256,19 +406,35 @@ int main(int argc, char **argv)
         stage = "single-core grid";
         status = run_grid(stream, kernel, buffer,
                           (NPUTaskDim3){ 2, 2, 2 }, 1,
-                          UINT64_C(0x1000), output, 8);
+                          UINT64_C(0x1234567800001000), output, 8);
     }
     if (status == 0 && core_count == 4) {
         stage = "four-core grid";
         status = run_grid(stream, kernel, buffer,
                           (NPUTaskDim3){ 4, 2, 1 }, 4,
-                          UINT64_C(0x2000), output, 8);
+                          UINT64_C(0x2345678900002000), output, 8);
+    }
+    if (status == 0) {
+        stage = "rpc kill all";
+        status = run_kill_test(server, stream, killable_kernel, buffer);
+    }
+    if (status == 0 &&
+        (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||
+         __atomic_load_n(&exits.count, __ATOMIC_RELAXED) !=
+                 (core_count == 4 ? 17U : 9U) ||
+         __atomic_load_n(&exits.returned, __ATOMIC_RELAXED) !=
+                 (core_count == 4 ? 16U : 8U) ||
+         __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) != 1U)) {
+        stage = "root-only proc exit notification";
+        status = -EIO;
     }
     if (status < 0)
         fprintf(stderr, "cmodel runtime test failed at %s: %d\n", stage,
                 status);
     if (kernel)
         (void)npu_kernel_release(kernel);
+    if (killable_kernel)
+        (void)npu_kernel_release(killable_kernel);
     if (module)
         (void)npu_module_unload(module);
     if (stream)

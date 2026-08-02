@@ -816,10 +816,10 @@ private:
                 return false;
             }
         }
-        if (fields[0] != 1U || fields[1] != 32U || fields[2] > 64U ||
+        if (fields[0] != 1U || fields[1] != 32U || fields[2] > 15U ||
             fields[3] != 0U || (fields[5] & 1023U)) {
             diagnose(decl, "invalid kernel resources: expected version=1, "
-                           "size=32, flags=0, child_procs<=64 and "
+                           "size=32, flags=0, child_procs<=15 and "
                            "1 KiB-aligned URAM size");
             return false;
         }

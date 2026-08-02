@@ -30,6 +30,7 @@ BL1 清空 \code{mie} 和 \code{mstatus.MIE}。mailbox doorbell 只作为可轮�
   init 栈 & 64 KiB & BL1、初始化和 scheduler。 \\
   RPC 栈 & 4 KiB $\times$ 2 & receive proc 与 send proc。 \\
   trap 栈 & 4 KiB & 同步异常入口。 \\
+  proc slot & $(64+4)$ KiB $\times$ 16 & 算子 proc 的固定栈与 printf buffer；不含 init/RPC proc。 \\
   初始堆 & 1 MiB & 当前 hart 私有 allocator 的首个 region。 \\
 \end{dayantable}
 
@@ -49,6 +50,8 @@ proc 的 type 为 1，ID 由本 hart scheduler 从 1 开始分配。
   \code{WAIT_EVENT} & 3 & 挂在事件链表，由事件所有者唤醒。 \\
   \code{WAIT_START} & 4 & thread 构造期间的内部状态。 \\
   \code{WAIT_EXIT} & 5 & proc 已结束，不再调度。 \\
+  \code{WAIT_PRODUCE} & 6 & 等待异步 Produce token。 \\
+  \code{KILL\_WAIT\_PRODUCE} & 7 & 已 kill，只等待 Produce 返回后释放 slot。 \\
 \end{dayantable}
 
 scheduler 每轮先扫描张量单元完成 token，再检查 poll queue，最后从 ready queue 取一个
@@ -70,14 +73,27 @@ mailbox 状态与跨核 resource 使用 poll。
 只加载实际参数数量对应的寄存器；entry 正常返回后进入 \code{proc_exit}。详细帧布局见
 附录~\ref{sec:kernel-080}。
 
-普通 proc 的对象和栈由创建者管理。\code{RPC_PROC_CREATE} 创建的托管 proc 注册
-scheduler cleanup；cleanup 在 scheduler 栈上运行，此时可以安全释放 proc 自己的栈、
-输出缓冲和控制对象，并更新 Host 描述符的终态。
+每个 Hart 在链接阶段静态准备 16 个算子 proc slot，每个 slot 包含 proc 对象、64 KiB
+栈和 4 KiB printf buffer；init 与两个 RPC proc 使用独立对象和栈，不占这些 slot。
+\code{RPC_PROC_CREATE} 取得 root 后立即从全局空闲池摘下 \code{max\_child\_procs} 个
+slot，形成该 family 的专属池；root 计入 reservation，单个 descriptor 最多声明 15 个
+子 proc。子孙创建和退出只操作专属池，不再通知 Host。Device 自己也检查物理空闲量和
+所有 active family 的 reservation，不能依赖 Host 正确性。
 
-托管 root 根据资源描述符预先分配有限的子 proc slot。\code{dayan_create_proc} 从同一
-hart 的空闲 slot 创建子 proc，传递一个指针参数并继承 logical task、\code{gp/shared}
-和 URAM。每个 proc 退出前等待自己的直接子 proc；该规则递归保证 root cleanup 时没有
-存活后代，随后统一释放 slot 的栈与 printf buffer。
+\code{dayan_create_proc} 从同一 Hart 的空闲静态 slot 创建子 proc，传递一个指针参数并
+继承 logical task、\code{gp/shared} 和 URAM。proc 保存 parent ID/pointer、直属未结束子
+proc 计数与 join 状态。子 proc 退出后成为 zombie，减少父计数并按 join 条件精确唤醒；
+join 回收 zombie。每个 proc 退出前隐式 join-all，该规则递归保证 root cleanup 时没有
+存活后代。root 最终一次性归还 family 的专属 slot；栈和 printf buffer 始终是静态存储。
+每个 proc 退出均 best-effort flush 并 CLEAR 自己的输出，只有 Host 创建的 root 使用
+\code{RPC_PROC_EXIT} 上报 64-bit 返回值；scheduler cleanup 再更新 Host 描述符终态。
+
+\code{RPC_PROC_KILL_ALL} 不终止 init、receive 或 send proc。READY/POLL/EVENT 等 proc
+先从各自队列摘除；等待 system proc transaction 的调用者也从唤醒链表摘除，尚未发送的
+transaction 被取消，已由 send proc 持有的 transaction 在释放调用者 slot 前排空。
+非 Produce slot 立即归还全局池；\code{WAIT_PRODUCE} 改为
+\code{KILL_WAIT_PRODUCE}，硬件 token 返回后才归还。kill 仍只对 root 发送一次退出通知，
+子 proc 不产生 Host 生命周期消息。
 
 \subsection{私有堆}
 
@@ -93,7 +109,8 @@ allocator，并立即请求 Host 回收。
 
 \code{dayan_wait_lsu/mat/vec/macro} 把当前 \code{tp} 写入对应 Produce 队列，然后
 进入事件等待。scheduler 的 \code{proc_scan_produce()} 从 BASE 全局完成队列取回
-token，并唤醒对应 proc。DMA 复用 LSU 路径。
+token，并唤醒对应 proc。若 token 指向 \code{KILL_WAIT_PRODUCE}，scheduler 只完成延迟
+slot 回收，不再恢复其 kernel 代码。DMA 复用 LSU 路径。
 
 \subsection{异常处理}
 

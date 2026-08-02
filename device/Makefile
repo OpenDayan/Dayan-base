@@ -19,6 +19,9 @@ API_SYMBOLS := dayan-api.symbols
 HARTS           ?= 4
 CPU_LOCAL_SIZE  ?= 0x1000
 STACK_SIZE      ?= 0x10000
+PROC_SLOT_COUNT ?= 16
+PROC_STACK_SIZE ?= 0x10000
+PROC_PRINTF_SIZE ?= 0x1000
 RPC_STACK_SIZE  ?= 0x1000
 TRAP_STACK_SIZE ?= 0x1000
 HEAP_SIZE       ?= 0x100000
@@ -39,6 +42,9 @@ CPPFLAGS := -Iinclude/api -Iinclude -Ilib/include \
             -DCONFIG_HART_COUNT=$(HARTS) \
             -DCONFIG_CPU_LOCAL_SIZE=$(CPU_LOCAL_SIZE) \
             -DCONFIG_STACK_SIZE=$(STACK_SIZE) \
+            -DCONFIG_PROC_SLOT_COUNT=$(PROC_SLOT_COUNT) \
+            -DCONFIG_PROC_STACK_SIZE=$(PROC_STACK_SIZE) \
+            -DCONFIG_PROC_PRINTF_SIZE=$(PROC_PRINTF_SIZE) \
             -DCONFIG_RPC_STACK_SIZE=$(RPC_STACK_SIZE) \
             -DCONFIG_TRAP_STACK_SIZE=$(TRAP_STACK_SIZE) \
             -DCONFIG_HEAP_SIZE=$(HEAP_SIZE) \
@@ -63,6 +69,9 @@ LDFLAGS := --target=riscv64-unknown-elf -march=$(ARCH) -mabi=$(ABI) \
            -Wl,--defsym=CONFIG_HART_COUNT=$(HARTS) \
            -Wl,--defsym=CONFIG_CPU_LOCAL_SIZE=$(CPU_LOCAL_SIZE) \
            -Wl,--defsym=CONFIG_STACK_SIZE=$(STACK_SIZE) \
+           -Wl,--defsym=CONFIG_PROC_SLOT_COUNT=$(PROC_SLOT_COUNT) \
+           -Wl,--defsym=CONFIG_PROC_STACK_SIZE=$(PROC_STACK_SIZE) \
+           -Wl,--defsym=CONFIG_PROC_PRINTF_SIZE=$(PROC_PRINTF_SIZE) \
            -Wl,--defsym=CONFIG_RPC_STACK_SIZE=$(RPC_STACK_SIZE) \
            -Wl,--defsym=CONFIG_TRAP_STACK_SIZE=$(TRAP_STACK_SIZE) \
            -Wl,--defsym=CONFIG_HEAP_SIZE=$(HEAP_SIZE) \
@@ -108,6 +117,9 @@ check: $(ELF) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST)
 	NM="$(NM)" OBJDUMP="$(OBJDUMP)" READELF="$(READELF)" \
 		BUILD_DIR="$(abspath $(BUILD))" HARTS="$(HARTS)" \
 		STACK_SIZE="$(STACK_SIZE)" RPC_STACK_SIZE="$(RPC_STACK_SIZE)" \
+		PROC_SLOT_COUNT="$(PROC_SLOT_COUNT)" \
+		PROC_STACK_SIZE="$(PROC_STACK_SIZE)" \
+		PROC_PRINTF_SIZE="$(PROC_PRINTF_SIZE)" \
 		TRAP_STACK_SIZE="$(TRAP_STACK_SIZE)" \
 		./tests/check-firmware.sh
 	CLANG="$(CLANG)" QEMU_SYSTEM_RISCV64="$(QEMU_SYSTEM_RISCV64)" \

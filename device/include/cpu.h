@@ -11,6 +11,9 @@
 #include "thread.h"
 #include "trap.h"
 
+struct proc_slot;
+struct proc_family;
+
 struct mem_state {
     struct rb_root free;
     struct list_head regions;
@@ -25,6 +28,11 @@ struct sche_state {
     struct list_head wait_event;
     size_t event_waiters;
     uint32_t next_id;
+    struct proc_slot *free_proc_slots;
+    uint32_t free_proc_slot_count;
+    uint32_t reserved_proc_slot_count;
+    struct proc_family *free_proc_families;
+    uint32_t free_proc_family_count;
 };
 
 struct cpu {

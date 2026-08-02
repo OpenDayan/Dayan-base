@@ -16,7 +16,11 @@ int main(void)
     assert(sizeof(struct rpc_heap_request) == 8);
     assert(sizeof(struct rpc_heap_response) == 16);
     assert(sizeof(struct rpc_heap_release) == 16);
+    assert(sizeof(struct rpc_proc_exit_request) == 40);
     assert(sizeof(struct rpc_proc_create_request) == 208);
+    assert(sizeof(struct rpc_proc_info) == 80);
+    assert(sizeof(struct rpc_proc_ps_snapshot) == 1488);
+    assert(sizeof(struct rpc_proc_kill_result) == 48);
     assert(offsetof(struct rpc_proc_create_request, args) == 64);
     assert(offsetof(struct rpc_proc_create_request, status) == 128);
     assert(offsetof(struct rpc_proc_create_request, task_id) == 152);
@@ -24,10 +28,17 @@ int main(void)
     assert(offsetof(struct rpc_proc_create_request, task_mode) == 176);
     assert(offsetof(struct rpc_proc_create_request, max_child_procs) == 184);
     assert(offsetof(struct rpc_proc_create_request, uram_base) == 192);
+    assert(RPC_PROC_SLOTS_PER_HART == 16);
+    assert(RPC_PROC_MAX_CHILD_PROCS == 15);
     assert(RPC_PROC_CREATE == 0x0100);
     assert(RPC_PROC_CREATE_RESPONSE == (RPC_PROC_CREATE | 0x8000));
     assert(RPC_ICACHE_FLUSH == 0x0101);
     assert(RPC_ICACHE_FLUSH_RESPONSE == (RPC_ICACHE_FLUSH | 0x8000));
+    assert(RPC_PROC_PS == 0x0102);
+    assert(RPC_PROC_PS_RESPONSE == (RPC_PROC_PS | 0x8000));
+    assert(RPC_PROC_KILL_ALL == 0x0103);
+    assert(RPC_PROC_KILL_ALL_RESPONSE ==
+           (RPC_PROC_KILL_ALL | 0x8000));
     assert(sizeof(struct trap_record) == 320);
     assert(DAYAN_DEVICE_MAILBOX(3) == 0x1018U);
     assert(DAYAN_IRQ_MAILBOX(3) == 0x2038U);

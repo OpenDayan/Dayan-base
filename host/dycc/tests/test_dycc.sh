@@ -110,3 +110,11 @@ if "$DYCC_BIN" --split-only --emit-host "$work_dir/resource.host.cpp" \
     exit 1
 fi
 rg -q '1 KiB-aligned URAM size' "$work_dir/resource.log"
+
+if "$DYCC_BIN" --split-only --emit-host "$work_dir/children.host.cpp" \
+    "$test_dir/too_many_children_desc.cpp" \
+    >"$work_dir/children.log" 2>&1; then
+    echo "descriptor reserving more than 16 Hart proc slots was accepted" >&2
+    exit 1
+fi
+rg -q 'child_procs<=15' "$work_dir/children.log"

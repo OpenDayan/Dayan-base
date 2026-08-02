@@ -70,7 +70,9 @@ host/dycc/dycc --save-temps=build/dycc-demo \
   `void`、具有外部链接、不是模板或可变参数函数，并且最多接收 8 个机器字参数。
 - 每个 `__kernel__` 必须有且只有一个同名资源描述符：
   `DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes);`。
-  `child_procs` 是该 kernel 实例最多同时存活的子 proc 数；`atomic_bytes` 是由
+  `child_procs` 是该 kernel 实例最多同时存活的子 proc 数，上限为 15。root proc
+  也占一个 slot；Runtime 保证同一 Hart 的 `1 + child_procs` 总和不超过 16。
+  `atomic_bytes` 是由
   `shared/gp` 寻址的 coherent allocation 大小；`uram_bytes` 是当前 Core 的私有
   URAM 大小，必须是 1 KiB 的整数倍。三项都填 0 表示不申请对应资源。
 - `__device__`：函数或全局变量只进入 Device。
@@ -95,7 +97,7 @@ wrapper 返回 `int` 状态。它包含每个 kernel 独立的 static descriptor
 初始化自旋锁。首次调用使用嵌入的 `__kernel_obj__`、对象尺寸和准确的 C++ mangled
 entry 名以及资源声明创建描述符；后续调用直接复用。dycc 同时在 Device object 中保留
 外部 C 符号 `<kernel>__desc`，并把相同常量写入 Host Package。描述符版本为 1、固定
-32 bytes，当前最多声明 64 个子 proc。实际 Device module 按 runtime 实例缓存，因此
+32 bytes，当前最多声明 15 个子 proc。实际 Device module 按 runtime 实例缓存，因此
 同一 Host `.o` 可用于多个 runtime。
 
 源文件可根据 `__DAYAN_DEVICE__` / `__DAYAN_HOST__` 条件包含单侧头文件。比如

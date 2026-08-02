@@ -3,10 +3,12 @@
 
 #define EPERM       1
 #define EIO         5
+#define ECHILD     10
 #define ENOMEM     12
 #define EBUSY      16
 #define EINVAL     22
 #define ENOSYS     38
 #define EOVERFLOW  75
+#define ECANCELED 125
 
 #endif

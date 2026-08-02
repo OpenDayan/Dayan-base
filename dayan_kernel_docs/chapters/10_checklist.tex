@@ -31,7 +31,7 @@
   \code{[ ]} & 等待 Host--Device response 时，后台 worker 仍处理 Device--Host 服务。 \\
   \code{[ ]} & 堆 region 的地址、大小、类型和 hart owner 在申请与归还时一致。 \\
   \code{[ ]} & proc create 描述符保持到 EXITED/FAILED；shared allocation 保持到所有使用者结束。 \\
-  \code{[ ]} & 按 Core 累加限制子 proc、atomic cache 与 URAM，并在每个 invocation 终态后释放 URAM。 \\
+  \code{[ ]} & 按 Hart 累加 \code{1 + max\_child\_procs}，保证不超过 16，并按 Core 限制 atomic cache 与 URAM；invocation 终态后释放 reservation 与 URAM。 \\
 \end{dayantable}
 
 \subsection{验证命令}

@@ -4,6 +4,9 @@ ENTRY(_start)
 __hart_count = DEFINED(CONFIG_HART_COUNT) ? CONFIG_HART_COUNT : 4;
 __cpu_local_size = DEFINED(CONFIG_CPU_LOCAL_SIZE) ? CONFIG_CPU_LOCAL_SIZE : 0x1000;
 __stack_size = DEFINED(CONFIG_STACK_SIZE) ? CONFIG_STACK_SIZE : 0x10000;
+__proc_slot_count = DEFINED(CONFIG_PROC_SLOT_COUNT) ? CONFIG_PROC_SLOT_COUNT : 16;
+__proc_stack_size = DEFINED(CONFIG_PROC_STACK_SIZE) ? CONFIG_PROC_STACK_SIZE : 0x10000;
+__proc_printf_size = DEFINED(CONFIG_PROC_PRINTF_SIZE) ? CONFIG_PROC_PRINTF_SIZE : 0x1000;
 __rpc_stack_size = DEFINED(CONFIG_RPC_STACK_SIZE) ? CONFIG_RPC_STACK_SIZE : 0x1000;
 __trap_stack_size = DEFINED(CONFIG_TRAP_STACK_SIZE) ? CONFIG_TRAP_STACK_SIZE : 0x1000;
 __heap_size = DEFINED(CONFIG_HEAP_SIZE) ? CONFIG_HEAP_SIZE : 0x100000;
@@ -94,6 +97,27 @@ SECTIONS
         __trap_stack_end = .;
     } > RAM
 
+    .proc_slots ALIGN(64) (NOLOAD) :
+    {
+        __proc_slots_start = .;
+        *(.proc_slots)
+        __proc_slots_end = .;
+    } > RAM
+
+    .proc_stack ALIGN(64) (NOLOAD) :
+    {
+        __proc_stack_start = .;
+        *(.proc_stack)
+        __proc_stack_end = .;
+    } > RAM
+
+    .proc_printf ALIGN(64) (NOLOAD) :
+    {
+        __proc_printf_start = .;
+        *(.proc_printf)
+        __proc_printf_end = .;
+    } > RAM
+
     .heap ALIGN(64) (NOLOAD) :
     {
         __heap_start = .;
@@ -130,6 +154,12 @@ SECTIONS
            "CPU_LOCAL_SIZE must be an 8-byte multiple")
     ASSERT((__stack_size % 16) == 0,
            "STACK_SIZE must be a 16-byte multiple")
+    ASSERT(__proc_slot_count == 16,
+           "the Hart proc-slot ABI requires exactly 16 slots")
+    ASSERT((__proc_stack_size % 16) == 0,
+           "PROC_STACK_SIZE must be a 16-byte multiple")
+    ASSERT(__proc_printf_size > 0,
+           "PROC_PRINTF_SIZE must be nonzero")
     ASSERT((__rpc_stack_size % 16) == 0,
            "RPC_STACK_SIZE must be a 16-byte multiple")
     ASSERT((__trap_stack_size % 16) == 0,
@@ -142,6 +172,14 @@ SECTIONS
            "ordinary mutable .bss is unsafe; keep state per hart")
     ASSERT(SIZEOF(.init_array) == 0,
            "constructors are unsupported")
+    ASSERT(SIZEOF(.proc_slots) > 0,
+           "per-Hart proc slot metadata is missing")
+    ASSERT(SIZEOF(.proc_stack) ==
+           __hart_count * __proc_slot_count * __proc_stack_size,
+           "per-Hart proc stack reservation has the wrong size")
+    ASSERT(SIZEOF(.proc_printf) ==
+           __hart_count * __proc_slot_count * __proc_printf_size,
+           "per-Hart proc printf reservation has the wrong size")
     ASSERT(__ram_used_end <= ORIGIN(RAM) + LENGTH(RAM),
            "image, per-hart stacks, and heaps exceed RAM")
     ASSERT(SIZEOF(.coherent) == 0,

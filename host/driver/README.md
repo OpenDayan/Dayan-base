@@ -98,10 +98,11 @@ URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB。真实多 Cluster 
 可见的 region 不得重叠；不同 Cluster 的局部地址空间可以使用相同数值地址。
 
 每个 kernel 的 Package 元信息声明 `max_child_procs`、`atomic_cache_size` 和
-`uram_size`。Server 选 Core 时累加检查三类资源：子 proc 数受
-`max_child_procs_per_core` 限制，atomic cache 与 URAM 分别受 HAL 对该 Core 可见的
-容量限制。URAM allocation 固定为 Core scope，以 1 KiB 为分配和释放粒度；物理
-Cluster/Core 仍不会出现在 Runtime 启动接口中。
+`uram_size`。Server 选 Core 时累加检查三类资源：每个 invocation 按
+`1 + max_child_procs` 预留 proc slot，同一 Hart 最多 16 个（root 计入，init/RPC
+proc 不计入）；atomic cache 与 URAM 分别受 HAL 对该 Core 可见的容量限制。URAM
+allocation 固定为 Core scope，以 1 KiB 为分配和释放粒度；物理 Cluster/Core 仍不会
+出现在 Runtime 启动接口中。
 
 ## socket 与零中转 memcpy
 
@@ -131,18 +132,28 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
 后端优先等待 `_events_0`；事件接口缺失或不支持阻塞等待时，兼容轮询也只存在于 HAL
 内部。
 
-- Device→Host：输出、清屏、Device heap acquire/release 和 trap report；输出携带
-  Cluster、Core 与 proc ID，由 Server 归属到发起任务的 Runtime Session。Runtime
+- Device→Host：输出、清屏、Device heap acquire/release、trap report 和 root proc
+  exit；退出通知携带返回值与 cookie，子 proc 不发送 Host 生命周期消息。子 proc 的
+  独立 Device printf buffer 使用所属 Host root ID 输出；Cluster、Core 与 root proc ID
+  由 Server 归属到发起任务的 Runtime Session。Runtime
   在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
-- Host→Device：`RPC_PROC_CREATE` 与 `RPC_ICACHE_FLUSH`；每个 Core 同时至多一笔，
-  不同 Core 可并行。
+- Host→Device：`RPC_PROC_CREATE`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS` 与
+  `RPC_PROC_KILL_ALL`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
+  `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
 create-proc ABI v3 使用 208-byte `rpc_proc_create_request`，包含 entry、栈、shared、
 printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
-以及最大子 proc 数和 URAM base/size。BL1 为一个 root proc 预留声明数量的子 proc
-slot；`dayan_create_proc(entry, argument)` 在同一 Core 创建子 proc 并继承 logical
-task、`shared/gp` 和 URAM。父 proc 返回时会等待直接子 proc，因而 root 的终态覆盖
-整棵子 proc 树。最后由 scheduler 栈释放资源，并把描述符置为 `EXITED` 或 `FAILED`。
+以及最大子 proc 数和 URAM base/size。BL1 创建 root 时一次性专属预留全部子 slot；
+`dayan_create_proc(entry, argument)` 在同一 Core 创建子 proc，返回正的 ID 并继承
+logical task、`shared/gp` 和 URAM。`dayan_join`/`dayan_join_all` 回收直属子 proc；父
+proc 返回前隐式等待全部子 proc，因而 root 的终态覆盖整棵子树。每个 proc 退出会
+flush/CLEAR 输出；只有 root 主动向 Host 上报返回值。最后由 scheduler 栈归还整组静态
+slot，并把描述符置为 `EXITED` 或 `FAILED`。
+
+`RPC_PROC_PS` 返回目标 Hart 的系统/算子 proc 快照。`RPC_PROC_KILL_ALL` 不碰 init 和
+两个 RPC proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
+等待者标为 `KILL_WAIT_PRODUCE`，结果 token 到达后再释放。被 kill 的 root 以
+`-ECANCELED` 完成，子 proc 不单独通知 Host。
 Service 接受 create response 后已经快速进入终态仍是合法情况。
 
 Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-local URAM。

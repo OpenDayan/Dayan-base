@@ -15,6 +15,8 @@ enum thread_state {
     THREAD_WAIT_EVENT = 3,
     THREAD_WAIT_START = 4,
     THREAD_WAIT_EXIT = 5,
+    THREAD_WAIT_PRODUCE = 6,
+    THREAD_KILL_WAIT_PRODUCE = 7,
 };
 
 enum thread_type {

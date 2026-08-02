@@ -93,6 +93,10 @@ int npu_package_build(const void *riscv_object, size_t object_size,
             !kernel->supported_task_modes ||
             (kernel->supported_task_modes & ~NPU_PACKAGE_TASK_MODE_ALL) ||
             kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
+            (kernel->stack_size &&
+             kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
+            kernel->stack_size > NPU_PACKAGE_PROC_STACK_SIZE ||
+            kernel->printf_buffer_size > NPU_PACKAGE_PROC_PRINTF_SIZE ||
             (kernel->uram_size & (NPU_PACKAGE_URAM_GRANULE - 1U)) ||
             kernel->argument_count > NPU_PACKAGE_MAX_ARGS ||
             (kernel->argument_count && !kernel->arguments) ||

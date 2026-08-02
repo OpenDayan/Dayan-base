@@ -3,6 +3,7 @@
 #include <dayan_sys.h>
 
 #define TEST_FAILURE (~(uint64_t)0)
+#define TEST_CHILD_PROCS 15U
 
 struct child_work {
     uint64_t *output;
@@ -25,6 +26,19 @@ static void child_write(void *argument)
         *work->uram_tail ==
             (work->value ^ 0x55aa55aa55aa55aaULL) ?
         work->value : TEST_FAILURE;
+    dayan_proc_exit((int64_t)work->value);
+}
+
+static void nested_write(void *argument)
+{
+    struct child_work *work = argument;
+    int64_t result = -1;
+    int child = dayan_create_proc(child_write, work);
+
+    if (child < 0 || dayan_join((uint32_t)child, &result) < 0 ||
+        result != (int64_t)work->value)
+        dayan_proc_exit(-1);
+    dayan_proc_exit(result);
 }
 
 void grid_kernel(uint64_t *output, uint64_t base)
@@ -38,6 +52,8 @@ void grid_kernel(uint64_t *output, uint64_t base)
     uint64_t expected = base + (uint64_t)dayan_task_mode() * 100U + linear;
     uint64_t *uram = dayan_uram_base();
     struct child_work *work;
+    int children[TEST_CHILD_PROCS];
+    int64_t child_result;
 
     if (!uram || dayan_uram_size() != 0x180000U ||
         ((uintptr_t)uram & 1023U)) {
@@ -62,7 +78,28 @@ void grid_kernel(uint64_t *output, uint64_t base)
     work->uram_tail = (uint64_t *)((unsigned char *)uram +
                                   dayan_uram_size() - sizeof(uint64_t));
     work->value = expected;
-    if (dayan_create_proc(child_write, work) < 0 ||
-        dayan_create_proc(child_write, work) >= 0)
+    for (uint32_t child = 0; child < TEST_CHILD_PROCS; ++child) {
+        children[child] = dayan_create_proc(child_write, work);
+        if (children[child] < 0) {
+            output[linear] = TEST_FAILURE;
+            return;
+        }
+    }
+    if (dayan_create_proc(child_write, work) >= 0)
         output[linear] = TEST_FAILURE;
+    child_result = -1;
+    if (dayan_join((uint32_t)children[0], &child_result) < 0 ||
+        child_result != (int64_t)expected ||
+        dayan_join((uint32_t)children[1], 0) < 0 ||
+        dayan_create_proc(nested_write, work) < 0 ||
+        dayan_join_all() < 0)
+        output[linear] = TEST_FAILURE;
+    dayan_proc_exit((int64_t)expected);
+}
+
+void kill_kernel(uint64_t *output, uint64_t value)
+{
+    *output = value;
+    for (;;)
+        dayan_yield();
 }

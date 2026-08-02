@@ -46,10 +46,42 @@ static int rpc_transaction_submit(struct rpc_transaction *transaction)
 
 static void rpc_transaction_wait(struct rpc_transaction *transaction)
 {
+    struct proc *proc = proc_self();
+
+    if (proc) {
+        if (proc->system_wait)
+            platform_halt();
+        proc->system_wait = transaction;
+    }
     while (!transaction->completed) {
         if (proc_wait_event(&transaction->wait) < 0)
             platform_halt();
     }
+    if (proc)
+        proc->system_wait = 0;
+}
+
+int rpc_proc_wait_cancel(struct proc *proc)
+{
+    struct rpc_transaction *transaction;
+
+    if (!proc || proc->thread.cpu != cpu_self())
+        return -EINVAL;
+    transaction = proc->system_wait;
+    if (!transaction)
+        return 0;
+    if (transaction->completed) {
+        proc->system_wait = 0;
+        return 0;
+    }
+    if (!list_empty(&transaction->node)) {
+        list_del_init(&transaction->node);
+        transaction->status = -ECANCELED;
+        transaction->completed = 1;
+        proc->system_wait = 0;
+        return 0;
+    }
+    return 1;
 }
 
 static int rpc_receive_poll(struct proc *proc, void *arg)
@@ -225,38 +257,51 @@ long rpc_call(uint32_t service,
     return call.transaction.status;
 }
 
-long rpc_write(const void *data, size_t size)
+long rpc_write_proc(uint32_t proc_id, const void *data, size_t size)
 {
     struct rpc_print_request request;
-    struct proc *proc;
 
     if (!size)
         return 0;
-    if (!data)
+    if (!proc_id || !data)
         return -EINVAL;
-    proc = proc_self();
-    if (!proc)
-        return -EPERM;
     request.hart_id = (uint32_t)platform_hart_id();
-    request.proc_id = proc->thread.id;
+    request.proc_id = proc_id;
     request.data_addr = (uintptr_t)data;
     request.data_size = size;
     platform_cache_clean(data, size);
     return rpc_call(RPC_WRITE, &request, sizeof(request), 0, 0);
 }
 
-long rpc_clear(void)
+long rpc_write(const void *data, size_t size)
 {
-    struct rpc_print_request request;
     struct proc *proc = proc_self();
 
-    if (!proc)
-        return -EPERM;
+    return proc ? rpc_write_proc(proc->host_proc_id ? proc->host_proc_id :
+                                                      proc->thread.id,
+                                 data, size) : -EPERM;
+}
+
+long rpc_clear_proc(uint32_t proc_id)
+{
+    struct rpc_print_request request;
+
+    if (!proc_id)
+        return -EINVAL;
     request.hart_id = (uint32_t)platform_hart_id();
-    request.proc_id = proc->thread.id;
+    request.proc_id = proc_id;
     request.data_addr = 0;
     request.data_size = 0;
     return rpc_call(RPC_CLEAR, &request, sizeof(request), 0, 0);
+}
+
+long rpc_clear(void)
+{
+    struct proc *proc = proc_self();
+
+    return proc ? rpc_clear_proc(proc->host_proc_id ? proc->host_proc_id :
+                                                      proc->thread.id) :
+                  -EPERM;
 }
 
 long rpc_heap_acquire(size_t size, struct rpc_heap_response *response)
@@ -281,6 +326,24 @@ long rpc_heap_release(uintptr_t addr, size_t size)
     release.addr = addr;
     release.size = size;
     return rpc_call(RPC_HEAP_RELEASE, &release, sizeof(release), 0, 0);
+}
+
+long rpc_proc_exit(uint32_t proc_id, uint32_t parent_proc_id,
+                   int64_t result, uint64_t cookie, uint32_t flags)
+{
+    struct rpc_proc_exit_request request;
+
+    if (!proc_id || flags != RPC_PROC_EXIT_ROOT || parent_proc_id)
+        return -EINVAL;
+    request.version = RPC_PROC_EXIT_VERSION;
+    request.size = sizeof(request);
+    request.hart_id = (uint32_t)platform_hart_id();
+    request.proc_id = proc_id;
+    request.parent_proc_id = parent_proc_id;
+    request.flags = flags;
+    request.result = result;
+    request.cookie = cookie;
+    return rpc_call(RPC_PROC_EXIT, &request, sizeof(request), 0, 0);
 }
 
 static void rpc_trap_cleanup(struct rpc_transaction *transaction, void *arg)

@@ -8,14 +8,6 @@
 #include "sche.h"
 #include "stdlib.h"
 
-struct rpc_managed_proc {
-    struct proc proc;
-    struct rpc_proc_create_request *request;
-    struct proc_family *family;
-    void *stack;
-    void *printf_buffer;
-};
-
 static int range_inside(uint64_t address, uint64_t size,
                         uint64_t base, uint64_t capacity)
 {
@@ -27,6 +19,20 @@ static int proc_request_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
            range_inside(address, sizeof(struct rpc_proc_create_request),
+                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+}
+
+static int proc_ps_address_valid(uint64_t address)
+{
+    return !(address & 7U) &&
+           range_inside(address, sizeof(struct rpc_proc_ps_snapshot),
+                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+}
+
+static int proc_kill_address_valid(uint64_t address)
+{
+    return !(address & 7U) &&
+           range_inside(address, sizeof(struct rpc_proc_kill_result),
                         CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
 }
 
@@ -75,24 +81,19 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
 
 static void managed_proc_cleanup(struct proc *proc, void *arg)
 {
-    struct rpc_managed_proc *managed = arg;
-    struct rpc_proc_create_request *request = managed->request;
-    int status = proc->exit_status;
+    struct rpc_proc_create_request *request = arg;
+    int64_t status = proc->exit_status;
 
     request->status = status;
     request->state = status < 0 ? RPC_PROC_FAILED : RPC_PROC_EXITED;
     platform_cache_clean(request, sizeof(*request));
-
-    proc_family_destroy(managed->family);
-    free(managed->printf_buffer);
-    free(managed->stack);
-    free(managed);
 }
 
 static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
 {
     struct rpc_proc_create_request *request;
-    struct rpc_managed_proc *managed = 0;
+    struct proc *proc = 0;
+    struct proc_family *family = 0;
     int status = -EINVAL;
 
     *response_command = rpc_command_pack(RPC_PROC_CREATE_RESPONSE, arg);
@@ -104,64 +105,50 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     if (!proc_request_valid(request))
         goto complete;
 
-    managed = calloc(1, sizeof(*managed));
-    if (!managed) {
-        status = -ENOMEM;
+    status = proc_slot_acquire((size_t)request->stack_size,
+                               (size_t)request->printf_buffer_size, &proc);
+    if (status < 0)
         goto complete;
-    }
-    managed->request = request;
-    managed->stack = malloc((size_t)request->stack_size);
-    managed->printf_buffer = request->printf_buffer_size ?
-        malloc((size_t)request->printf_buffer_size) : 0;
-    if (!managed->stack ||
-        (request->printf_buffer_size && !managed->printf_buffer)) {
-        status = -ENOMEM;
-        goto complete;
-    }
-    status = proc_family_create(request->max_child_procs,
+    status = proc_family_create(proc, request->max_child_procs,
                                 (size_t)request->stack_size,
                                 (size_t)request->printf_buffer_size,
-                                &managed->family);
+                                &family);
     if (status < 0)
         goto complete;
 
-    status = proc_init_args(&managed->proc,
-                            (proc_fn)(uintptr_t)request->entry,
-                            managed->stack, (size_t)request->stack_size,
-                            (void *)(uintptr_t)request->shared_base,
-                            managed->printf_buffer,
-                            (size_t)request->printf_buffer_size,
-                            request->argc, request->args);
+    status = proc_slot_init_args(proc, (proc_fn)(uintptr_t)request->entry,
+                                 (void *)(uintptr_t)request->shared_base,
+                                 request->argc, request->args);
     if (status < 0)
         goto complete;
-    status = proc_set_resources(&managed->proc, managed->family,
+    status = proc_set_resources(proc, family,
                                 (size_t)request->shared_size,
                                 (void *)(uintptr_t)request->uram_base,
                                 (size_t)request->uram_size);
     if (status < 0)
         platform_halt();
-    status = proc_set_cleanup(&managed->proc, managed_proc_cleanup, managed);
+    proc->cookie = request->cookie;
+    proc->host_proc_id = proc->thread.id;
+    status = proc_set_cleanup(proc, managed_proc_cleanup, request);
     if (status < 0)
         platform_halt();
-    status = proc_set_task(&managed->proc, request->task_id,
+    status = proc_set_task(proc, request->task_id,
                            request->task_dim, request->task_mode);
     if (status < 0)
         platform_halt();
 
     request->status = 0;
-    request->proc_id = managed->proc.thread.id;
+    request->proc_id = proc->thread.id;
     request->hart_id = (uint32_t)platform_hart_id();
     request->state = RPC_PROC_RUNNING;
     platform_cache_clean(request, sizeof(*request));
     return 1;
 
 complete:
-    if (managed) {
-        proc_family_destroy(managed->family);
-        free(managed->printf_buffer);
-        free(managed->stack);
-        free(managed);
-    }
+    if (family)
+        proc_family_destroy(family);
+    if (proc)
+        proc_slot_release(proc);
     request->status = status;
     request->proc_id = 0;
     request->hart_id = (uint32_t)platform_hart_id();
@@ -177,6 +164,49 @@ static int rpc_icache_flush(uint64_t token, uint64_t *response_command)
     return 1;
 }
 
+static int rpc_proc_ps(uint64_t arg, uint64_t *response_command)
+{
+    struct rpc_proc_ps_snapshot *snapshot;
+    int status;
+
+    *response_command = rpc_command_pack(RPC_PROC_PS_RESPONSE, arg);
+    if (!proc_ps_address_valid(arg))
+        return 1;
+    snapshot = (struct rpc_proc_ps_snapshot *)(uintptr_t)arg;
+    platform_cache_invalidate(snapshot, sizeof(*snapshot));
+    status = proc_snapshot(snapshot);
+    if (status < 0) {
+        snapshot->hart_id = (uint32_t)platform_hart_id();
+        snapshot->count = 0;
+        snapshot->status = status;
+    }
+    platform_cache_clean(snapshot, sizeof(*snapshot));
+    return 1;
+}
+
+static int rpc_proc_kill_all(uint64_t arg, uint64_t *response_command)
+{
+    struct rpc_proc_kill_result *result;
+    int status;
+
+    *response_command = rpc_command_pack(RPC_PROC_KILL_ALL_RESPONSE, arg);
+    if (!proc_kill_address_valid(arg))
+        return 1;
+    result = (struct rpc_proc_kill_result *)(uintptr_t)arg;
+    platform_cache_invalidate(result, sizeof(*result));
+    status = proc_kill_all(result);
+    if (status < 0) {
+        result->hart_id = (uint32_t)platform_hart_id();
+        result->status = status;
+        result->killed_roots = 0;
+        result->killed_children = 0;
+        result->released_slots = 0;
+        result->waiting_produce = 0;
+    }
+    platform_cache_clean(result, sizeof(*result));
+    return 1;
+}
+
 int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
 {
     if (!response_command)
@@ -185,5 +215,9 @@ int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
         return rpc_proc_create(arg, response_command);
     if (opcode == RPC_ICACHE_FLUSH)
         return rpc_icache_flush(arg, response_command);
+    if (opcode == RPC_PROC_PS)
+        return rpc_proc_ps(arg, response_command);
+    if (opcode == RPC_PROC_KILL_ALL)
+        return rpc_proc_kill_all(arg, response_command);
     return -ENOSYS;
 }

@@ -23,6 +23,8 @@ int operator_api_compile(dayan_resource_t *resource,
         (dayan_cluster_barrier_t *)shared;
     void *memory = malloc(64);
     void *uram;
+    int64_t child_result = 0;
+    int child;
     int status;
 
     memset(memory, 0, 64);
@@ -38,7 +40,12 @@ int operator_api_compile(dayan_resource_t *resource,
     status |= dayan_shared_resource_wait_ready(shared_resource);
     status |= dayan_shared_resource_consume(shared_resource);
     status |= dayan_shared_resource_wait_free(shared_resource);
-    status |= dayan_create_proc(compile_child, memory);
+    child = dayan_create_proc(compile_child, memory);
+    if (child > 0)
+        status |= dayan_join((uint32_t)child, &child_result);
+    else
+        status |= child;
+    status |= dayan_join_all();
     uram = dayan_uram_base();
     if (uram && !dayan_uram_size())
         status = -1;
@@ -52,6 +59,9 @@ int operator_api_compile(dayan_resource_t *resource,
     (void)printf("status=%d", status);
     (void)fflush(stdout);
     free(memory);
+
+    if (size == SIZE_MAX)
+        dayan_proc_exit(child_result);
 
     return snprintf(buffer, size, "%d %x", status,
                     (unsigned)fabsf((float)CHAR_BIT));

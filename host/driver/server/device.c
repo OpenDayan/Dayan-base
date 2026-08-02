@@ -23,6 +23,11 @@ _Static_assert((int)NPU_SERVICE_LAUNCH_EXITED == (int)RPC_PROC_EXITED,
                "Host and Device launch state ABI");
 _Static_assert((int)NPU_SERVICE_LAUNCH_FAILED == (int)RPC_PROC_FAILED,
                "Host and Device launch state ABI");
+_Static_assert(NPU_SERVICE_PROC_MAX_RECORDS == RPC_PROC_PS_MAX_RECORDS,
+               "Host and Device proc snapshot capacity ABI");
+_Static_assert(sizeof(npu_service_proc_info_t) ==
+               sizeof(struct rpc_proc_info),
+               "Host and Device proc record ABI");
 
 uint64_t npu_now_ms(void)
 {
@@ -80,6 +85,18 @@ static void default_trap(void *context, uint32_t cluster, uint32_t core,
             (unsigned long long)(record ? record->mtval : 0));
 }
 
+static void default_proc_exit(void *context, uint32_t cluster,
+                              uint32_t core, uint32_t proc,
+                              int64_t result, uint64_t cookie)
+{
+    (void)context;
+    (void)cluster;
+    (void)core;
+    (void)proc;
+    (void)result;
+    (void)cookie;
+}
+
 void npu_service_options_init(npu_service_options_t *options)
 {
     if (!options)
@@ -90,6 +107,7 @@ void npu_service_options_init(npu_service_options_t *options)
     options->default_timeout_ms = NPU_DEFAULT_TIMEOUT_MS;
     options->output = default_output;
     options->trap = default_trap;
+    options->proc_exit = default_proc_exit;
 }
 
 void npu_service_launch_desc_init(npu_service_launch_desc_t *desc)
@@ -110,7 +128,8 @@ static int options_valid(const npu_service_options_t *options)
 {
     return options && options->version == NPU_SERVICE_OPTIONS_VERSION &&
            options->rpc_poll_interval_us && options->default_timeout_ms &&
-           !options->reserved && options->output && options->trap;
+           !options->reserved && options->output && options->trap &&
+           options->proc_exit;
 }
 
 int npu_service_open(npu_service_device_t **device_out,
@@ -712,4 +731,170 @@ int npu_service_launch_release(npu_service_launch_t *launch)
     pthread_mutex_unlock(&device->mutex);
     free(launch);
     return 0;
+}
+
+int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
+                       npu_service_proc_snapshot_t *snapshot_out)
+{
+    struct rpc_proc_ps_snapshot snapshot;
+    npu_hal_allocation_t *allocation = 0;
+    uint64_t address;
+    uint64_t response;
+    uint32_t booted;
+    int status;
+
+    if (!device || !snapshot_out ||
+        !npu_hal_core_valid(device->hal, target))
+        return -EINVAL;
+    pthread_mutex_lock(&device->mutex);
+    booted = device->clusters[target.cluster].booted_cores;
+    pthread_mutex_unlock(&device->mutex);
+    if (!(booted & (UINT32_C(1) << target.core)))
+        return -ENODEV;
+    status = npu_service_alloc_visible(
+        device, target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
+        (uint32_t)npu_service_core_index(device, target),
+        sizeof(snapshot), 64, &allocation);
+    if (status < 0)
+        return status;
+    status = npu_hal_memory_address(device->hal, allocation, target,
+                                    &address);
+    if (status < 0 || address > RPC_COMMAND_ARG_MASK) {
+        status = status < 0 ? status : -EOVERFLOW;
+        goto out;
+    }
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.version = RPC_PROC_PS_VERSION;
+    snapshot.size = sizeof(snapshot);
+    snapshot.capacity = RPC_PROC_PS_MAX_RECORDS;
+    snapshot.status = -EIO;
+    status = npu_hal_memory_write(device->hal, allocation, target, 0,
+                                  &snapshot, sizeof(snapshot));
+    if (status < 0)
+        goto out;
+    status = npu_service_rpc_call(device, target, RPC_PROC_PS, address,
+                                  &response,
+                                  device->options.default_timeout_ms);
+    if (status < 0)
+        goto out;
+    if (rpc_command_opcode(response) != RPC_PROC_PS_RESPONSE ||
+        rpc_command_arg(response) != address) {
+        status = -EPROTO;
+        goto out;
+    }
+    status = npu_hal_memory_read(device->hal, allocation, target, &snapshot,
+                                 0, sizeof(snapshot));
+    if (status < 0)
+        goto out;
+    if (snapshot.version != RPC_PROC_PS_VERSION ||
+        snapshot.size != sizeof(snapshot) ||
+        snapshot.capacity != RPC_PROC_PS_MAX_RECORDS || snapshot.flags ||
+        snapshot.reserved || snapshot.hart_id != target.core ||
+        snapshot.count > RPC_PROC_PS_MAX_RECORDS) {
+        status = -EPROTO;
+        goto out;
+    }
+    if (snapshot.status < 0) {
+        status = snapshot.status >= INT32_MIN ? (int)snapshot.status : -EIO;
+        goto out;
+    }
+    memset(snapshot_out, 0, sizeof(*snapshot_out));
+    snapshot_out->target = target;
+    snapshot_out->count = snapshot.count;
+    snapshot_out->global_free_slots = snapshot.global_free_slots;
+    snapshot_out->reserved_slots = snapshot.reserved_slots;
+    memcpy(snapshot_out->records, snapshot.records,
+           snapshot.count * sizeof(snapshot.records[0]));
+    status = 0;
+
+out:
+    if (allocation) {
+        int free_status = npu_hal_memory_free(device->hal, allocation);
+
+        if (status == 0 && free_status < 0)
+            status = free_status;
+    }
+    return status;
+}
+
+int npu_service_rpc_kill_all(npu_service_device_t *device,
+                             npu_hal_core_t target,
+                             npu_service_kill_result_t *result_out)
+{
+    struct rpc_proc_kill_result result;
+    npu_hal_allocation_t *allocation = 0;
+    uint64_t address;
+    uint64_t response;
+    uint32_t booted;
+    int status;
+
+    if (!device || !result_out ||
+        !npu_hal_core_valid(device->hal, target))
+        return -EINVAL;
+    pthread_mutex_lock(&device->mutex);
+    booted = device->clusters[target.cluster].booted_cores;
+    pthread_mutex_unlock(&device->mutex);
+    if (!(booted & (UINT32_C(1) << target.core)))
+        return -ENODEV;
+    status = npu_service_alloc_visible(
+        device, target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
+        (uint32_t)npu_service_core_index(device, target),
+        sizeof(result), 64, &allocation);
+    if (status < 0)
+        return status;
+    status = npu_hal_memory_address(device->hal, allocation, target,
+                                    &address);
+    if (status < 0 || address > RPC_COMMAND_ARG_MASK) {
+        status = status < 0 ? status : -EOVERFLOW;
+        goto out;
+    }
+    memset(&result, 0, sizeof(result));
+    result.version = RPC_PROC_KILL_ALL_VERSION;
+    result.size = sizeof(result);
+    result.status = -EIO;
+    status = npu_hal_memory_write(device->hal, allocation, target, 0,
+                                  &result, sizeof(result));
+    if (status < 0)
+        goto out;
+    status = npu_service_rpc_call(device, target, RPC_PROC_KILL_ALL,
+                                  address, &response,
+                                  device->options.default_timeout_ms);
+    if (status < 0)
+        goto out;
+    if (rpc_command_opcode(response) != RPC_PROC_KILL_ALL_RESPONSE ||
+        rpc_command_arg(response) != address) {
+        status = -EPROTO;
+        goto out;
+    }
+    status = npu_hal_memory_read(device->hal, allocation, target, &result,
+                                 0, sizeof(result));
+    if (status < 0)
+        goto out;
+    if (result.version != RPC_PROC_KILL_ALL_VERSION ||
+        result.size != sizeof(result) || result.hart_id != target.core ||
+        result.flags || result.reserved) {
+        status = -EPROTO;
+        goto out;
+    }
+    if (result.status < 0) {
+        status = result.status >= INT32_MIN ? (int)result.status : -EIO;
+        goto out;
+    }
+    memset(result_out, 0, sizeof(*result_out));
+    result_out->target = target;
+    result_out->status = result.status;
+    result_out->killed_roots = result.killed_roots;
+    result_out->killed_children = result.killed_children;
+    result_out->released_slots = result.released_slots;
+    result_out->waiting_produce = result.waiting_produce;
+    status = 0;
+
+out:
+    if (allocation) {
+        int free_status = npu_hal_memory_free(device->hal, allocation);
+
+        if (status == 0 && free_status < 0)
+            status = free_status;
+    }
+    return status;
 }

@@ -10,11 +10,18 @@
 extern "C" {
 #endif
 
-#define NPU_SERVICE_OPTIONS_VERSION 3U
+#define NPU_SERVICE_OPTIONS_VERSION 4U
 #define NPU_SERVICE_LAUNCH_DESC_VERSION 3U
 #define NPU_SERVICE_TIMEOUT_INFINITE UINT32_MAX
 #define NPU_SERVICE_LAUNCH_MAX_ARGS 8U
 #define NPU_SERVICE_OUTPUT_CLEAR (1U << 0)
+#define NPU_SERVICE_PROC_MAX_RECORDS 18U
+
+#define NPU_SERVICE_PROC_SYSTEM            (1U << 0)
+#define NPU_SERVICE_PROC_HOST_ROOT         (1U << 1)
+#define NPU_SERVICE_PROC_CHILD             (1U << 2)
+#define NPU_SERVICE_PROC_ZOMBIE            (1U << 3)
+#define NPU_SERVICE_PROC_KILL_WAIT_PRODUCE (1U << 4)
 
 typedef struct npu_service_device npu_service_device_t;
 typedef struct npu_service_launch npu_service_launch_t;
@@ -34,6 +41,9 @@ typedef void (*npu_service_output_fn)(void *context, uint32_t cluster,
 typedef void (*npu_service_trap_fn)(void *context, uint32_t cluster,
                                     uint32_t core,
                                     const struct trap_record *record);
+typedef void (*npu_service_proc_exit_fn)(void *context, uint32_t cluster,
+                                         uint32_t core, uint32_t proc,
+                                         int64_t result, uint64_t cookie);
 
 typedef struct npu_service_options {
     uint32_t version;
@@ -42,6 +52,7 @@ typedef struct npu_service_options {
     uint32_t reserved;
     npu_service_output_fn output;
     npu_service_trap_fn trap;
+    npu_service_proc_exit_fn proc_exit;
     void *callback_context;
 } npu_service_options_t;
 
@@ -77,6 +88,40 @@ typedef struct npu_service_launch_info {
     uint32_t task_mode;
     uint64_t cookie;
 } npu_service_launch_info_t;
+
+typedef struct npu_service_proc_info {
+    uint32_t proc_id;
+    uint32_t parent_proc_id;
+    uint32_t state;
+    uint32_t flags;
+    uint32_t live_children;
+    uint32_t slot_index;
+    uint32_t task_mode;
+    uint32_t host_proc_id;
+    uint32_t task_id[3];
+    uint32_t task_dim[3];
+    int64_t result;
+    uint64_t pc;
+    uint64_t cookie;
+} npu_service_proc_info_t;
+
+typedef struct npu_service_proc_snapshot {
+    npu_hal_core_t target;
+    uint32_t count;
+    uint32_t global_free_slots;
+    uint32_t reserved_slots;
+    uint32_t reserved;
+    npu_service_proc_info_t records[NPU_SERVICE_PROC_MAX_RECORDS];
+} npu_service_proc_snapshot_t;
+
+typedef struct npu_service_kill_result {
+    npu_hal_core_t target;
+    int64_t status;
+    uint32_t killed_roots;
+    uint32_t killed_children;
+    uint32_t released_slots;
+    uint32_t waiting_produce;
+} npu_service_kill_result_t;
 
 void npu_service_options_init(npu_service_options_t *options);
 void npu_service_launch_desc_init(npu_service_launch_desc_t *desc);
@@ -114,6 +159,13 @@ int npu_service_launch_wait(npu_service_launch_t *launch,
                             uint32_t timeout_ms,
                             npu_service_launch_info_t *info);
 int npu_service_launch_release(npu_service_launch_t *launch);
+
+/* Administrative calls explicitly address one Cluster/Core (Hart). */
+int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
+                       npu_service_proc_snapshot_t *snapshot);
+int npu_service_rpc_kill_all(npu_service_device_t *device,
+                             npu_hal_core_t target,
+                             npu_service_kill_result_t *result);
 
 const npu_service_options_t *npu_service_get_options(
     const npu_service_device_t *device);

@@ -14,7 +14,7 @@
 
 #define DAYAN_SERVER_BACKLOG 64U
 #define DAYAN_SERVER_DEFAULT_RESIDENT (64U * 1024U * 1024U)
-#define DAYAN_SERVER_DEFAULT_CHILD_PROCS 64U
+#define DAYAN_SERVER_DEFAULT_PROCS_PER_HART 16U
 #define DAYAN_SERVER_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 
 struct server_connection {
@@ -215,6 +215,22 @@ static void server_device_trap(void *context, uint32_t cluster,
     }
 }
 
+static void server_device_proc_exit(void *context, uint32_t cluster,
+                                    uint32_t core, uint32_t proc,
+                                    int64_t result, uint64_t cookie)
+{
+    dayan_server_t *server = context;
+
+    if (!server)
+        return;
+    pthread_mutex_lock(&server->mutex);
+    pthread_cond_broadcast(&server->condition);
+    pthread_mutex_unlock(&server->mutex);
+    if (server->service_proc_exit)
+        server->service_proc_exit(server->service_callback_context,
+                                  cluster, core, proc, result, cookie);
+}
+
 void dayan_server_options_init(dayan_server_options_t *options)
 {
     if (!options)
@@ -223,7 +239,7 @@ void dayan_server_options_init(dayan_server_options_t *options)
     options->version = DAYAN_SERVER_OPTIONS_VERSION;
     options->socket_path = NPU_DEFAULT_SERVER_SOCKET;
     options->resident_limit_per_core = DAYAN_SERVER_DEFAULT_RESIDENT;
-    options->max_child_procs_per_core = DAYAN_SERVER_DEFAULT_CHILD_PROCS;
+    options->max_procs_per_hart = DAYAN_SERVER_DEFAULT_PROCS_PER_HART;
     npu_hal_options_init(&options->hal);
     npu_service_options_init(&options->service);
 }
@@ -433,7 +449,9 @@ int dayan_server_create(dayan_server_t **server_out,
         options = &defaults;
     }
     if (options->version != DAYAN_SERVER_OPTIONS_VERSION ||
-        !options->max_child_procs_per_core || !options->socket_path ||
+        !options->max_procs_per_hart ||
+        options->max_procs_per_hart > NPU_PACKAGE_HART_MAX_PROCS ||
+        !options->socket_path ||
         !*options->socket_path)
         return -EINVAL;
     server = calloc(1, sizeof(*server));
@@ -442,9 +460,11 @@ int dayan_server_create(dayan_server_t **server_out,
     server->listen_fd = -1;
     server->options = *options;
     server->service_trap = options->service.trap;
+    server->service_proc_exit = options->service.proc_exit;
     server->service_callback_context = options->service.callback_context;
     server->options.service.output = server_device_output;
     server->options.service.trap = server_device_trap;
+    server->options.service.proc_exit = server_device_proc_exit;
     server->options.service.callback_context = server;
     server->socket_path = strdup(options->socket_path);
     if (!server->socket_path) {
