@@ -44,6 +44,11 @@ struct server_core_slot {
     uint32_t enabled;
     uint32_t active_tasks;
     uint64_t resident_memory;
+    uint64_t child_procs;
+    uint64_t atomic_cache_memory;
+    uint64_t atomic_cache_capacity;
+    uint64_t uram_memory;
+    uint64_t uram_capacity;
 };
 
 struct server_package_cache {
@@ -112,6 +117,7 @@ struct server_kernel {
 
 struct server_invocation {
     npu_service_launch_t *launch;
+    npu_hal_allocation_t *uram_allocation;
     size_t slot_index;
     uint64_t resident;
     uint32_t proc_id;
@@ -262,6 +268,8 @@ int server_queue_output_locked(dayan_server_t *server,
                                uint32_t proc, const void *data, size_t size,
                                uint32_t flags);
 void server_route_pending_outputs_locked(dayan_server_t *server);
+int server_launch_resources_valid(const dayan_server_t *server,
+                                  const struct server_command *command);
 void *dayan_scheduler_main(void *argument);
 
 #endif

@@ -254,8 +254,9 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
 
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
-184-byte v2 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
-0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode` 以及完成状态。BL1 校验
+208-byte v3 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 proc 数、URAM
+base/size 以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
 回复 opcode `0x8100`。算子
 退出后，scheduler 已回到自己的栈，才调用 cleanup 释放 proc 私有资源，并把描述符从
@@ -311,8 +312,10 @@ scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队
 链表，scheduler 不遍历它；事件所有者调用 `proc_event_wake_one/all()` 或
 `proc_wake()` 将等待者移回 ready queue。传入空指针会使用 scheduler 的默认外部事件
 链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。普通 proc 仍由
-所有者管理生命周期；Host RPC 创建的托管 proc 注册了 scheduler cleanup，可在退出后
-回收 proc、栈和输出缓冲。当前没有抢占或跨 hart 迁移。
+所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留子 proc slot。
+`dayan_create_proc()` 创建的子 proc 保持在同一 hart，继承 logical task、`gp/shared`
+与 URAM；父 proc 退出前等待自己的子 proc，因此 root 进入终态时整棵子树已经完成。
+托管 cleanup 在退出后回收 proc、栈和输出缓冲。当前没有抢占或跨 hart 迁移。
 
 ## 算子 API 与同步
 
@@ -337,6 +340,16 @@ scheduler 每轮通过 BASE 全局地址 0 的 pop 读取所有已完成 token�
 其中存在等待者，scheduler 就持续扫描 Produce，而不会进入 `wfi`。每次等待占用一个
 Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项的无阻塞保证，不能无界
 发射同步项。
+
+`dayan_uram_base()` 和 `dayan_uram_size()` 返回 Service 为当前 kernel 实例在本 Core
+分配的私有 URAM；默认每 Core 容量为 1.5 MiB，地址窗口从 `0x00800000` 起并以 2 MiB
+为 Core stride。声明、分配和释放大小以 1 KiB 为粒度。`dayan_create_proc(entry, arg)`
+使用 kernel 描述符预留的 slot 在同 Core 创建一个单参数子 proc；达到声明上限时返回
+失败。
+
+`dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前
+`shared` allocation 内的零初始化 8-byte 对象，四个 lane 到达后以 release/acquire
+语义推进 generation，因此同一对象可以重复使用。
 
 资源分为单核和跨核两种类型，两者提供相同的
 `FREE -> BUSY -> READY -> FREE` 状态机。`alloc()` 设置生产者和消费者计数；生产者为
@@ -364,10 +377,10 @@ dayan_shared_resource_t *resource = (dayan_shared_resource_t *)shared;
 ```
 
 一个 hart 应在发布对象前调用一次 `dayan_shared_resource_init()`。该函数要求 `gp`
-位于 `0x00400000` 开始的 4 MiB 硬件窗口内，并检查资源地址不低于 `shared`、没有越过
-硬件窗口且满足类型对齐。内核仍不持有 Host 为单个 proc 分配的实际长度，因此 allocation
-内部的精确上界和算子布局由 Host/加载器负责。不能用普通 `malloc()` 为跨核资源分配
-内存，也不能在算子 `.o` 中静态定义 `.coherent` section。
+位于 `0x00400000` 开始的 4 MiB 硬件窗口内，并按 RPC 传入的当前 allocation 精确长度
+检查对象边界和类型对齐。算子仍须让自己的布局与 `atomic_cache_size` 声明一致。不能用
+普通 `malloc()` 为跨核资源分配内存，也不能在算子 `.o` 中静态定义 `.coherent`
+section。
 
 `device/lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度
@@ -391,6 +404,11 @@ Runtime 只依赖无拓扑语义的 data-plane provider ABI，因此后续可以
 将 `x*y*z` 个 task 分发到可用 Core；mode 4 以包含四个 Core 的 Cluster 为调度粒度，
 要求 `task_dim.x == 4`，每个 `(y,z)` group 的四个 x lane 同时占用同一 Cluster。
 Device 算子通过 `dayan_task_id/dim/mode()` 获取逻辑坐标，不感知物理放置。
+
+每个 `__kernel__` 旁必须定义
+`DAYAN_KERNEL_DESC(kernel, max_children, atomic_bytes, uram_bytes)`。dycc 在 Device
+object 中保留 `<kernel>__desc`，并把相同资源值写入 Package。Server 对同一 Core 上
+所有 resident kernel 的子 proc、atomic cache 和 URAM 声明求和后再调度。
 
 Runtime 与 Server 使用 Unix socket 控制协议。H2D/D2H payload 不进入 socket：Runtime
 先在 data socket 申请受范围和方向约束的 token，再用 HELLO 时经 `SCM_RIGHTS` 导入的

@@ -45,6 +45,7 @@ void npu_kernel_launch_attrs_init(npu_kernel_launch_attrs_t *attrs,
 int npu_kernel_descriptor_create(
     const void *object, size_t object_size, const char *entry_symbol,
     const npu_package_argument_t *arguments, size_t argument_count,
+    const dayan_kernel_resource_desc_t *resources,
     npu_kernel_descriptor_t **descriptor_out)
 {
     npu_package_kernel_desc_t kernel;
@@ -53,7 +54,12 @@ int npu_kernel_descriptor_create(
 
     if (!object || !object_size || !entry_symbol || !*entry_symbol ||
         argument_count > NPU_PACKAGE_MAX_ARGS ||
-        (argument_count && !arguments) || !descriptor_out)
+        (argument_count && !arguments) || !resources ||
+        resources->version != DAYAN_KERNEL_RESOURCE_DESC_VERSION ||
+        resources->size != sizeof(*resources) || resources->flags ||
+        resources->max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
+        (resources->uram_size & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
+        !descriptor_out)
         return -EINVAL;
     *descriptor_out = 0;
     descriptor = calloc(1, sizeof(*descriptor));
@@ -75,6 +81,9 @@ int npu_kernel_descriptor_create(
     kernel.entry_symbol = entry_symbol;
     kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
     kernel.max_tasks_per_core = 1;
+    kernel.max_child_procs = resources->max_child_procs;
+    kernel.atomic_cache_size = resources->atomic_cache_size;
+    kernel.uram_size = resources->uram_size;
     kernel.arguments = arguments;
     kernel.argument_count = argument_count;
     status = npu_package_build(object, object_size, &kernel, 1, 0,

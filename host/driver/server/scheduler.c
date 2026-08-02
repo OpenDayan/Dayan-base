@@ -10,6 +10,10 @@
 #define SERVER_DEFAULT_PRINTF_SIZE  UINT64_C(0x1000)
 #define SERVER_SHARED_ALIGNMENT     UINT64_C(64)
 #define SERVER_SHARED_RESOURCE_SIZE UINT64_C(16)
+#define SERVER_URAM_ALIGNMENT       UINT64_C(1024)
+
+static int calculate_shared_size(const struct server_command *command,
+                                 uint64_t *size_out);
 
 static int event_terminal(const struct server_event *event)
 {
@@ -177,10 +181,21 @@ static uint64_t launch_resident_size(const npu_package_kernel_t *metadata)
 {
     uint64_t stack = metadata->stack_size ? metadata->stack_size :
                                              SERVER_DEFAULT_STACK_SIZE;
+    uint64_t printf_size = metadata->printf_buffer_size ?
+        metadata->printf_buffer_size : SERVER_DEFAULT_PRINTF_SIZE;
+    uint64_t proc_count = (uint64_t)metadata->max_child_procs + 1U;
+    uint64_t per_proc;
+    uint64_t proc_memory;
 
-    if (metadata->resident_memory > UINT64_MAX - stack)
+    if (printf_size > UINT64_MAX - stack)
         return UINT64_MAX;
-    return metadata->resident_memory + stack;
+    per_proc = stack + printf_size;
+    if (per_proc && proc_count > UINT64_MAX / per_proc)
+        return UINT64_MAX;
+    proc_memory = per_proc * proc_count;
+    if (metadata->resident_memory > UINT64_MAX - proc_memory)
+        return UINT64_MAX;
+    return metadata->resident_memory + proc_memory;
 }
 
 static int slot_accepts(const dayan_server_t *server,
@@ -191,8 +206,11 @@ static int slot_accepts(const dayan_server_t *server,
     const struct server_kernel *kernel = command->data.launch.kernel;
     const npu_package_kernel_t *metadata = kernel->metadata;
     uint64_t resident = launch_resident_size(metadata);
+    uint64_t atomic_cache = 0;
     size_t index;
 
+    if (calculate_shared_size(command, &atomic_cache) < 0)
+        return 0;
     if (!slot->enabled || resident == UINT64_MAX ||
         kernel->active_per_core[slot_index] >=
             metadata->max_tasks_per_core)
@@ -201,6 +219,17 @@ static int slot_accepts(const dayan_server_t *server,
         (slot->resident_memory > server->options.resident_limit_per_core ||
          resident > server->options.resident_limit_per_core -
                         slot->resident_memory))
+        return 0;
+    if (slot->child_procs > server->options.max_child_procs_per_core ||
+        metadata->max_child_procs >
+            server->options.max_child_procs_per_core - slot->child_procs)
+        return 0;
+    if (slot->atomic_cache_memory > slot->atomic_cache_capacity ||
+        atomic_cache > slot->atomic_cache_capacity -
+                           slot->atomic_cache_memory)
+        return 0;
+    if (slot->uram_memory > slot->uram_capacity ||
+        metadata->uram_size > slot->uram_capacity - slot->uram_memory)
         return 0;
     for (index = 0; index < command->data.launch.argument_count; ++index) {
         const struct server_buffer *buffer =
@@ -277,11 +306,20 @@ static void reserve_slots_locked(dayan_server_t *server,
 {
     uint64_t resident = launch_resident_size(
         command->data.launch.kernel->metadata);
+    uint64_t atomic_cache = 0;
+    const npu_package_kernel_t *metadata =
+        command->data.launch.kernel->metadata;
     size_t index;
 
+    if (calculate_shared_size(command, &atomic_cache) < 0)
+        return;
     for (index = 0; index < count; ++index) {
         ++server->slots[slots[index]].active_tasks;
         server->slots[slots[index]].resident_memory += resident;
+        server->slots[slots[index]].child_procs +=
+            metadata->max_child_procs;
+        server->slots[slots[index]].atomic_cache_memory += atomic_cache;
+        server->slots[slots[index]].uram_memory += metadata->uram_size;
         ++command->data.launch.kernel->active_per_core[slots[index]];
     }
 }
@@ -292,14 +330,30 @@ static void release_slot_locked(dayan_server_t *server,
 {
     uint64_t resident = launch_resident_size(
         command->data.launch.kernel->metadata);
+    uint64_t atomic_cache = 0;
+    const npu_package_kernel_t *metadata =
+        command->data.launch.kernel->metadata;
     struct server_core_slot *slot = &server->slots[slot_index_value];
 
+    (void)calculate_shared_size(command, &atomic_cache);
     if (slot->active_tasks)
         --slot->active_tasks;
     if (slot->resident_memory >= resident)
         slot->resident_memory -= resident;
     else
         slot->resident_memory = 0;
+    if (slot->child_procs >= metadata->max_child_procs)
+        slot->child_procs -= metadata->max_child_procs;
+    else
+        slot->child_procs = 0;
+    if (slot->atomic_cache_memory >= atomic_cache)
+        slot->atomic_cache_memory -= atomic_cache;
+    else
+        slot->atomic_cache_memory = 0;
+    if (slot->uram_memory >= metadata->uram_size)
+        slot->uram_memory -= metadata->uram_size;
+    else
+        slot->uram_memory = 0;
     if (command->data.launch.kernel->active_per_core[slot_index_value])
         --command->data.launch.kernel->active_per_core[slot_index_value];
 }
@@ -312,7 +366,7 @@ static int calculate_shared_size(const struct server_command *command,
     const struct npu_package_view *view = &kernel->module->package->view;
     uint64_t resource_count = 0;
     uint64_t resource_size;
-    uint64_t size = metadata->shared_size;
+    uint64_t size = metadata->atomic_cache_size;
     uint32_t index;
 
     for (index = 0; index < metadata->sync_count; ++index) {
@@ -333,6 +387,82 @@ static int calculate_shared_size(const struct server_command *command,
     *size_out = (size + SERVER_SHARED_ALIGNMENT - 1U) &
                 ~(SERVER_SHARED_ALIGNMENT - 1U);
     return 0;
+}
+
+static int empty_slot_accepts(const dayan_server_t *server,
+                              const struct server_command *command,
+                              size_t slot_index, uint64_t resident,
+                              uint64_t atomic_cache)
+{
+    const struct server_core_slot *slot = &server->slots[slot_index];
+    const npu_package_kernel_t *metadata =
+        command->data.launch.kernel->metadata;
+    size_t index;
+
+    if (!slot->enabled ||
+        (server->options.resident_limit_per_core &&
+         resident > server->options.resident_limit_per_core) ||
+        metadata->max_child_procs >
+            server->options.max_child_procs_per_core ||
+        atomic_cache > slot->atomic_cache_capacity ||
+        metadata->uram_size > slot->uram_capacity)
+        return 0;
+    for (index = 0; index < command->data.launch.argument_count; ++index) {
+        const struct server_buffer *buffer =
+            command->data.launch.buffers[index];
+
+        if (buffer && !npu_hal_memory_visible(server->hal,
+                                              buffer->allocation,
+                                              slot->target))
+            return 0;
+    }
+    return 1;
+}
+
+int server_launch_resources_valid(const dayan_server_t *server,
+                                  const struct server_command *command)
+{
+    uint64_t resident;
+    uint64_t atomic_cache;
+    uint32_t mode;
+    size_t index;
+    int status;
+
+    if (!server || !command || command->kind != SERVER_COMMAND_LAUNCH)
+        return -EINVAL;
+    resident = launch_resident_size(command->data.launch.kernel->metadata);
+    if (resident == UINT64_MAX)
+        return -EOVERFLOW;
+    status = calculate_shared_size(command, &atomic_cache);
+    if (status < 0)
+        return status;
+    mode = (uint32_t)command->data.launch.config.task_mode;
+    if (mode == 1U) {
+        for (index = 0; index < server->slot_count; ++index) {
+            if (empty_slot_accepts(server, command, index, resident,
+                                   atomic_cache))
+                return 0;
+        }
+    } else if (mode == 4U && server->hal_info.cores_per_cluster == 4U) {
+        uint32_t cluster;
+
+        for (cluster = 0; cluster < server->hal_info.cluster_count;
+             ++cluster) {
+            uint32_t core;
+
+            for (core = 0; core < 4U; ++core) {
+                index = slot_index(server, cluster, core);
+                if (!empty_slot_accepts(server, command, index, resident,
+                                        atomic_cache))
+                    break;
+            }
+            if (core == 4U)
+                return 0;
+        }
+    } else {
+        return -EINVAL;
+    }
+    return -ENOSPC;
 }
 
 static int allocation_request_for_group(
@@ -461,6 +591,29 @@ fail:
     return status;
 }
 
+static int allocate_uram(dayan_server_t *server,
+                         struct server_command *command,
+                         npu_hal_core_t target, uint64_t size,
+                         npu_hal_allocation_t **allocation_out)
+{
+    npu_hal_memory_request_t request;
+
+    *allocation_out = 0;
+    if (!size)
+        return 0;
+    if (size & (SERVER_URAM_ALIGNMENT - 1U))
+        return -EINVAL;
+    npu_hal_memory_request_init(&request);
+    request.memory_class = NPU_HAL_MEMORY_URAM;
+    request.scope = NPU_HAL_MEMORY_CORE;
+    request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
+    request.owner = command->context->owner;
+    request.location = target;
+    request.size = size;
+    request.alignment = SERVER_URAM_ALIGNMENT;
+    return npu_hal_memory_alloc(server->hal, &request, allocation_out);
+}
+
 static void unit_task_ids(const struct server_command *command, uint64_t unit,
                           uint32_t lane, uint32_t task_id[3])
 {
@@ -544,6 +697,7 @@ static struct dispatch_result dispatch_group(
         struct server_invocation *invocation;
         npu_service_launch_desc_t desc;
         npu_hal_core_t target = server->slots[slots[lane]].target;
+        npu_hal_allocation_t *uram_allocation = 0;
         uint64_t entry;
         int status;
 
@@ -552,10 +706,19 @@ static struct dispatch_result dispatch_group(
             result.status = -ENOMEM;
             break;
         }
+        status = allocate_uram(server, command, target, metadata->uram_size,
+                               &uram_allocation);
+        if (status < 0) {
+            free(invocation);
+            result.status = status;
+            break;
+        }
         status = npu_service_kernel_resolve(
             server->device, target, view->object,
             (size_t)view->header->object_size, entry_symbol, &entry);
         if (status < 0) {
+            if (uram_allocation)
+                (void)npu_hal_memory_free(server->hal, uram_allocation);
             free(invocation);
             result.status = status;
             break;
@@ -570,6 +733,9 @@ static struct dispatch_result dispatch_group(
             metadata->printf_buffer_size : SERVER_DEFAULT_PRINTF_SIZE;
         desc.shared_allocation = group->shared_allocation;
         desc.shared_size = shared_size;
+        desc.uram_allocation = uram_allocation;
+        desc.uram_size = metadata->uram_size;
+        desc.max_child_procs = metadata->max_child_procs;
         desc.task_dim[0] = command->data.launch.config.task_dim.x;
         desc.task_dim[1] = command->data.launch.config.task_dim.y;
         desc.task_dim[2] = command->data.launch.config.task_dim.z;
@@ -581,6 +747,8 @@ static struct dispatch_result dispatch_group(
             status = npu_service_launch(server->device, &desc,
                                         &invocation->launch);
         if (status < 0) {
+            if (uram_allocation)
+                (void)npu_hal_memory_free(server->hal, uram_allocation);
             free(invocation);
             result.status = status;
             break;
@@ -593,6 +761,7 @@ static struct dispatch_result dispatch_group(
                 invocation->proc_id = info.proc_id;
         }
         invocation->slot_index = slots[lane];
+        invocation->uram_allocation = uram_allocation;
         invocation->resident = launch_resident_size(metadata);
         memcpy(invocation->task_id, desc.task_id,
                sizeof(invocation->task_id));
@@ -973,6 +1142,9 @@ static int poll_invocation(dayan_server_t *server,
         if (*link)
             *link = invocation->next;
         release_slot_locked(server, command, invocation->slot_index);
+        if (invocation->uram_allocation)
+            (void)npu_hal_memory_free(server->hal,
+                                      invocation->uram_allocation);
         if (group->active)
             --group->active;
         ++group->completed;

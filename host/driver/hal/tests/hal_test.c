@@ -88,6 +88,10 @@ int main(void)
           1, NPU_HAL_ANY_CORE },
         { 0x20000, 0x4000, NPU_HAL_MEMORY_COHERENT,
           NPU_HAL_MEMORY_DEVICE, NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
+        { 0x30000, 0x2000, NPU_HAL_MEMORY_URAM, NPU_HAL_MEMORY_CORE,
+          0, 0 },
+        { 0x30000, 0x2000, NPU_HAL_MEMORY_URAM, NPU_HAL_MEMORY_CORE,
+          1, 3 },
     };
     static const npu_hal_memory_region_t overlapping_regions[] = {
         { 0x1000, 0x2000, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_DEVICE,
@@ -99,6 +103,9 @@ int main(void)
     npu_hal_allocation_t *global = 0;
     npu_hal_allocation_t *local0 = 0;
     npu_hal_allocation_t *local1 = 0;
+    npu_hal_allocation_t *uram0 = 0;
+    npu_hal_allocation_t *uram1 = 0;
+    npu_hal_allocation_t *invalid = 0;
     npu_hal_memory_request_t request;
     npu_hal_data_export_t exported;
     int handles[NPU_HAL_DATA_MAX_HANDLES];
@@ -111,6 +118,7 @@ int main(void)
     npu_hal_core_t core1 = { 1, 3 };
     uint64_t address0;
     uint64_t address1;
+    uint64_t capacity;
     uint64_t value = UINT64_C(0x1122334455667788);
     uint64_t observed = 0;
     uint64_t command;
@@ -198,6 +206,34 @@ int main(void)
     assert(address0 == 0x10000 && address1 == 0x10000);
     assert(!npu_hal_memory_visible(hal, local0, core1));
 
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM, core0,
+                                   &capacity) == 0);
+    assert(capacity == 0x2000);
+    request.memory_class = NPU_HAL_MEMORY_URAM;
+    request.scope = NPU_HAL_MEMORY_CORE;
+    request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
+    request.location = core0;
+    request.size = 0x400;
+    request.alignment = 0x400;
+    assert(npu_hal_memory_alloc(hal, &request, &uram0) == 0);
+    assert(npu_hal_memory_address(hal, uram0, core0, &address0) == 0);
+    assert(address0 == 0x30000);
+    assert(!npu_hal_memory_visible(hal, uram0, core1));
+    request.location = core1;
+    assert(npu_hal_memory_alloc(hal, &request, &uram1) == 0);
+    assert(npu_hal_memory_address(hal, uram1, core1, &address1) == 0);
+    assert(address1 == 0x30000);
+    request.size = 0x200;
+    assert(npu_hal_memory_alloc(hal, &request, &invalid) == -EINVAL);
+    assert(!invalid);
+    request.memory_class = NPU_HAL_MEMORY_NORMAL;
+    request.scope = NPU_HAL_MEMORY_DEVICE;
+    request.usage = NPU_HAL_MEMORY_BUFFER;
+    request.location.cluster = NPU_HAL_ANY_CLUSTER;
+    request.location.core = NPU_HAL_ANY_CORE;
+    request.size = 0x100;
+    request.alignment = 0x100;
+
     assert(npu_hal_export_data_plane(hal, &exported, handles) == 0);
     assert(exported.handle_count == 4);
     assert(npu_hal_data_client_import(&client, &exported, handles,
@@ -232,6 +268,8 @@ int main(void)
     }
     assert(npu_hal_memory_free(hal, local1) == 0);
     assert(npu_hal_memory_free(hal, local0) == 0);
+    assert(npu_hal_memory_free(hal, uram1) == 0);
+    assert(npu_hal_memory_free(hal, uram0) == 0);
     assert(npu_hal_memory_free(hal, global) == 0);
     npu_hal_close(hal);
     hal = 0;
@@ -264,6 +302,26 @@ int main(void)
         close(event1);
         close(event0);
     }
+    npu_hal_close(hal);
+    hal = 0;
+    options.memory_regions = 0;
+    options.memory_region_count = 0;
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM, core1,
+                                   &capacity) == 0);
+    assert(capacity == 0x180000);
+    npu_hal_memory_request_init(&request);
+    request.memory_class = NPU_HAL_MEMORY_URAM;
+    request.scope = NPU_HAL_MEMORY_CORE;
+    request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
+    request.location = core1;
+    request.size = 0x400;
+    request.alignment = 0x400;
+    assert(npu_hal_memory_alloc(hal, &request, &uram1) == 0);
+    assert(npu_hal_memory_address(hal, uram1, core1, &address1) == 0);
+    assert(address1 == 0xe00000);
+    assert(npu_hal_memory_free(hal, uram1) == 0);
+    uram1 = 0;
     npu_hal_close(hal);
     hal = 0;
     options.memory_regions = overlapping_regions;

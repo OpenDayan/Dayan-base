@@ -275,6 +275,36 @@ int main(void)
         npu_package_free(private_package);
         npu_package_free(immutable_package);
     }
+    {
+        unsigned char object[sizeof(Elf64_Ehdr) + sizeof(Elf64_Shdr)];
+        npu_package_kernel_desc_t kernel;
+        npu_launch_desc_t launch;
+        npu_module_t *module = 0;
+        npu_kernel_t *resource_kernel = 0;
+        npu_event_t *unexpected = 0;
+        void *package = 0;
+        size_t package_size = 0;
+
+        make_package_object(object, sizeof(object));
+        memset(&kernel, 0, sizeof(kernel));
+        kernel.name = "resource_kernel";
+        kernel.entry_symbol = "resource_kernel";
+        kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+        kernel.max_tasks_per_core = 1;
+        kernel.uram_size = 1024;
+        assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                                 &package, &package_size) == 0);
+        assert(npu_module_load(context, package, package_size, &module) == 0);
+        assert(npu_module_get_kernel(module, "resource_kernel",
+                                     &resource_kernel) == 0);
+        npu_launch_desc_init(&launch);
+        assert(npu_kernel_launch(stream, resource_kernel, &launch,
+                                 &unexpected) == -ENOSPC);
+        assert(!unexpected);
+        assert(npu_kernel_release(resource_kernel) == 0);
+        assert(npu_module_unload(module) == 0);
+        npu_package_free(package);
+    }
     assert(npu_memcpy_h2d_async(stream, buffer, 0, input, sizeof(input),
                                 &event) == 0);
     assert(npu_stream_wait_event(foreign_stream, event) == -EINVAL);

@@ -153,11 +153,14 @@ typedef struct npu_event_info {
 typedef struct npu_kernel_info {
     uint32_t supported_task_modes;
     uint32_t max_tasks_per_core;
+    uint32_t max_child_procs;
     uint32_t arg_count;
     uint32_t sync_resource_count;
+    uint32_t reserved;
     uint64_t stack_size;
-    uint64_t shared_size;
+    uint64_t atomic_cache_size;
     uint64_t resident_memory;
+    uint64_t uram_size;
 } npu_kernel_info_t;
 
 void npu_runtime_options_init(npu_runtime_options_t *options);
@@ -231,9 +234,11 @@ int npu_event_destroy(npu_event_t *event);
 #ifdef __cplusplus
 static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
+static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
 #else
 _Static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 _Static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
+_Static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
 #endif
 
 #ifdef __cplusplus

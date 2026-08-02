@@ -1,6 +1,7 @@
 #ifndef DAYAN_SYS_H
 #define DAYAN_SYS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "dayan_attrs.h"
@@ -8,6 +9,30 @@
 
 /* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
 register void *shared __asm__("gp");
+
+#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 1U
+#define DAYAN_KERNEL_MAX_CHILD_PROCS        64U
+#define DAYAN_URAM_ALLOCATION_GRANULE       1024U
+
+#ifndef DAYAN_KERNEL_RESOURCE_DESC_DEFINED
+#define DAYAN_KERNEL_RESOURCE_DESC_DEFINED
+/* Constant Device symbol named <kernel>__desc; consumed by dycc/Runtime. */
+typedef struct dayan_kernel_resource_desc {
+    uint32_t version;
+    uint32_t size;
+    uint32_t max_child_procs;
+    uint32_t flags;
+    uint64_t atomic_cache_size;
+    uint64_t uram_size;
+} dayan_kernel_resource_desc_t;
+#endif
+
+typedef void (*dayan_proc_entry_t)(void *argument);
+
+/* Zero-initialized storage in the allocation rooted at shared. */
+typedef struct dayan_cluster_barrier {
+    uint64_t state;
+} dayan_cluster_barrier_t;
 
 enum dayan_resource_state {
     DAYAN_RESOURCE_FREE = 0,
@@ -45,6 +70,14 @@ extern "C" {
 #endif
 
 DAYAN_API void dayan_yield(void);
+/* Creates a child of the current proc on the same physical Core. */
+DAYAN_API int dayan_create_proc(dayan_proc_entry_t entry, void *argument);
+/* The returned range belongs to the current resident kernel instance. */
+DAYAN_API void *dayan_uram_base(void);
+DAYAN_API size_t dayan_uram_size(void);
+/* Current Cluster ABI has exactly four participating Cores. */
+DAYAN_API int dayan_cluster_barrier(uint32_t participants,
+                                    dayan_cluster_barrier_t *barrier);
 /* Logical launch coordinates. Physical Cluster/Core placement stays hidden. */
 DAYAN_API uint32_t dayan_task_id(uint32_t axis);
 DAYAN_API uint32_t dayan_task_dim(uint32_t axis);

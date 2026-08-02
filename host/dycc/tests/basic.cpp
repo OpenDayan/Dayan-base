@@ -36,6 +36,8 @@ __kernel__ void vector_add(uint64_t *output, uint64_t value, float scale)
     *output = device_helper(value) + (uint64_t)scale;
 }
 
+DAYAN_KERNEL_DESC(vector_add, 3, 4096, 2048);
+
 } // namespace sample
 
 __host__ int main() {

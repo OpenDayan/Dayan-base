@@ -22,6 +22,7 @@
 #include <clang/AST/Attr.h>
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
+#include <clang/AST/Expr.h>
 #include <clang/AST/Mangle.h>
 #include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/Basic/Diagnostic.h>
@@ -32,6 +33,7 @@
 #include <clang/Tooling/CompilationDatabase.h>
 #include <clang/Tooling/Tooling.h>
 #include <llvm/ADT/SmallString.h>
+#include <llvm/ADT/APSInt.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/Program.h>
@@ -485,6 +487,9 @@ public:
 
     void finish()
     {
+        collect_resource_descriptors();
+        if (output_.failed)
+            return;
         collect_function_edits();
         collect_variable_edits();
         if (output_.failed)
@@ -510,6 +515,12 @@ public:
     }
 
 private:
+    struct KernelResources {
+        uint32_t max_child_procs = 0;
+        uint64_t atomic_cache_size = 0;
+        uint64_t uram_size = 0;
+    };
+
     struct Span {
         std::size_t begin;
         std::size_t end;
@@ -757,9 +768,124 @@ private:
         return result;
     }
 
+    bool constant_uint64(const clang::Expr *expression, uint64_t &value)
+    {
+        clang::Expr::EvalResult result;
+
+        if (!expression ||
+            !expression->EvaluateAsInt(result, context_) ||
+            !result.Val.isInt())
+            return false;
+        const llvm::APSInt &integer = result.Val.getInt();
+        if ((integer.isSigned() && integer.isNegative()) ||
+            integer.getActiveBits() > 64)
+            return false;
+        value = integer.getZExtValue();
+        return true;
+    }
+
+    bool evaluate_resource_descriptor(VarDecl *decl,
+                                      KernelResources &resources)
+    {
+        const clang::Expr *initializer = decl->getInit();
+        const auto *list = initializer ?
+            llvm::dyn_cast<clang::InitListExpr>(
+                initializer->IgnoreParenImpCasts()) : nullptr;
+        uint64_t fields[6];
+        unsigned index;
+
+        if (!decl->getType().isConstQualified() ||
+            context_.getTypeSizeInChars(decl->getType()).getQuantity() != 32 ||
+            decl->getFormalLinkage() == clang::Linkage::Internal ||
+            !decl->isInExternCContext()) {
+            diagnose(decl, "kernel resource descriptor must be a 32-byte "
+                           "extern C const object");
+            return false;
+        }
+        if (list && list->isSyntacticForm())
+            list = list->getSemanticForm();
+        if (!list || list->getNumInits() != 6) {
+            diagnose(decl, "kernel resource descriptor requires six "
+                           "constant fields");
+            return false;
+        }
+        for (index = 0; index < 6; ++index) {
+            if (!constant_uint64(list->getInit(index), fields[index])) {
+                diagnose(decl, "kernel resource descriptor fields must be "
+                               "non-negative integer constants");
+                return false;
+            }
+        }
+        if (fields[0] != 1U || fields[1] != 32U || fields[2] > 64U ||
+            fields[3] != 0U || (fields[5] & 1023U)) {
+            diagnose(decl, "invalid kernel resources: expected version=1, "
+                           "size=32, flags=0, child_procs<=64 and "
+                           "1 KiB-aligned URAM size");
+            return false;
+        }
+        resources.max_child_procs = static_cast<uint32_t>(fields[2]);
+        resources.atomic_cache_size = fields[4];
+        resources.uram_size = fields[5];
+        return true;
+    }
+
+    void collect_resource_descriptors()
+    {
+        std::map<std::string, const FunctionDecl *> kernels;
+        std::set<const FunctionDecl *> seen;
+
+        for (FunctionDecl *decl : functions_) {
+            const FunctionDecl *canonical = decl->getCanonicalDecl();
+
+            if (function_side(decl) != Side::Kernel ||
+                !seen.insert(canonical).second || !decl->getIdentifier())
+                continue;
+            std::string name = decl->getNameAsString();
+            auto [position, inserted] = kernels.emplace(name, canonical);
+
+            if (!inserted && position->second != canonical)
+                diagnose(decl, "overloaded __kernel__ names cannot share the "
+                               "required <kernel>__desc symbol");
+        }
+        for (const auto &[name, kernel] : kernels) {
+            std::string descriptor_name = name + "__desc";
+            VarDecl *found = nullptr;
+
+            (void)kernel;
+            for (VarDecl *candidate : variables_) {
+                if (candidate->getNameAsString() != descriptor_name ||
+                    !candidate->isThisDeclarationADefinition())
+                    continue;
+                if (found) {
+                    diagnose(candidate, "duplicate kernel resource descriptor '" +
+                                            descriptor_name + "'");
+                    continue;
+                }
+                found = candidate;
+            }
+            if (!found) {
+                diagnose(const_cast<FunctionDecl *>(kernel),
+                         "__kernel__ requires DAYAN_KERNEL_DESC(" + name +
+                             ", child_procs, atomic_bytes, uram_bytes)");
+                continue;
+            }
+            if (annotation_side(found) != Side::Device) {
+                diagnose(found, "kernel resource descriptor must be Device-only");
+                continue;
+            }
+            KernelResources resources;
+            if (!evaluate_resource_descriptor(found, resources))
+                continue;
+            kernel_resources_[name] = resources;
+            descriptor_variables_.insert(found);
+        }
+    }
+
     std::string wrapper(const FunctionDecl *decl, bool definition)
     {
         std::ostringstream out;
+        const KernelResources &resources =
+            kernel_resources_.at(decl->getNameAsString());
         unsigned line = source_.getSpellingLineNumber(
             source_.getExpansionLoc(decl->getBeginLoc()));
         unsigned after_line = source_.getSpellingLineNumber(
@@ -786,7 +912,15 @@ private:
 
         out << "\n{\n"
             << "    static ::npu_kernel_descriptor_t *__dayan_descriptor = nullptr;\n"
-            << "    static unsigned char __dayan_init_lock = 0;\n";
+            << "    static unsigned char __dayan_init_lock = 0;\n"
+            << "    static const ::dayan_kernel_resource_desc_t "
+               "__dayan_resources = {\n"
+            << "        DAYAN_KERNEL_RESOURCE_DESC_VERSION, "
+               "sizeof(::dayan_kernel_resource_desc_t), "
+            << resources.max_child_procs << "U, 0U, UINT64_C("
+            << resources.atomic_cache_size << "), UINT64_C("
+            << resources.uram_size << ")\n"
+            << "    };\n";
         if (decl->getNumParams()) {
             out << "    static const ::npu_package_argument_t __dayan_metadata[] = {\n";
             for (unsigned i = 0; i < decl->getNumParams(); ++i) {
@@ -820,7 +954,7 @@ private:
             out << "__dayan_metadata, " << decl->getNumParams();
         else
             out << "nullptr, 0";
-        out << ", &__dayan_local);\n"
+        out << ", &__dayan_resources, &__dayan_local);\n"
             << "            if (__dayan_status < 0) {\n"
             << "                __atomic_clear(&__dayan_init_lock, __ATOMIC_RELEASE);\n"
             << "                return __dayan_status;\n"
@@ -952,6 +1086,9 @@ private:
         std::map<std::size_t, Group> groups;
 
         for (VarDecl *decl : variables_) {
+            if (descriptor_variables_.count(decl) &&
+                decl->getBeginLoc().isMacroID())
+                continue;
             Side side = annotation_side(decl);
             if (side == Side::Both) {
                 diagnose(decl, "global variable requires an explicit __host__ or __device__ attribute");
@@ -1022,6 +1159,8 @@ private:
     PrintingPolicy policy_;
     std::vector<FunctionDecl *> functions_;
     std::vector<VarDecl *> variables_;
+    std::map<std::string, KernelResources> kernel_resources_;
+    std::set<const VarDecl *> descriptor_variables_;
     std::vector<Edit> host_edits_;
     std::vector<Edit> device_edits_;
 };

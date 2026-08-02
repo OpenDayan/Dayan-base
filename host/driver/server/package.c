@@ -137,12 +137,14 @@ int npu_package_view_init(struct npu_package_view *view,
         const npu_package_kernel_t *kernel = &kernels[index];
 
         if (kernel->version != NPU_PACKAGE_KERNEL_VERSION || kernel->flags ||
-            kernel->reserved[0] || kernel->reserved[1] ||
+            kernel->reserved0 || kernel->reserved[0] ||
             !npu_package_string(view, kernel->name_offset) ||
             !npu_package_string(view, kernel->entry_offset) ||
             !kernel->supported_task_modes ||
             (kernel->supported_task_modes & ~NPU_PACKAGE_TASK_MODE_ALL) ||
             !kernel->max_tasks_per_core ||
+            kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
+            (kernel->uram_size & (NPU_PACKAGE_URAM_GRANULE - 1U)) ||
             kernel->argument_count > NPU_PACKAGE_MAX_ARGS ||
             kernel->first_argument > header->argument_count ||
             kernel->argument_count >

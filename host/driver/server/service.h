@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define NPU_SERVICE_OPTIONS_VERSION 3U
-#define NPU_SERVICE_LAUNCH_DESC_VERSION 2U
+#define NPU_SERVICE_LAUNCH_DESC_VERSION 3U
 #define NPU_SERVICE_TIMEOUT_INFINITE UINT32_MAX
 #define NPU_SERVICE_LAUNCH_MAX_ARGS 8U
 #define NPU_SERVICE_OUTPUT_CLEAR (1U << 0)
@@ -58,6 +58,11 @@ typedef struct npu_service_launch_desc {
     npu_hal_allocation_t *shared_allocation;
     uint64_t shared_offset;
     uint64_t shared_size;
+    npu_hal_allocation_t *uram_allocation;
+    uint64_t uram_offset;
+    uint64_t uram_size;
+    uint32_t max_child_procs;
+    uint32_t resource_reserved;
     uint64_t printf_buffer_size;
     uint64_t args[NPU_SERVICE_LAUNCH_MAX_ARGS];
     uint64_t cookie;

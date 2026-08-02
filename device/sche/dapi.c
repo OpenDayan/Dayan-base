@@ -10,6 +10,10 @@ _Static_assert(sizeof(dayan_resource_t) == 64,
                "dayan resource ABI must stay fixed");
 _Static_assert(sizeof(dayan_shared_resource_t) == 16,
                "dayan shared resource ABI must stay fixed");
+_Static_assert(sizeof(dayan_cluster_barrier_t) == 8,
+               "dayan cluster barrier ABI must stay fixed");
+_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
+               "dayan kernel resource descriptor ABI must stay fixed");
 
 /*
  * BASE Produce/Bar uses unit 0.  Produce reads tp (x4) directly;
@@ -74,19 +78,33 @@ static uint32_t shared_resource_state(
     return __atomic_load_n(&resource->state, __ATOMIC_ACQUIRE);
 }
 
+static int shared_range_valid(const void *object, size_t object_size,
+                              size_t alignment)
+{
+    struct proc *proc = proc_self();
+    uintptr_t start = (uintptr_t)CONFIG_COHERENT_BASE;
+    uintptr_t size = (uintptr_t)CONFIG_COHERENT_SIZE;
+    uintptr_t base;
+    uintptr_t capacity;
+    uintptr_t addr = (uintptr_t)object;
+
+    if (!proc || !object || !object_size || !alignment ||
+        (alignment & (alignment - 1U)))
+        return 0;
+    base = (uintptr_t)proc->shared_base;
+    capacity = proc->shared_size;
+    if (!base || shared != proc->shared_base || capacity < object_size ||
+        base < start || base - start >= size || capacity > size - (base - start) ||
+        addr < base || addr - base > capacity - object_size)
+        return 0;
+    return !(addr & (alignment - 1U));
+}
+
 static int shared_resource_valid(
     const dayan_shared_resource_t *resource)
 {
-    uintptr_t start = (uintptr_t)CONFIG_COHERENT_BASE;
-    uintptr_t size = (uintptr_t)CONFIG_COHERENT_SIZE;
-    uintptr_t base = (uintptr_t)shared;
-    uintptr_t addr = (uintptr_t)resource;
-
-    if (!base || size < sizeof(*resource) || base < start ||
-        base - start >= size || addr < base || addr < start ||
-        addr - start > size - sizeof(*resource))
-        return 0;
-    return !(addr & (_Alignof(dayan_shared_resource_t) - 1));
+    return shared_range_valid(resource, sizeof(*resource),
+                              _Alignof(dayan_shared_resource_t));
 }
 
 static int shared_resource_ready(struct proc *proc, void *arg)
@@ -104,6 +122,84 @@ static int shared_resource_free(struct proc *proc, void *arg)
 void dayan_yield(void)
 {
     proc_yield();
+}
+
+int dayan_create_proc(dayan_proc_entry_t entry, void *argument)
+{
+    uint32_t proc_id;
+
+    if (!entry)
+        return -EINVAL;
+    return proc_create_child(proc_self(), (proc_fn)entry, argument, &proc_id);
+}
+
+void *dayan_uram_base(void)
+{
+    struct proc *proc = proc_self();
+
+    return proc ? proc->uram_base : 0;
+}
+
+size_t dayan_uram_size(void)
+{
+    struct proc *proc = proc_self();
+
+    return proc ? proc->uram_size : 0;
+}
+
+struct barrier_wait {
+    dayan_cluster_barrier_t *barrier;
+    uint32_t generation;
+};
+
+static int barrier_advanced(struct proc *proc, void *arg)
+{
+    const struct barrier_wait *wait = arg;
+    uint64_t state;
+
+    (void)proc;
+    state = __atomic_load_n(&wait->barrier->state, __ATOMIC_ACQUIRE);
+    return (uint32_t)(state >> 32) != wait->generation;
+}
+
+int dayan_cluster_barrier(uint32_t participants,
+                          dayan_cluster_barrier_t *barrier)
+{
+    struct proc *proc = proc_self();
+    struct barrier_wait wait;
+    uint64_t observed;
+    uint64_t desired;
+    uint32_t count;
+
+    if (!proc || participants != 4U || proc->task_mode != 4U ||
+        !shared_range_valid(barrier, sizeof(*barrier),
+                            _Alignof(dayan_cluster_barrier_t)))
+        return -EINVAL;
+    observed = __atomic_load_n(&barrier->state, __ATOMIC_ACQUIRE);
+    for (;;) {
+        count = (uint32_t)observed;
+        if (count >= participants)
+            return -EBUSY;
+        desired = observed + 1U;
+        if (__atomic_compare_exchange_n(&barrier->state, &observed, desired,
+                                        0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            break;
+    }
+    wait.barrier = barrier;
+    wait.generation = (uint32_t)(observed >> 32);
+    if (count + 1U == participants) {
+        desired = (uint64_t)(wait.generation + 1U) << 32;
+        __atomic_store_n(&barrier->state, desired, __ATOMIC_RELEASE);
+        return 0;
+    }
+    while (!barrier_advanced(proc, &wait)) {
+        int status = proc_wait_poll(barrier_advanced, &wait);
+
+        if (status < 0)
+            return status;
+    }
+    return 0;
 }
 
 uint32_t dayan_task_id(uint32_t axis)

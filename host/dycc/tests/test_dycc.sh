@@ -21,6 +21,8 @@ rg -q 'npu_kernel_arg_buffer' "$work_dir/basic.host.cpp"
 rg -q 'npu_buffer_t \*output' "$work_dir/basic.host.cpp"
 rg -q '__atomic_test_and_set' "$work_dir/basic.host.cpp"
 rg -q '_ZN6sample10vector_addEPmmf' "$work_dir/basic.host.cpp"
+rg -Fq '3U, 0U, UINT64_C(4096), UINT64_C(2048)' \
+    "$work_dir/basic.host.cpp"
 rg -Fq 'return sample::vector_add(output, value, scale, attrs);' \
     "$work_dir/basic.host.cpp"
 if rg -q 'device_helper\(' "$work_dir/basic.host.cpp"; then
@@ -40,6 +42,8 @@ llvm-readelf --file-header "$work_dir/basic.cpp.dycc.device.o" | \
     rg -q 'Machine:.*RISC-V'
 llvm-nm --defined-only "$work_dir/basic.cpp.dycc.device.o" | \
     rg -q '_ZN6sample10vector_addEPmmf'
+llvm-nm --defined-only "$work_dir/basic.cpp.dycc.device.o" | \
+    rg -q ' vector_add__desc$'
 
 "$DYCC_BIN" --save-temps="$work_dir/edge" \
     --emit-host "$work_dir/edge.host.cpp" \
@@ -92,3 +96,17 @@ if "$DYCC_BIN" --split-only --emit-host "$work_dir/invalid.host.cpp" \
     exit 1
 fi
 rg -q '__kernel__ functions must return void' "$work_dir/invalid.log"
+
+if "$DYCC_BIN" --split-only --emit-host "$work_dir/missing.host.cpp" \
+    "$test_dir/missing_desc.cpp" >"$work_dir/missing.log" 2>&1; then
+    echo "kernel without resource descriptor was accepted" >&2
+    exit 1
+fi
+rg -q '__kernel__ requires DAYAN_KERNEL_DESC' "$work_dir/missing.log"
+
+if "$DYCC_BIN" --split-only --emit-host "$work_dir/resource.host.cpp" \
+    "$test_dir/invalid_desc.cpp" >"$work_dir/resource.log" 2>&1; then
+    echo "misaligned URAM descriptor was accepted" >&2
+    exit 1
+fi
+rg -q '1 KiB-aligned URAM size' "$work_dir/resource.log"

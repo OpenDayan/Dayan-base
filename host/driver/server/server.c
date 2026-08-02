@@ -14,6 +14,7 @@
 
 #define DAYAN_SERVER_BACKLOG 64U
 #define DAYAN_SERVER_DEFAULT_RESIDENT (64U * 1024U * 1024U)
+#define DAYAN_SERVER_DEFAULT_CHILD_PROCS 64U
 #define DAYAN_SERVER_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 
 struct server_connection {
@@ -222,6 +223,7 @@ void dayan_server_options_init(dayan_server_options_t *options)
     options->version = DAYAN_SERVER_OPTIONS_VERSION;
     options->socket_path = NPU_DEFAULT_SERVER_SOCKET;
     options->resident_limit_per_core = DAYAN_SERVER_DEFAULT_RESIDENT;
+    options->max_child_procs_per_core = DAYAN_SERVER_DEFAULT_CHILD_PROCS;
     npu_hal_options_init(&options->hal);
     npu_service_options_init(&options->service);
 }
@@ -390,9 +392,22 @@ static int initialize_slots(dayan_server_t *server)
             index / server->hal_info.cores_per_cluster);
         uint32_t core = (uint32_t)(
             index % server->hal_info.cores_per_cluster);
+        int status;
 
         server->slots[index].target.cluster = cluster;
         server->slots[index].target.core = core;
+        status = npu_hal_memory_capacity(
+            server->hal, NPU_HAL_MEMORY_COHERENT,
+            server->slots[index].target,
+            &server->slots[index].atomic_cache_capacity);
+        if (status < 0)
+            return status;
+        status = npu_hal_memory_capacity(
+            server->hal, NPU_HAL_MEMORY_URAM,
+            server->slots[index].target,
+            &server->slots[index].uram_capacity);
+        if (status < 0)
+            return status;
         server->slots[index].enabled =
             !!(cluster_mask & (UINT32_C(1) << cluster)) &&
             !!(core_mask & (UINT32_C(1) << core));
@@ -418,7 +433,7 @@ int dayan_server_create(dayan_server_t **server_out,
         options = &defaults;
     }
     if (options->version != DAYAN_SERVER_OPTIONS_VERSION ||
-        options->reserved || !options->socket_path ||
+        !options->max_child_procs_per_core || !options->socket_path ||
         !*options->socket_path)
         return -EINVAL;
     server = calloc(1, sizeof(*server));
@@ -1265,6 +1280,9 @@ static int kernel_launch_locked(dayan_server_t *server,
             ++buffer->references;
         }
     }
+    status = server_launch_resources_valid(server, command);
+    if (status < 0)
+        goto fail;
     ++kernel->references;
     ++kernel->module->active_commands;
     status = server_enqueue_locked(server, context, stream, command, 1,
@@ -1535,11 +1553,13 @@ static int dispatch_control(dayan_server_t *server,
             info->supported_task_modes =
                 kernel->metadata->supported_task_modes;
             info->max_tasks_per_core = kernel->metadata->max_tasks_per_core;
+            info->max_child_procs = kernel->metadata->max_child_procs;
             info->argument_count = kernel->metadata->argument_count;
             info->sync_resource_count = kernel->metadata->sync_count;
             info->stack_size = kernel->metadata->stack_size;
-            info->shared_size = kernel->metadata->shared_size;
+            info->atomic_cache_size = kernel->metadata->atomic_cache_size;
             info->resident_memory = kernel->metadata->resident_memory;
+            info->uram_size = kernel->metadata->uram_size;
             *response_size = sizeof(*info);
             status = 0;
         }

@@ -28,6 +28,9 @@ CONTROL_BASE    ?= 0x00000000
 # Host-owned hardware window; these values are not passed to the linker.
 COHERENT_BASE   ?= 0x00400000
 COHERENT_SIZE   ?= 0x00400000
+URAM_BASE       ?= 0x00800000
+URAM_SIZE       ?= 0x00180000
+URAM_STRIDE     ?= 0x00200000
 
 ARCH := rv64imaf_zicsr_zifencei
 ABI  := lp64
@@ -43,7 +46,10 @@ CPPFLAGS := -Iinclude/api -Iinclude -Ilib/include \
             -DCONFIG_RAM_BASE=$(RAM_BASE) \
             -DCONFIG_RAM_SIZE=$(RAM_SIZE) \
             -DCONFIG_COHERENT_BASE=$(COHERENT_BASE) \
-            -DCONFIG_COHERENT_SIZE=$(COHERENT_SIZE)
+            -DCONFIG_COHERENT_SIZE=$(COHERENT_SIZE) \
+            -DCONFIG_URAM_BASE=$(URAM_BASE) \
+            -DCONFIG_URAM_SIZE=$(URAM_SIZE) \
+            -DCONFIG_URAM_STRIDE=$(URAM_STRIDE)
 CFLAGS := --target=riscv64-unknown-elf -march=$(ARCH) -mabi=$(ABI) \
           -mcmodel=medany -mno-relax -msmall-data-limit=0 \
           -O2 -g -std=c11 \

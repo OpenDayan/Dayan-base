@@ -72,11 +72,13 @@ struct rpc_heap_release {
     uint64_t size;
 };
 
-#define RPC_PROC_CREATE_VERSION       2U
+#define RPC_PROC_CREATE_VERSION       3U
 #define RPC_PROC_MAX_ARGS             8U
 #define RPC_PROC_MIN_STACK_SIZE       1024U
 #define RPC_PROC_MAX_STACK_SIZE       (16U * 1024U * 1024U)
 #define RPC_PROC_MAX_PRINTF_SIZE      (1024U * 1024U)
+#define RPC_PROC_MAX_CHILD_PROCS      64U
+#define RPC_PROC_URAM_GRANULE         1024U
 
 enum rpc_proc_state {
     RPC_PROC_SUBMITTED = 0,
@@ -112,6 +114,10 @@ struct rpc_proc_create_request {
     uint32_t task_dim[3];
     uint32_t task_mode;
     uint32_t task_reserved;
+    uint32_t max_child_procs;
+    uint32_t resource_reserved;
+    uint64_t uram_base;
+    uint64_t uram_size;
 };
 
 _Static_assert(sizeof(struct rpc_print_request) == 24,
@@ -142,7 +148,11 @@ _Static_assert(offsetof(struct rpc_proc_create_request, task_dim) == 164,
                "Host proc task dimension offset");
 _Static_assert(offsetof(struct rpc_proc_create_request, task_mode) == 176,
                "Host proc task mode offset");
-_Static_assert(sizeof(struct rpc_proc_create_request) == 184,
+_Static_assert(offsetof(struct rpc_proc_create_request, max_child_procs) == 184,
+               "Host proc child resource offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, uram_base) == 192,
+               "Host proc URAM base offset");
+_Static_assert(sizeof(struct rpc_proc_create_request) == 208,
                "Host proc create ABI must stay fixed");
 
 int rpc_init(void);

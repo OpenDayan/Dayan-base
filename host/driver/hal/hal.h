@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define NPU_HAL_ABI_VERSION          4U
+#define NPU_HAL_ABI_VERSION          5U
 #define NPU_HAL_OPTIONS_VERSION      2U
 #define NPU_HAL_MEMORY_REQUEST_VERSION 1U
 #define NPU_HAL_MAX_CLUSTERS         32U
@@ -32,6 +32,7 @@ typedef struct npu_hal_core {
 typedef enum npu_hal_memory_class {
     NPU_HAL_MEMORY_NORMAL = 1,
     NPU_HAL_MEMORY_COHERENT = 2,
+    NPU_HAL_MEMORY_URAM = 3,
 } npu_hal_memory_class_t;
 
 typedef enum npu_hal_memory_scope {
@@ -47,6 +48,7 @@ typedef enum npu_hal_memory_usage {
     NPU_HAL_MEMORY_HEAP,
     NPU_HAL_MEMORY_LAUNCH,
     NPU_HAL_MEMORY_SHARED,
+    NPU_HAL_MEMORY_KERNEL_URAM,
 } npu_hal_memory_usage_t;
 
 /* A backend may expose multiple regions with different visibility scopes. */
@@ -118,6 +120,9 @@ int npu_hal_get_info(npu_hal_t *hal, npu_hal_info_t *info);
 int npu_hal_get_memory_region(npu_hal_t *hal, uint32_t index,
                               npu_hal_memory_region_t *region);
 int npu_hal_core_valid(npu_hal_t *hal, npu_hal_core_t core);
+int npu_hal_memory_capacity(npu_hal_t *hal,
+                            npu_hal_memory_class_t memory_class,
+                            npu_hal_core_t viewer, uint64_t *capacity_out);
 
 /* Raw address access is reserved for BL1/RPC implementation inside Service. */
 int npu_hal_copy_to_address(npu_hal_t *hal, uint32_t cluster,

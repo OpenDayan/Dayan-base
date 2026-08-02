@@ -8,6 +8,10 @@
 #define NPU_DEFAULT_RAM_SIZE      UINT64_C(0x04000000)
 #define NPU_DEFAULT_COHERENT_BASE UINT64_C(0x00400000)
 #define NPU_DEFAULT_COHERENT_SIZE UINT64_C(0x00400000)
+#define NPU_DEFAULT_URAM_BASE     UINT64_C(0x00800000)
+#define NPU_DEFAULT_URAM_SIZE     UINT64_C(0x00180000)
+#define NPU_DEFAULT_URAM_STRIDE   UINT64_C(0x00200000)
+#define NPU_URAM_GRANULE          UINT64_C(1024)
 
 static int power_of_two(uint64_t value)
 {
@@ -19,7 +23,8 @@ static int region_valid(const npu_hal_t *hal,
 {
     if (!region->size || region->base > UINT64_MAX - region->size ||
         (region->memory_class != NPU_HAL_MEMORY_NORMAL &&
-         region->memory_class != NPU_HAL_MEMORY_COHERENT))
+         region->memory_class != NPU_HAL_MEMORY_COHERENT &&
+         region->memory_class != NPU_HAL_MEMORY_URAM))
         return 0;
     switch (region->scope) {
     case NPU_HAL_MEMORY_DEVICE:
@@ -48,25 +53,46 @@ static int shared_address_space(const npu_hal_memory_region_t *left,
 int npu_hal_memory_manager_init(npu_hal_t *hal,
                                 const npu_hal_options_t *options)
 {
-    static const npu_hal_memory_region_t defaults[] = {
-        { NPU_DEFAULT_RAM_BASE, NPU_DEFAULT_RAM_SIZE,
-          NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_DEVICE,
-          NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
-        { NPU_DEFAULT_COHERENT_BASE, NPU_DEFAULT_COHERENT_SIZE,
-          NPU_HAL_MEMORY_COHERENT, NPU_HAL_MEMORY_DEVICE,
-          NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
-    };
+    npu_hal_memory_region_t *defaults = 0;
     const npu_hal_memory_region_t *regions = options->memory_regions;
     uint32_t count = options->memory_region_count;
     uint32_t index;
 
     if (!count) {
+        uint32_t cluster;
+        uint32_t core;
+
+        count = 2U + hal->cluster_count * hal->cores_per_cluster;
+        defaults = calloc(count, sizeof(*defaults));
+        if (!defaults)
+            return -ENOMEM;
+        defaults[0] = (npu_hal_memory_region_t){
+            NPU_DEFAULT_RAM_BASE, NPU_DEFAULT_RAM_SIZE,
+            NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_DEVICE,
+            NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE
+        };
+        defaults[1] = (npu_hal_memory_region_t){
+            NPU_DEFAULT_COHERENT_BASE, NPU_DEFAULT_COHERENT_SIZE,
+            NPU_HAL_MEMORY_COHERENT, NPU_HAL_MEMORY_DEVICE,
+            NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE
+        };
+        index = 2;
+        for (cluster = 0; cluster < hal->cluster_count; ++cluster) {
+            for (core = 0; core < hal->cores_per_cluster; ++core) {
+                defaults[index++] = (npu_hal_memory_region_t){
+                    NPU_DEFAULT_URAM_BASE + core * NPU_DEFAULT_URAM_STRIDE,
+                    NPU_DEFAULT_URAM_SIZE, NPU_HAL_MEMORY_URAM,
+                    NPU_HAL_MEMORY_CORE, cluster, core
+                };
+            }
+        }
         regions = defaults;
-        count = sizeof(defaults) / sizeof(defaults[0]);
     }
     hal->arenas = calloc(count, sizeof(*hal->arenas));
-    if (!hal->arenas)
+    if (!hal->arenas) {
+        free(defaults);
         return -ENOMEM;
+    }
     hal->arena_count = count;
     for (index = 0; index < count; ++index) {
         uint32_t previous;
@@ -84,9 +110,11 @@ int npu_hal_memory_manager_init(npu_hal_t *hal,
         }
         hal->arenas[index].region = regions[index];
     }
+    free(defaults);
     return 0;
 
 invalid:
+    free(defaults);
     free(hal->arenas);
     hal->arenas = 0;
     hal->arena_count = 0;
@@ -138,11 +166,18 @@ static int request_valid(const npu_hal_t *hal,
 {
     return request && request->version == NPU_HAL_MEMORY_REQUEST_VERSION &&
            (request->memory_class == NPU_HAL_MEMORY_NORMAL ||
-            request->memory_class == NPU_HAL_MEMORY_COHERENT) &&
+            request->memory_class == NPU_HAL_MEMORY_COHERENT ||
+            request->memory_class == NPU_HAL_MEMORY_URAM) &&
            request->usage >= NPU_HAL_MEMORY_BUFFER &&
-           request->usage <= NPU_HAL_MEMORY_SHARED && !request->flags &&
+           request->usage <= NPU_HAL_MEMORY_KERNEL_URAM && !request->flags &&
            request->size && power_of_two(request->alignment) &&
-           request_location_valid(hal, request);
+           request_location_valid(hal, request) &&
+           (request->memory_class == NPU_HAL_MEMORY_URAM ?
+                (request->scope == NPU_HAL_MEMORY_CORE &&
+                 request->usage == NPU_HAL_MEMORY_KERNEL_URAM &&
+                 request->alignment >= NPU_URAM_GRANULE &&
+                 !(request->size & (NPU_URAM_GRANULE - 1U))) :
+                request->usage != NPU_HAL_MEMORY_KERNEL_URAM);
 }
 
 static int arena_matches(const struct npu_hal_arena *arena,

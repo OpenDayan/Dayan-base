@@ -47,6 +47,8 @@ __kernel__ void demo_kernel(uint64_t count)
     fflush(stdout);
     dayan_yield();
 }
+
+DAYAN_KERNEL_DESC(demo_kernel, 1, 1024, 2048);
 \end{dayancode}
 
 \code{main} 和只使用 Host 库的辅助函数应标为 \code{__host__}。同一条逗号声明中的
@@ -79,6 +81,13 @@ int demo_kernel(npu_buffer_t *output, uint64_t count,
 位模式。wrapper 使用线程安全的 static descriptor 保存嵌入对象和 C++ mangled entry，
 Device module 则按 Context 缓存。首次调用通过
 \code{npu_kernel_descriptor_create} 完成描述符创建，后续调用走原子快路径。
+
+每个 kernel 还必须定义
+\code{DAYAN_KERNEL_DESC(kernel, child\_procs, atomic\_bytes, uram\_bytes)}。
+dycc 在 Device object 中保留外部 C 符号 \code{<kernel>\_\_desc}，并把相同常量写入
+Host Package。三个资源值分别表示一个实例允许同时存活的子 proc 上限、由
+\code{shared/gp} 寻址的 atomic-cache allocation 和本 Core 私有 URAM；URAM 大小
+必须是 1 KiB 的整数倍。
 
 \subsection{启动 kernel}\label{sec:kernel-023}
 
@@ -147,8 +156,9 @@ Stream 是有序命令队列。同一 Stream 的传输、launch、wait 和 Event
 \code{npu_stream_synchronize} 表达。
 
 Module 是已加载的 Kernel Package，Kernel 是其中一个可启动入口。Package 元信息包含
-目标 ISA、参数布局、支持的 task mode、每 Core 最大 task 数、resident memory 和同步
-资源声明。不可变代码和只读数据允许跨 Context 共享；可写数据、BSS 和 Context 相关
+目标 ISA、参数布局、支持的 task mode、每 Core 最大 task 数、resident memory、
+子 proc/atomic cache/URAM 上限和同步资源声明。不可变代码和只读数据允许跨 Context
+共享；可写数据、BSS 和 Context 相关
 重定位结果保持隔离。同步资源只描述类型、数量和初始参数，地址由 Service/HAL 分配。
 
 Buffer 是 Runtime 管理的逻辑 Device 内存对象。应用只使用 Buffer handle 和 offset；
@@ -178,9 +188,13 @@ Device RAM 中的普通数据、栈和私有堆属于单个 hart 的非一致性
 struct layout *data = (struct layout *)shared;
 \end{dayancode}
 
-\code{shared == NULL} 表示没有 coherent allocation。Device ABI 不携带 allocation
-长度，Host 和算子必须使用同一布局。\code{shared} 绑定 \code{gp}，只读其值，不要
-给该变量赋值。
+\code{shared == NULL} 表示没有 coherent allocation。BL1 在 proc 中保存 allocation
+长度，DAPI 会据此检查 shared resource 和 barrier 的精确边界；Host 和算子仍必须使用
+同一布局。\code{shared} 绑定 \code{gp}，只读其值，不要给该变量赋值。
+
+URAM 是每 Core 私有空间。kernel 用 \code{dayan\_uram\_base/size} 读取本实例范围；
+默认容量为 1.5 MiB、Core 地址窗口 stride 为 2 MiB，分配粒度为 1 KiB。子 proc
+继承父 proc 的 shared 与 URAM 范围，不能跨 Core 访问其它实例的 URAM。
 
 每 hart 私有堆供 \code{malloc} 使用。初始 region 不足时，Dayan OS 通过 Host RPC
 扩展；私有堆地址不能跨 hart 释放，也不能用于跨核共享。

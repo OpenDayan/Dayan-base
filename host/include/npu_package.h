@@ -9,11 +9,13 @@ extern "C" {
 #endif
 
 #define NPU_PACKAGE_MAGIC             "DAYANPKG"
-#define NPU_PACKAGE_VERSION           2U
+#define NPU_PACKAGE_VERSION           3U
 #define NPU_PACKAGE_HEADER_SIZE       128U
-#define NPU_PACKAGE_KERNEL_VERSION    2U
+#define NPU_PACKAGE_KERNEL_VERSION    3U
 #define NPU_PACKAGE_MAX_KERNELS       4096U
 #define NPU_PACKAGE_MAX_ARGS          8U
+#define NPU_PACKAGE_MAX_CHILD_PROCS   64U
+#define NPU_PACKAGE_URAM_GRANULE      1024U
 #define NPU_PACKAGE_ISA_RV64_DAYAN    "rv64imaf_zicsr_zifencei"
 
 #define NPU_PACKAGE_IMMUTABLE_MODULE  (1U << 0)
@@ -71,12 +73,15 @@ typedef struct npu_package_kernel {
     uint32_t first_sync;
     uint32_t sync_count;
     uint32_t max_tasks_per_core;
+    uint32_t max_child_procs;
     uint32_t flags;
+    uint32_t reserved0;
     uint64_t stack_size;
-    uint64_t shared_size;
+    uint64_t atomic_cache_size;
     uint64_t printf_buffer_size;
     uint64_t resident_memory;
-    uint64_t reserved[2];
+    uint64_t uram_size;
+    uint64_t reserved[1];
 } npu_package_kernel_t;
 
 typedef struct npu_package_argument {
@@ -100,10 +105,12 @@ typedef struct npu_package_kernel_desc {
     const char *entry_symbol;
     uint32_t supported_task_modes;
     uint32_t max_tasks_per_core;
+    uint32_t max_child_procs;
     uint64_t stack_size;
-    uint64_t shared_size;
+    uint64_t atomic_cache_size;
     uint64_t printf_buffer_size;
     uint64_t resident_memory;
+    uint64_t uram_size;
     const npu_package_argument_t *arguments;
     size_t argument_count;
     const npu_package_sync_t *sync_resources;
@@ -113,7 +120,7 @@ typedef struct npu_package_kernel_desc {
 #ifdef __cplusplus
 static_assert(sizeof(npu_package_header_t) == NPU_PACKAGE_HEADER_SIZE,
               "Dayan package header ABI");
-static_assert(sizeof(npu_package_kernel_t) == 88,
+static_assert(sizeof(npu_package_kernel_t) == 96,
               "Dayan package kernel ABI");
 static_assert(sizeof(npu_package_argument_t) == 16,
               "Dayan package argument ABI");
@@ -122,7 +129,7 @@ static_assert(sizeof(npu_package_sync_t) == 32,
 #else
 _Static_assert(sizeof(npu_package_header_t) == NPU_PACKAGE_HEADER_SIZE,
                "Dayan package header ABI");
-_Static_assert(sizeof(npu_package_kernel_t) == 88,
+_Static_assert(sizeof(npu_package_kernel_t) == 96,
                "Dayan package kernel ABI");
 _Static_assert(sizeof(npu_package_argument_t) == 16,
                "Dayan package argument ABI");

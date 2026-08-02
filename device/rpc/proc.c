@@ -11,6 +11,7 @@
 struct rpc_managed_proc {
     struct proc proc;
     struct rpc_proc_create_request *request;
+    struct proc_family *family;
     void *stack;
     void *printf_buffer;
 };
@@ -33,12 +34,18 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
 {
     uint64_t coherent_base = CONFIG_COHERENT_BASE;
     uint64_t coherent_size = CONFIG_COHERENT_SIZE;
+    uint64_t uram_window = CONFIG_URAM_BASE +
+        (uint64_t)platform_hart_id() * CONFIG_URAM_STRIDE;
+    int shared_valid;
+    int uram_valid;
 
     if (request->version != RPC_PROC_CREATE_VERSION ||
         request->size != sizeof(*request) || request->flags ||
         request->reserved || request->task_reserved ||
+        request->resource_reserved ||
         request->state != RPC_PROC_SUBMITTED ||
         request->argc > RPC_PROC_MAX_ARGS ||
+        request->max_child_procs > RPC_PROC_MAX_CHILD_PROCS ||
         request->stack_size < RPC_PROC_MIN_STACK_SIZE ||
         request->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         request->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
@@ -52,12 +59,18 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
         (request->task_mode != 1U && request->task_mode != 4U) ||
         (request->task_mode == 4U && request->task_dim[0] != 4U))
         return 0;
-    if (!request->shared_base && !request->shared_size)
-        return 1;
-    return request->shared_base && request->shared_size &&
-           !(request->shared_base & 15U) &&
-           range_inside(request->shared_base, request->shared_size,
-                        coherent_base, coherent_size);
+    shared_valid = (!request->shared_base && !request->shared_size) ||
+        (request->shared_base && request->shared_size &&
+         !(request->shared_base & 15U) &&
+         range_inside(request->shared_base, request->shared_size,
+                      coherent_base, coherent_size));
+    uram_valid = (!request->uram_base && !request->uram_size) ||
+        (request->uram_base && request->uram_size &&
+         !(request->uram_base & (RPC_PROC_URAM_GRANULE - 1U)) &&
+         !(request->uram_size & (RPC_PROC_URAM_GRANULE - 1U)) &&
+         range_inside(request->uram_base, request->uram_size,
+                      uram_window, CONFIG_URAM_SIZE));
+    return shared_valid && uram_valid;
 }
 
 static void managed_proc_cleanup(struct proc *proc, void *arg)
@@ -70,6 +83,7 @@ static void managed_proc_cleanup(struct proc *proc, void *arg)
     request->state = status < 0 ? RPC_PROC_FAILED : RPC_PROC_EXITED;
     platform_cache_clean(request, sizeof(*request));
 
+    proc_family_destroy(managed->family);
     free(managed->printf_buffer);
     free(managed->stack);
     free(managed);
@@ -90,7 +104,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     if (!proc_request_valid(request))
         goto complete;
 
-    managed = malloc(sizeof(*managed));
+    managed = calloc(1, sizeof(*managed));
     if (!managed) {
         status = -ENOMEM;
         goto complete;
@@ -104,6 +118,12 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
         status = -ENOMEM;
         goto complete;
     }
+    status = proc_family_create(request->max_child_procs,
+                                (size_t)request->stack_size,
+                                (size_t)request->printf_buffer_size,
+                                &managed->family);
+    if (status < 0)
+        goto complete;
 
     status = proc_init_args(&managed->proc,
                             (proc_fn)(uintptr_t)request->entry,
@@ -114,6 +134,12 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
                             request->argc, request->args);
     if (status < 0)
         goto complete;
+    status = proc_set_resources(&managed->proc, managed->family,
+                                (size_t)request->shared_size,
+                                (void *)(uintptr_t)request->uram_base,
+                                (size_t)request->uram_size);
+    if (status < 0)
+        platform_halt();
     status = proc_set_cleanup(&managed->proc, managed_proc_cleanup, managed);
     if (status < 0)
         platform_halt();
@@ -131,6 +157,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
 
 complete:
     if (managed) {
+        proc_family_destroy(managed->family);
         free(managed->printf_buffer);
         free(managed->stack);
         free(managed);

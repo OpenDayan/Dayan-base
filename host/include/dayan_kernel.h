@@ -7,6 +7,51 @@
 #include "npu_package.h"
 #include "npu_runtime.h"
 
+#ifndef DAYAN_KERNEL_RESOURCE_DESC_VERSION
+#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 1U
+#endif
+#ifndef DAYAN_KERNEL_MAX_CHILD_PROCS
+#define DAYAN_KERNEL_MAX_CHILD_PROCS 64U
+#endif
+#ifndef DAYAN_URAM_ALLOCATION_GRANULE
+#define DAYAN_URAM_ALLOCATION_GRANULE 1024U
+#endif
+
+#ifndef DAYAN_KERNEL_RESOURCE_DESC_DEFINED
+#define DAYAN_KERNEL_RESOURCE_DESC_DEFINED
+typedef struct dayan_kernel_resource_desc {
+    uint32_t version;
+    uint32_t size;
+    uint32_t max_child_procs;
+    uint32_t flags;
+    uint64_t atomic_cache_size;
+    uint64_t uram_size;
+} dayan_kernel_resource_desc_t;
+#endif
+
+/*
+ * Each __kernel__ must have exactly one descriptor with this macro.  dycc
+ * keeps the exact <kernel>__desc symbol in the Device object and folds the
+ * same constant values into the Host package metadata.
+ */
+#if defined(__DAYAN_DEVICE__)
+#ifdef __cplusplus
+#define DAYAN_KERNEL_DESC_LINKAGE extern "C"
+#else
+#define DAYAN_KERNEL_DESC_LINKAGE extern
+#endif
+#define DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes)       \
+    DAYAN_KERNEL_DESC_LINKAGE __device__                                      \
+    __attribute__((visibility("default"), section(".dayan.kernel_desc")))     \
+    const dayan_kernel_resource_desc_t kernel##__desc = {                     \
+        DAYAN_KERNEL_RESOURCE_DESC_VERSION,                                   \
+        sizeof(dayan_kernel_resource_desc_t),                                 \
+        (child_procs), 0U, (atomic_bytes), (uram_bytes)                        \
+    }
+#else
+#define DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +81,7 @@ void npu_kernel_launch_attrs_init(npu_kernel_launch_attrs_t *attrs,
 int npu_kernel_descriptor_create(
     const void *object, size_t object_size, const char *entry_symbol,
     const npu_package_argument_t *arguments, size_t argument_count,
+    const dayan_kernel_resource_desc_t *resources,
     npu_kernel_descriptor_t **descriptor_out);
 void npu_kernel_descriptor_destroy(npu_kernel_descriptor_t *descriptor);
 int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
@@ -59,7 +105,12 @@ static inline uint64_t npu_kernel_pack_f64(double value)
 }
 
 #ifdef __cplusplus
+static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
+              "Dayan kernel resource descriptor ABI");
 }
+#else
+_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
+               "Dayan kernel resource descriptor ABI");
 #endif
 
 #endif

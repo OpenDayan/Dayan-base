@@ -188,6 +188,9 @@ int main(int argc, char **argv)
     kernel_desc.entry_symbol = "grid_kernel";
     kernel_desc.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
     kernel_desc.max_tasks_per_core = 1;
+    kernel_desc.max_child_procs = 1;
+    kernel_desc.atomic_cache_size = 64;
+    kernel_desc.uram_size = 0x180000;
     kernel_desc.arguments = arguments;
     kernel_desc.argument_count = 2;
     status = npu_package_build(object, object_size, &kernel_desc, 1, 0,

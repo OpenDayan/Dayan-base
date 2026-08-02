@@ -7,7 +7,7 @@
 #include "hal/dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
-#define NPU_IPC_VERSION           3U
+#define NPU_IPC_VERSION           4U
 #define NPU_IPC_HEADER_SIZE       40U
 #define NPU_IPC_MAX_PAYLOAD       (64U * 1024U * 1024U)
 #define NPU_IPC_RESPONSE          (1U << 0)
@@ -170,11 +170,14 @@ typedef struct npu_ipc_kernel_launch {
 typedef struct npu_ipc_kernel_info {
     uint32_t supported_task_modes;
     uint32_t max_tasks_per_core;
+    uint32_t max_child_procs;
     uint32_t argument_count;
     uint32_t sync_resource_count;
+    uint32_t reserved;
     uint64_t stack_size;
-    uint64_t shared_size;
+    uint64_t atomic_cache_size;
     uint64_t resident_memory;
+    uint64_t uram_size;
 } npu_ipc_kernel_info_t;
 
 typedef struct npu_ipc_event_info {
@@ -209,6 +212,8 @@ static_assert(offsetof(npu_ipc_hello_response_t, data_plane) == 16,
               "Dayan data-plane export offset");
 static_assert(sizeof(npu_ipc_output_t) == 24,
               "Dayan Device output header ABI");
+static_assert(sizeof(npu_ipc_kernel_info_t) == 56,
+              "Dayan kernel info IPC ABI");
 #else
 _Static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
                "Dayan socket header ABI");
@@ -218,6 +223,8 @@ _Static_assert(offsetof(npu_ipc_hello_response_t, data_plane) == 16,
                "Dayan data-plane export offset");
 _Static_assert(sizeof(npu_ipc_output_t) == 24,
                "Dayan Device output header ABI");
+_Static_assert(sizeof(npu_ipc_kernel_info_t) == 56,
+               "Dayan kernel info IPC ABI");
 #endif
 
 void npu_ipc_header_init(npu_ipc_header_t *header, uint16_t opcode,

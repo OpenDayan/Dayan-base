@@ -74,6 +74,11 @@ mailbox 状态与跨核 resource 使用 poll。
 scheduler cleanup；cleanup 在 scheduler 栈上运行，此时可以安全释放 proc 自己的栈、
 输出缓冲和控制对象，并更新 Host 描述符的终态。
 
+托管 root 根据资源描述符预先分配有限的子 proc slot。\code{dayan_create_proc} 从同一
+hart 的空闲 slot 创建子 proc，传递一个指针参数并继承 logical task、\code{gp/shared}
+和 URAM。每个 proc 退出前等待自己的直接子 proc；该规则递归保证 root cleanup 时没有
+存活后代，随后统一释放 slot 的栈与 printf buffer。
+
 \subsection{私有堆}
 
 allocator 为每 hart 独立实例。region 内的空闲块按大小和地址放入 RBTree，分配使用

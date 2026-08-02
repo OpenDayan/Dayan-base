@@ -92,6 +92,8 @@ int npu_package_build(const void *riscv_object, size_t object_size,
             !*kernel->entry_symbol ||
             !kernel->supported_task_modes ||
             (kernel->supported_task_modes & ~NPU_PACKAGE_TASK_MODE_ALL) ||
+            kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
+            (kernel->uram_size & (NPU_PACKAGE_URAM_GRANULE - 1U)) ||
             kernel->argument_count > NPU_PACKAGE_MAX_ARGS ||
             (kernel->argument_count && !kernel->arguments) ||
             (kernel->sync_count && !kernel->sync_resources) ||
@@ -207,10 +209,12 @@ int npu_package_build(const void *riscv_object, size_t object_size,
         destination->sync_count = (uint32_t)source->sync_count;
         destination->max_tasks_per_core = source->max_tasks_per_core ?
             source->max_tasks_per_core : 1U;
+        destination->max_child_procs = source->max_child_procs;
         destination->stack_size = source->stack_size;
-        destination->shared_size = source->shared_size;
+        destination->atomic_cache_size = source->atomic_cache_size;
         destination->printf_buffer_size = source->printf_buffer_size;
         destination->resident_memory = source->resident_memory;
+        destination->uram_size = source->uram_size;
         if (source->argument_count)
             memcpy(argument_table + total_arguments, source->arguments,
                    source->argument_count * sizeof(*argument_table));

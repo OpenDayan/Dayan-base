@@ -180,6 +180,35 @@ int npu_hal_core_valid(npu_hal_t *hal, npu_hal_core_t core)
            core.core < hal->cores_per_cluster;
 }
 
+int npu_hal_memory_capacity(npu_hal_t *hal,
+                            npu_hal_memory_class_t memory_class,
+                            npu_hal_core_t viewer, uint64_t *capacity_out)
+{
+    uint64_t capacity = 0;
+    uint32_t index;
+
+    if (!hal || !capacity_out || !npu_hal_core_valid(hal, viewer) ||
+        (memory_class != NPU_HAL_MEMORY_NORMAL &&
+         memory_class != NPU_HAL_MEMORY_COHERENT &&
+         memory_class != NPU_HAL_MEMORY_URAM))
+        return -EINVAL;
+    for (index = 0; index < hal->arena_count; ++index) {
+        const npu_hal_memory_region_t *region = &hal->arenas[index].region;
+        int visible = region->scope == NPU_HAL_MEMORY_DEVICE ||
+            (region->cluster == viewer.cluster &&
+             (region->scope == NPU_HAL_MEMORY_CLUSTER ||
+              region->core == viewer.core));
+
+        if (!visible || region->memory_class != (uint32_t)memory_class)
+            continue;
+        if (region->size > UINT64_MAX - capacity)
+            return -EOVERFLOW;
+        capacity += region->size;
+    }
+    *capacity_out = capacity;
+    return 0;
+}
+
 int npu_hal_copy_to_address(npu_hal_t *hal, uint32_t cluster,
                             uint64_t address, const void *source, size_t size)
 {

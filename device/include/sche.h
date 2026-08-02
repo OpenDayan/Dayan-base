@@ -7,6 +7,7 @@
 #include "thread.h"
 
 struct proc;
+struct proc_family;
 
 typedef void (*proc_fn)(void);
 /* Runs in scheduler context and must not block. */
@@ -28,6 +29,14 @@ struct proc {
     uint32_t task_id[3];
     uint32_t task_dim[3];
     uint32_t task_mode;
+    struct proc *parent;
+    struct proc_family *family;
+    struct list_head wait_children;
+    uint32_t live_children;
+    void *shared_base;
+    size_t shared_size;
+    void *uram_base;
+    size_t uram_size;
 };
 
 _Static_assert(offsetof(struct proc, thread) == 0,
@@ -51,6 +60,15 @@ int proc_init_args(struct proc *proc, proc_fn entry,
 int proc_set_cleanup(struct proc *proc, proc_cleanup_fn cleanup, void *arg);
 int proc_set_task(struct proc *proc, const uint32_t task_id[3],
                   const uint32_t task_dim[3], uint32_t task_mode);
+int proc_family_create(uint32_t max_child_procs, size_t child_stack_size,
+                       size_t child_printf_size,
+                       struct proc_family **family_out);
+void proc_family_destroy(struct proc_family *family);
+int proc_set_resources(struct proc *proc, struct proc_family *family,
+                       size_t shared_size, void *uram_base,
+                       size_t uram_size);
+int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
+                      uint32_t *proc_id_out);
 struct proc *proc_self(void);
 /* Moves an event waiter back to this CPU's ready queue. */
 int proc_wake(struct proc *proc);

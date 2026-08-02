@@ -409,6 +409,42 @@ static int shared_address(npu_service_device_t *device,
     return 0;
 }
 
+static int uram_address(npu_service_device_t *device,
+                        const npu_service_launch_desc_t *desc,
+                        uint64_t *address_out)
+{
+    npu_hal_allocation_info_t info;
+    uint64_t address;
+    int status;
+
+    if (!desc->uram_size) {
+        if (desc->uram_allocation || desc->uram_offset)
+            return -EINVAL;
+        *address_out = 0;
+        return 0;
+    }
+    if (!desc->uram_allocation ||
+        (desc->uram_size & (RPC_PROC_URAM_GRANULE - 1U)))
+        return -EINVAL;
+    status = npu_hal_memory_info(device->hal, desc->uram_allocation, &info);
+    if (status < 0 || info.memory_class != NPU_HAL_MEMORY_URAM ||
+        info.scope != NPU_HAL_MEMORY_CORE ||
+        info.location.cluster != desc->target.cluster ||
+        info.location.core != desc->target.core ||
+        desc->uram_offset > info.size ||
+        desc->uram_size > info.size - desc->uram_offset)
+        return status < 0 ? status : -EINVAL;
+    status = npu_hal_memory_address(device->hal, desc->uram_allocation,
+                                    desc->target, &address);
+    if (status < 0 || address > UINT64_MAX - desc->uram_offset)
+        return status < 0 ? status : -EOVERFLOW;
+    address += desc->uram_offset;
+    if (address & (RPC_PROC_URAM_GRANULE - 1U))
+        return -EINVAL;
+    *address_out = address;
+    return 0;
+}
+
 int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
                          uint64_t *response_out, uint32_t timeout_ms)
@@ -482,6 +518,7 @@ int npu_service_launch(npu_service_device_t *device,
     npu_service_launch_t *launch;
     npu_hal_allocation_t *allocation = 0;
     uint64_t shared_base;
+    uint64_t uram_base;
     uint64_t request_address;
     uint64_t response;
     uint32_t booted;
@@ -496,6 +533,8 @@ int npu_service_launch(npu_service_device_t *device,
         desc->stack_size < RPC_PROC_MIN_STACK_SIZE ||
         desc->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         desc->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
+        desc->max_child_procs > RPC_PROC_MAX_CHILD_PROCS ||
+        desc->resource_reserved ||
         !task_valid(desc) ||
         !npu_hal_address_valid(device->hal, desc->target, desc->entry, 2))
         return -EINVAL;
@@ -506,6 +545,9 @@ int npu_service_launch(npu_service_device_t *device,
     if (!(booted & (UINT32_C(1) << desc->target.core)))
         return -ENODEV;
     status = shared_address(device, desc, &shared_base);
+    if (status < 0)
+        return status;
+    status = uram_address(device, desc, &uram_base);
     if (status < 0)
         return status;
     launch = calloc(1, sizeof(*launch));
@@ -531,6 +573,9 @@ int npu_service_launch(npu_service_device_t *device,
     request.stack_size = desc->stack_size;
     request.shared_base = shared_base;
     request.shared_size = desc->shared_size;
+    request.max_child_procs = desc->max_child_procs;
+    request.uram_base = uram_base;
+    request.uram_size = desc->uram_size;
     request.printf_buffer_size = desc->printf_buffer_size;
     request.argc = desc->argc;
     memcpy(request.args, desc->args, desc->argc * sizeof(desc->args[0]));

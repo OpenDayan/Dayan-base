@@ -86,14 +86,22 @@ xdma[device_index + c * cluster_device_stride]
 - `NPU_HAL_MEMORY_DEVICE`：所有 Cluster/Core 可见；
 - `NPU_HAL_MEMORY_CLUSTER`：只对一个 Cluster 可见；
 - `NPU_HAL_MEMORY_CORE`：只对一个 Core 可见；
-- class 为普通 DRAM 或 coherent window，usage 区分 Buffer、Firmware、Kernel、
-  Device heap、Launch descriptor 和 Shared allocation。
+- class 为普通 DRAM、coherent window 或每 Core 私有 URAM；usage 区分 Buffer、
+  Firmware、Kernel、Device heap、Launch descriptor、Shared/atomic-cache allocation
+  和 Kernel URAM。
 
 Server 的 Buffer 分配、调度目标选择、kernel image、BL1 固定段和反向 heap RPC 都使用
-HAL allocation handle。应用侧只有 `npu_buffer_t *`，不会取得物理地址。默认 HAL region
-是 device-scope；真实多 Cluster 平台可通过
+HAL allocation handle。应用侧只有 `npu_buffer_t *`，不会取得物理地址。默认 HAL
+包含 device-scope DRAM/coherent region，以及每个 Core 一个 1.5 MiB URAM region；
+URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB。真实多 Cluster 平台可通过
 `dayan_server_options_t.hal.memory_regions` 提供准确的物理布局。对同一 Cluster
 可见的 region 不得重叠；不同 Cluster 的局部地址空间可以使用相同数值地址。
+
+每个 kernel 的 Package 元信息声明 `max_child_procs`、`atomic_cache_size` 和
+`uram_size`。Server 选 Core 时累加检查三类资源：子 proc 数受
+`max_child_procs_per_core` 限制，atomic cache 与 URAM 分别受 HAL 对该 Core 可见的
+容量限制。URAM allocation 固定为 Core scope，以 1 KiB 为分配和释放粒度；物理
+Cluster/Core 仍不会出现在 Runtime 启动接口中。
 
 ## socket 与零中转 memcpy
 
@@ -129,11 +137,18 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
 - Host→Device：`RPC_PROC_CREATE` 与 `RPC_ICACHE_FLUSH`；每个 Core 同时至多一笔，
   不同 Core 可并行。
 
-create-proc ABI v2 使用 184-byte `rpc_proc_create_request`，包含 entry、栈、shared、
-printf buffer、0–8 个 RV64 参数、cookie，以及 `task_id[3]`、`task_dim[3]` 和
-`task_mode`。BL1 创建托管 proc，kernel 退出后在 scheduler 栈上释放资源，并把同一
-描述符置为 `EXITED` 或 `FAILED`。Service 接受 create response 后已经快速进入
-`EXITED` 的合法情况。
+create-proc ABI v3 使用 208-byte `rpc_proc_create_request`，包含 entry、栈、shared、
+printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
+以及最大子 proc 数和 URAM base/size。BL1 为一个 root proc 预留声明数量的子 proc
+slot；`dayan_create_proc(entry, argument)` 在同一 Core 创建子 proc 并继承 logical
+task、`shared/gp` 和 URAM。父 proc 返回时会等待直接子 proc，因而 root 的终态覆盖
+整棵子 proc 树。最后由 scheduler 栈释放资源，并把描述符置为 `EXITED` 或 `FAILED`。
+Service 接受 create response 后已经快速进入终态仍是合法情况。
+
+Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-local URAM。
+四核模式可把零初始化的 `dayan_cluster_barrier_t` 放在 shared allocation 中，并调用
+`dayan_cluster_barrier(4, barrier)`；该 barrier 可复用，使用 release/acquire 语义，
+其它参与者数量或非 `kFourCore` launch 会被拒绝。
 
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
 未定义符号。代码写入某个 Cluster 后，会对该 Cluster 所有已启动 Core 分别执行
