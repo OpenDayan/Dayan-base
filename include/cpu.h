@@ -19,6 +19,8 @@ struct mem_state {
 struct sche_state {
     struct thread init;
     struct list_head ready;
+    struct list_head wait_internal_event;
+    struct list_head wait_external_event;
     uint32_t next_id;
 };
 

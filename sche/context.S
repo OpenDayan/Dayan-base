@@ -56,23 +56,31 @@ switch_context_restore:
 .size switch_context_restore, . - switch_context_restore
 
 .section .text.proc_bootstrap, "ax", @progbits
+.option push
+.option norvc
 .align 2
 .globl proc_bootstrap
 .type proc_bootstrap, @function
 proc_bootstrap:
+    ld      a7, PROC_FRAME_A7(sp)
+    ld      a6, PROC_FRAME_A6(sp)
+    ld      a5, PROC_FRAME_A5(sp)
+    ld      a4, PROC_FRAME_A4(sp)
+    ld      a3, PROC_FRAME_A3(sp)
+    ld      a2, PROC_FRAME_A2(sp)
+    ld      a1, PROC_FRAME_A1(sp)
+    ld      a0, PROC_FRAME_A0(sp)
+.Lproc_bootstrap_args_end:
+    .if (.Lproc_bootstrap_args_end - proc_bootstrap) != \
+        (PROC_MAX_ARGS * PROC_BOOTSTRAP_ARG_INSN_SIZE)
+    .error "proc bootstrap argument loads must remain fixed-width"
+    .endif
+    csrw    fcsr, zero
     ld      t0, PROC_FRAME_ENTRY(sp)
     ld      ra, PROC_FRAME_RA(sp)
-    ld      a0, PROC_FRAME_A0(sp)
-    ld      a1, PROC_FRAME_A1(sp)
-    ld      a2, PROC_FRAME_A2(sp)
-    ld      a3, PROC_FRAME_A3(sp)
-    ld      a4, PROC_FRAME_A4(sp)
-    ld      a5, PROC_FRAME_A5(sp)
-    ld      a6, PROC_FRAME_A6(sp)
-    ld      a7, PROC_FRAME_A7(sp)
     addi    sp, sp, PROC_FRAME_SIZE
-    csrw    fcsr, zero
     jr      t0
 .size proc_bootstrap, . - proc_bootstrap
+.option pop
 
 .section .note.GNU-stack, "", @progbits

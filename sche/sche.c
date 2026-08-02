@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -6,7 +7,6 @@
 #include "errno.h"
 #include "platform.h"
 #include "sche.h"
-#include "string.h"
 
 extern void proc_bootstrap(void);
 
@@ -37,6 +37,8 @@ void sche_init(void)
     init->pc = 0;
     init->type = THREAD_TYPE_BASE;
     INIT_LIST_HEAD(&sche->ready);
+    INIT_LIST_HEAD(&sche->wait_internal_event);
+    INIT_LIST_HEAD(&sche->wait_external_event);
     sche->next_id = 1;
 }
 
@@ -59,15 +61,17 @@ int thread_init(struct thread *thread, uint32_t type)
     return 0;
 }
 
-int proc_init(struct proc *proc, proc_fn run, void *arg,
-              void *stack, size_t stack_size)
+__attribute__((noinline))
+int proc_vinit(struct proc *proc, proc_fn entry,
+               void *stack, size_t stack_size, size_t argc, va_list args)
 {
     struct proc_frame *frame;
     uintptr_t base;
     uintptr_t top;
+    size_t i;
     int status;
 
-    if (!proc || !run || !stack)
+    if (!proc || !entry || !stack || argc > PROC_MAX_ARGS)
         return -EINVAL;
 
     base = (uintptr_t)stack;
@@ -82,34 +86,31 @@ int proc_init(struct proc *proc, proc_fn run, void *arg,
         return status;
 
     frame = (struct proc_frame *)(top - sizeof(*frame));
-    memset(frame, 0, sizeof(*frame));
-    frame->entry = (uintptr_t)run;
+    frame->entry = (uintptr_t)entry;
     frame->ra = (uintptr_t)proc_exit;
-    frame->a0 = (uintptr_t)proc;
-    frame->a1 = (uintptr_t)arg;
+    for (i = 0; i < argc; ++i)
+        frame->args[i] = va_arg(args, uintptr_t);
 
     proc->thread.sp = (uintptr_t)frame;
-    proc->thread.pc = (uintptr_t)proc_bootstrap;
-    INIT_LIST_HEAD(&proc->runq);
+    proc->thread.pc = (uintptr_t)proc_bootstrap +
+                      PROC_BOOTSTRAP_PC_OFFSET(argc);
+    INIT_LIST_HEAD(&proc->node);
+    proc->ready = 0;
+    proc->thread.state = THREAD_READY;
+    list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
     return 0;
 }
 
-int proc_start(struct proc *proc)
+int proc_init(struct proc *proc, proc_fn entry,
+              void *stack, size_t stack_size, size_t argc, ...)
 {
-    struct cpu *cpu = cpu_self();
-    struct sche_state *sche = &cpu->sche;
+    va_list args;
+    int status;
 
-    if (!proc || !proc->thread.sp || !proc->thread.pc)
-        return -EINVAL;
-    if (proc->thread.type != THREAD_TYPE_PROC ||
-        proc->thread.state != THREAD_WAIT_START ||
-        !list_empty(&proc->runq))
-        return -EBUSY;
-    if (proc->thread.cpu != cpu)
-        return -EPERM;
-    proc->thread.state = THREAD_READY;
-    list_add_tail(&proc->runq, &sche->ready);
-    return 0;
+    va_start(args, argc);
+    status = proc_vinit(proc, entry, stack, stack_size, argc, args);
+    va_end(args);
+    return status;
 }
 
 int proc_wake(struct proc *proc)
@@ -122,21 +123,32 @@ int proc_wake(struct proc *proc)
     if (proc->thread.cpu != cpu)
         return -EPERM;
     if (proc->thread.type != THREAD_TYPE_PROC ||
-        proc->thread.state != THREAD_WAIT_EVENT ||
-        !list_empty(&proc->runq))
+        proc->thread.state != THREAD_WAIT_EXTERNAL_EVENT)
         return -EBUSY;
     proc->thread.state = THREAD_READY;
-    list_add_tail(&proc->runq, &sche->ready);
+    list_move_tail(&proc->node, &sche->ready);
     return 0;
 }
 
-void proc_wait(void)
+void proc_wait_internal(proc_ready_fn ready)
+{
+    struct proc *proc = current_proc();
+
+    if (!proc || !ready)
+        return;
+    proc->ready = ready;
+    proc->thread.state = THREAD_WAIT_INTERNAL_EVENT;
+    switch_to_scheduler(&proc->thread);
+}
+
+void proc_wait_external(void)
 {
     struct proc *proc = current_proc();
 
     if (!proc)
         return;
-    proc->thread.state = THREAD_WAIT_EVENT;
+    proc->ready = 0;
+    proc->thread.state = THREAD_WAIT_EXTERNAL_EVENT;
     switch_to_scheduler(&proc->thread);
 }
 
@@ -167,20 +179,39 @@ _Noreturn void scheduler(void)
     struct sche_state *sche = &init->cpu->sche;
 
     for (;;) {
-        struct proc *proc = list_first_entry_or_null(&sche->ready,
-                                                     struct proc, runq);
+        struct list_head *node;
+        struct list_head *next;
+        struct proc *proc;
+
+        list_for_each_safe(node, next, &sche->wait_internal_event) {
+            struct proc *waiting = list_entry(node, struct proc, node);
+
+            if (!waiting->ready(waiting))
+                continue;
+            waiting->ready = 0;
+            waiting->thread.state = THREAD_READY;
+            list_move_tail(node, &sche->ready);
+        }
+
+        proc = list_first_entry_or_null(&sche->ready, struct proc, node);
 
         if (!proc) {
-            platform_idle();
+            if (list_empty(&sche->wait_internal_event))
+                platform_idle();
             continue;
         }
-        list_del_init(&proc->runq);
+        list_del_init(&proc->node);
 
         init->state = THREAD_READY;
         proc->thread.state = THREAD_RUNNING;
         switch_context(init, &proc->thread);
 
-        if (proc->thread.state == THREAD_READY)
-            list_add_tail(&proc->runq, &sche->ready);
+        if (proc->thread.state == THREAD_READY) {
+            list_add_tail(&proc->node, &sche->ready);
+        } else if (proc->thread.state == THREAD_WAIT_INTERNAL_EVENT) {
+            list_add_tail(&proc->node, &sche->wait_internal_event);
+        } else if (proc->thread.state == THREAD_WAIT_EXTERNAL_EVENT) {
+            list_add_tail(&proc->node, &sche->wait_external_event);
+        }
     }
 }

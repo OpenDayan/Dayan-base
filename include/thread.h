@@ -11,9 +11,10 @@ struct cpu;
 enum thread_state {
     THREAD_RUNNING = 0,
     THREAD_READY = 1,
-    THREAD_WAIT_EVENT = 2,
-    THREAD_WAIT_START = 3,
-    THREAD_WAIT_EXIT = 4,
+    THREAD_WAIT_INTERNAL_EVENT = 2,
+    THREAD_WAIT_EXTERNAL_EVENT = 3,
+    THREAD_WAIT_START = 4,
+    THREAD_WAIT_EXIT = 5,
 };
 
 enum thread_type {
@@ -23,7 +24,7 @@ enum thread_type {
 
 _Static_assert(THREAD_RUNNING == 0, "running state ABI");
 _Static_assert(THREAD_READY == 1, "ready state ABI");
-_Static_assert(THREAD_WAIT_EVENT >= 2, "wait state ABI");
+_Static_assert(THREAD_WAIT_INTERNAL_EVENT >= 2, "wait state ABI");
 _Static_assert(THREAD_TYPE_BASE == 0, "base type ABI");
 
 /* The fixed prefix addressed by tp for every execution context. */

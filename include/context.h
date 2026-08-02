@@ -32,6 +32,11 @@
 #define PROC_FRAME_A7          72
 #define PROC_FRAME_SIZE        80
 
+#define PROC_MAX_ARGS                       8
+#define PROC_BOOTSTRAP_ARG_INSN_SIZE        4
+#define PROC_BOOTSTRAP_PC_OFFSET(argc) \
+    ((PROC_MAX_ARGS - (argc)) * PROC_BOOTSTRAP_ARG_INSN_SIZE)
+
 #ifndef __ASSEMBLER__
 
 #include <stddef.h>
@@ -57,14 +62,7 @@ struct switch_frame {
 struct proc_frame {
     uintptr_t entry;
     uintptr_t ra;
-    uintptr_t a0;
-    uintptr_t a1;
-    uintptr_t a2;
-    uintptr_t a3;
-    uintptr_t a4;
-    uintptr_t a5;
-    uintptr_t a6;
-    uintptr_t a7;
+    uintptr_t args[PROC_MAX_ARGS];
 };
 
 _Static_assert(offsetof(struct switch_frame, ra) == SWITCH_FRAME_RA,
@@ -83,14 +81,18 @@ _Static_assert(offsetof(struct proc_frame, entry) == PROC_FRAME_ENTRY,
                "proc frame entry offset");
 _Static_assert(offsetof(struct proc_frame, ra) == PROC_FRAME_RA,
                "proc frame ra offset");
-_Static_assert(offsetof(struct proc_frame, a0) == PROC_FRAME_A0,
+_Static_assert(offsetof(struct proc_frame, args[0]) == PROC_FRAME_A0,
                "proc frame a0 offset");
-_Static_assert(offsetof(struct proc_frame, a7) == PROC_FRAME_A7,
+_Static_assert(offsetof(struct proc_frame, args[7]) == PROC_FRAME_A7,
                "proc frame a7 offset");
 _Static_assert(sizeof(struct proc_frame) == PROC_FRAME_SIZE,
                "proc frame size");
 _Static_assert((PROC_FRAME_SIZE & 15) == 0,
                "proc frame must preserve stack alignment");
+_Static_assert(PROC_BOOTSTRAP_PC_OFFSET(0) == 32,
+               "zero-argument bootstrap offset");
+_Static_assert(PROC_BOOTSTRAP_PC_OFFSET(PROC_MAX_ARGS) == 0,
+               "maximum-argument bootstrap offset");
 
 #endif
 #endif

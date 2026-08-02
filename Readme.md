@@ -33,9 +33,10 @@ init thread 的 ID 与 type 都是 0；其它类型把 `struct thread` 作为结
 proc 一旦绑定到某个 hart，当前版本不允许迁移。
 
 thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始，其余值
-表示不同等待原因。当前 proc 使用 `THREAD_WAIT_EVENT`、`THREAD_WAIT_START` 和
-`THREAD_WAIT_EXIT`。CPU 私有结构仅聚合 scheduler 与 allocator 状态；hart ID
-由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
+表示不同等待原因。`thread_init()` 构造期间短暂使用 `THREAD_WAIT_START`；proc 初始化
+完成后直接进入 `THREAD_READY`，运行期使用 `THREAD_WAIT_INTERNAL_EVENT`、
+`THREAD_WAIT_EXTERNAL_EVENT` 和 `THREAD_WAIT_EXIT`。CPU 私有结构仅聚合 scheduler 与
+allocator 状态；hart ID 由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
 
 普通 `.data`/`.bss` 会被链接脚本拒绝，以免不一致缓存下多个 hart 意外共享
 可变状态。每核状态应放入 `struct cpu`，跨核对象应显式使用 `OS_COHERENT`；
@@ -81,7 +82,7 @@ Linux 风格 intrusive 泛型。当前兼容常用的 `container_of/list_entry`�
 由宏在编译期展开，基础指针操作使用 `static inline`，RBTree 平衡代码位于
 `lib/rbtree.c`。
 
-`sche/` 的 ready queue 和 `mem/` 的 region 集合都使用 `list_head`。`mem/` 的空闲块
+`sche/` 的调度队列和 `mem/` 的 region 集合都使用 `list_head`。`mem/` 的空闲块
 使用按块大小排序的 intrusive RBTree 做 best-fit 分配，并通过边界信息合并
 相邻空闲块。初始 region 永不归还；堆不足时通过 `RPC_HEAP_ACQUIRE` 请求 Host，
 Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。RPC 尚未接通时，扩堆会
@@ -98,14 +99,29 @@ Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。RPC 尚未�
 保留的 F 寄存器；有存活浮点值时，编译器会在调用 `proc_yield()` 等函数前自行溢出，
 而每个 thread 的浮点控制状态由 `fcsr` 保存。
 
-`proc_init(proc, run, arg, stack, stack_size)` 使用调用者提供的区间构造启动帧，栈顶按
-16 字节向下对齐。新 proc 的初始 `pc` 直接指向 `proc_bootstrap`；bootstrap 从栈中加载
-任务入口、返回地址和 `a0-a7`，其中 `a0` 是 proc、`a1` 是 arg，其余参数为 0。该栈
-在 proc 到达 `THREAD_WAIT_EXIT` 前必须一直有效。
-`proc_start()` 只负责加入当前 CPU 的 ready queue。运行中的 proc 可调用
-`proc_yield()` 主动让出，或调用 `proc_wait()` 睡眠并等待 `proc_wake()`；`run()` 正常
-返回等价于调用 `proc_exit()`，不会被重新排队。当前没有抢占、跨 hart 迁移或退出后
-自动回收 proc/栈。
+`proc_init(proc, entry, stack, stack_size, argc, ...)` 使用调用者提供的区间构造启动帧，
+栈顶按 16 字节向下对齐，支持 0 到 8 个寄存器参数。可变参数是底层 ABI 机器字，调用者
+必须逐个按 `uintptr_t` 传入；后续类型安全封装可负责指针转换、浮点位模式打包以及自动
+加入 proc 指针。实际实现位于接收 `va_list` 的 `proc_vinit()`；`proc_init()` 仅负责
+建立和销毁参数列表，因此其它可变参数封装可以直接调用 `proc_vinit()`，不需要中间
+数组。bootstrap 开头按 `a7` 到 `a0` 连续排列八条定长加载指令，新 proc 的
+初始 `pc` 为 `proc_bootstrap + (8 - argc) * 4`，因此只恢复实际提供的参数寄存器，再
+加载任务入口和返回地址。未使用的高位参数寄存器不作初始化。该栈在 proc 到达
+`THREAD_WAIT_EXIT` 前必须一直有效。
+
+例如，底层接口创建一个具有两个机器字参数的 proc：
+
+```c
+proc_init(&proc, (proc_fn)task_main, stack, stack_size, 2,
+          (uintptr_t)&proc, (uintptr_t)arg);
+```
+
+`proc_init()`/`proc_vinit()` 成功时直接把 proc 加入当前 CPU 的 ready queue。运行中的
+proc 可调用 `proc_yield()` 主动让出。`proc_wait_internal(ready)` 进入内部等待队列，
+scheduler 每轮调用其 predicate，返回非零后移回 ready queue；内部等待非空时不会执行
+`wfi`。`proc_wait_external()` 进入不被遍历的外部等待队列，外部事件 callback 通过
+`proc_wake()` 将其移回 ready queue。`entry()` 正常返回等价于调用 `proc_exit()`，不会
+被重新排队。当前没有抢占、跨 hart 迁移或退出后自动回收 proc/栈。
 
 `lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度
