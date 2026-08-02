@@ -3,6 +3,7 @@
 #include "runtime_internal.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -10,6 +11,38 @@
 
 #define NPU_RUNTIME_DEFAULT_CONNECT_TIMEOUT 5000U
 #define NPU_RUNTIME_DEFAULT_TIMEOUT         5000U
+#define NPU_RUNTIME_MAX_OUTPUT_READS        4096U
+
+struct runtime_output {
+    struct runtime_output *next;
+    uint32_t cluster;
+    uint32_t core;
+    uint32_t proc;
+    uint32_t flags;
+    size_t size;
+    unsigned char data[];
+};
+
+_Static_assert(NPU_RUNTIME_OUTPUT_CLEAR == NPU_IPC_OUTPUT_CLEAR,
+               "Runtime and socket output flags");
+_Static_assert(NPU_RUNTIME_OUTPUT_CONTINUED == NPU_IPC_OUTPUT_CONTINUED,
+               "Runtime and socket continuation flags");
+
+static void default_output(void *context, uint32_t cluster, uint32_t core,
+                           uint32_t proc, const void *data, size_t size,
+                           uint32_t flags)
+{
+    (void)context;
+    (void)cluster;
+    (void)core;
+    (void)proc;
+    if (flags & NPU_RUNTIME_OUTPUT_CLEAR)
+        fflush(stdout);
+    if (data && size) {
+        (void)fwrite(data, 1, size, stdout);
+        fflush(stdout);
+    }
+}
 
 static void close_handles(int *handles, size_t count)
 {
@@ -83,13 +116,130 @@ out:
     return status;
 }
 
+static int output_drain_locked(npu_runtime_t *runtime,
+                               struct runtime_output **head_out)
+{
+    struct runtime_output *head = 0;
+    struct runtime_output *tail = 0;
+    unsigned reads;
+    int status = 0;
+
+    *head_out = 0;
+    for (reads = 0; reads < NPU_RUNTIME_MAX_OUTPUT_READS; ++reads) {
+        int handles[NPU_HAL_DATA_MAX_HANDLES];
+        npu_ipc_header_t request;
+        npu_ipc_header_t response;
+        npu_ipc_output_t *output;
+        struct runtime_output *record;
+        uint64_t request_id;
+        size_t handle_count = 0;
+        void *payload = 0;
+
+        request_id = __atomic_add_fetch(&runtime->next_request_id, 1,
+                                        __ATOMIC_RELAXED);
+        if (!request_id) {
+            status = -EOVERFLOW;
+            break;
+        }
+        npu_ipc_header_init(&request, NPU_IPC_OUTPUT_READ, request_id, 0, 0);
+        status = npu_ipc_send(runtime->control_fd, &request, 0, 0, 0);
+        if (status < 0)
+            break;
+        status = npu_ipc_receive(runtime->control_fd, &response, &payload,
+                                 handles, &handle_count);
+        if (status < 0)
+            break;
+        if (handle_count || response.opcode != NPU_IPC_OUTPUT_READ ||
+            response.flags != NPU_IPC_RESPONSE ||
+            response.request_id != request_id) {
+            status = -EPROTO;
+            close_handles(handles, handle_count);
+            free(payload);
+            break;
+        }
+        close_handles(handles, handle_count);
+        if (response.status == -EAGAIN) {
+            status = response.payload_size ? -EPROTO : 0;
+            free(payload);
+            break;
+        }
+        if (response.status ||
+            response.payload_size < sizeof(npu_ipc_output_t)) {
+            status = response.status < 0 ? response.status : -EPROTO;
+            free(payload);
+            break;
+        }
+        output = payload;
+        if (output->reserved ||
+            (output->flags & ~(NPU_IPC_OUTPUT_CLEAR |
+                               NPU_IPC_OUTPUT_CONTINUED)) ||
+            output->data_size > NPU_IPC_OUTPUT_CHUNK_SIZE ||
+            response.payload_size != sizeof(*output) + output->data_size) {
+            status = -EPROTO;
+            free(payload);
+            break;
+        }
+        record = malloc(sizeof(*record) + output->data_size);
+        if (!record) {
+            status = -ENOMEM;
+            free(payload);
+            break;
+        }
+        record->next = 0;
+        record->cluster = output->cluster;
+        record->core = output->core;
+        record->proc = output->proc;
+        record->flags = output->flags;
+        record->size = output->data_size;
+        if (record->size)
+            memcpy(record->data, output + 1, record->size);
+        if (tail)
+            tail->next = record;
+        else
+            head = record;
+        tail = record;
+        free(payload);
+        status = 0;
+    }
+    *head_out = head;
+    return status;
+}
+
+static void output_deliver(npu_runtime_t *runtime,
+                           struct runtime_output *output)
+{
+    while (output) {
+        struct runtime_output *next = output->next;
+
+        if (runtime->output) {
+            runtime->output(runtime->output_context, output->cluster,
+                            output->core, output->proc, output->data,
+                            output->size, output->flags);
+        }
+        free(output);
+        output = next;
+    }
+}
+
+static int opcode_drains_output(uint16_t opcode)
+{
+    return opcode == NPU_IPC_CONTEXT_DESTROY ||
+           opcode == NPU_IPC_STREAM_DESTROY ||
+           opcode == NPU_IPC_STREAM_SYNCHRONIZE ||
+           opcode == NPU_IPC_EVENT_QUERY ||
+           opcode == NPU_IPC_EVENT_WAIT ||
+           opcode == NPU_IPC_EVENT_DESTROY;
+}
+
 int runtime_control_call(npu_runtime_t *runtime, uint16_t opcode,
                          uint64_t object_id, const void *request,
                          size_t request_size, void *response,
                          size_t expected_response_size,
                          uint64_t *response_object_id)
 {
+    struct runtime_output *output = 0;
     int status;
+    int output_status = 0;
 
     if (!runtime || runtime->control_fd < 0)
         return -EINVAL;
@@ -97,8 +247,12 @@ int runtime_control_call(npu_runtime_t *runtime, uint16_t opcode,
     status = ipc_call_locked(runtime, runtime->control_fd, opcode, object_id,
                              request, request_size, response,
                              expected_response_size, response_object_id);
+    if ((status == 0 || status == -ETIMEDOUT) &&
+        opcode_drains_output(opcode))
+        output_status = output_drain_locked(runtime, &output);
     pthread_mutex_unlock(&runtime->control_mutex);
-    return status;
+    output_deliver(runtime, output);
+    return status == 0 && output_status < 0 ? output_status : status;
 }
 
 int runtime_data_call(npu_runtime_t *runtime, uint16_t opcode,
@@ -159,7 +313,9 @@ static int hello(int fd, npu_runtime_t *runtime, uint32_t role,
     if (!hello_out->session_id ||
         (session_id && hello_out->session_id != session_id) ||
         hello_out->service_version != NPU_IPC_VERSION ||
-        !(hello_out->capabilities & NPU_IPC_CAP_DIRECT_TRANSFER)) {
+        (hello_out->capabilities & (NPU_IPC_CAP_DIRECT_TRANSFER |
+                                    NPU_IPC_CAP_DEVICE_OUTPUT)) !=
+            (NPU_IPC_CAP_DIRECT_TRANSFER | NPU_IPC_CAP_DEVICE_OUTPUT)) {
         status = -EPROTO;
         goto fail;
     }
@@ -188,6 +344,7 @@ void npu_runtime_options_init(npu_runtime_options_t *options)
     options->server_socket = NPU_DEFAULT_SERVER_SOCKET;
     options->connect_timeout_ms = NPU_RUNTIME_DEFAULT_CONNECT_TIMEOUT;
     options->default_timeout_ms = NPU_RUNTIME_DEFAULT_TIMEOUT;
+    options->output = default_output;
 }
 
 int npu_runtime_open(npu_runtime_t **runtime_out,
@@ -223,6 +380,8 @@ int npu_runtime_open(npu_runtime_t **runtime_out,
     runtime->control_fd = -1;
     runtime->data_fd = -1;
     runtime->default_timeout_ms = options->default_timeout_ms;
+    runtime->output = options->output;
+    runtime->output_context = options->output_context;
     status = pthread_mutex_init(&runtime->control_mutex, 0);
     if (status) {
         status = -status;

@@ -15,6 +15,20 @@
 #define NPU_IRQ_STATUS_OFFSET    0x00U
 #define NPU_IRQ_CLEAR_OFFSET     0x0cU
 #define NPU_IRQ_MAILBOX_OFFSET   0x20U
+#define NPU_IRQ_POLL_INTERVAL_NS 1000000L
+
+static int monotonic_ms(uint64_t *value)
+{
+    struct timespec now;
+
+    if (!value)
+        return -EINVAL;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -errno;
+    *value = (uint64_t)now.tv_sec * 1000U +
+             (uint64_t)now.tv_nsec / 1000000U;
+    return 0;
+}
 
 void npu_hal_options_init(npu_hal_options_t *options)
 {
@@ -57,6 +71,7 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
 {
     npu_hal_options_t defaults;
     npu_hal_t *hal;
+    int irq_mutex_initialized = 0;
     int mutex_initialized = 0;
     int status;
 
@@ -81,6 +96,12 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
         goto fail;
     }
     mutex_initialized = 1;
+    status = pthread_mutex_init(&hal->irq_mutex, 0);
+    if (status != 0) {
+        status = -status;
+        goto fail;
+    }
+    irq_mutex_initialized = 1;
     status = npu_hal_memory_manager_init(hal, options);
     if (status < 0)
         goto fail;
@@ -99,6 +120,8 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
 
 fail:
     npu_hal_memory_manager_destroy(hal);
+    if (irq_mutex_initialized)
+        pthread_mutex_destroy(&hal->irq_mutex);
     if (mutex_initialized)
         pthread_mutex_destroy(&hal->memory_mutex);
     free(hal);
@@ -112,6 +135,7 @@ void npu_hal_close(npu_hal_t *hal)
     if (hal->ops && hal->ops->close)
         hal->ops->close(hal->state);
     npu_hal_memory_manager_destroy(hal);
+    pthread_mutex_destroy(&hal->irq_mutex);
     pthread_mutex_destroy(&hal->memory_mutex);
     free(hal);
 }
@@ -232,6 +256,101 @@ int npu_hal_irq_status(npu_hal_t *hal, uint32_t cluster, uint32_t *status)
 {
     return npu_hal_register_read(hal, cluster, NPU_IRQ_STATUS_OFFSET,
                                  status, sizeof(*status));
+}
+
+static int irq_wait_poll(npu_hal_t *hal, uint32_t timeout_ms,
+                         uint32_t *cluster_out, uint32_t *status_out)
+{
+    const struct timespec delay = { 0, NPU_IRQ_POLL_INTERVAL_NS };
+    uint64_t deadline = 0;
+
+    if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
+        int result = monotonic_ms(&deadline);
+
+        if (result < 0)
+            return result;
+        deadline += timeout_ms;
+    }
+    for (;;) {
+        uint32_t cluster;
+
+        for (cluster = 0; cluster < hal->cluster_count; ++cluster) {
+            uint32_t pending = 0;
+            int result = npu_hal_irq_status(hal, cluster, &pending);
+
+            if (result < 0)
+                return result;
+            if (pending) {
+                *cluster_out = cluster;
+                *status_out = pending;
+                return 0;
+            }
+        }
+        if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
+            uint64_t now = 0;
+            int result = monotonic_ms(&now);
+
+            if (result < 0)
+                return result;
+            if (now >= deadline)
+                return -ETIMEDOUT;
+        }
+        while (nanosleep(&delay, 0) != 0) {
+            if (errno != EINTR)
+                return -errno;
+        }
+    }
+}
+
+int npu_hal_irq_wait(npu_hal_t *hal, uint32_t timeout_ms,
+                     uint32_t *cluster, uint32_t *status)
+{
+    uint64_t wait_started = 0;
+    int result;
+
+    if (!hal || !cluster || !status)
+        return -EINVAL;
+    *cluster = NPU_HAL_ANY_CLUSTER;
+    *status = 0;
+    result = pthread_mutex_lock(&hal->irq_mutex);
+    if (result != 0)
+        return -result;
+    if (hal->ops->irq_wait) {
+        if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
+            result = monotonic_ms(&wait_started);
+            if (result < 0)
+                goto finish;
+        }
+        result = hal->ops->irq_wait(hal->state, timeout_ms, cluster, status);
+        if (result == -ENOTSUP) {
+            uint32_t fallback_timeout = timeout_ms;
+
+            *cluster = NPU_HAL_ANY_CLUSTER;
+            *status = 0;
+            if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
+                uint64_t now = 0;
+
+                result = monotonic_ms(&now);
+                if (result < 0)
+                    goto finish;
+                fallback_timeout = now - wait_started >= timeout_ms ?
+                    0 : timeout_ms - (uint32_t)(now - wait_started);
+            }
+            result = irq_wait_poll(hal, fallback_timeout, cluster, status);
+        }
+    } else {
+        result = irq_wait_poll(hal, timeout_ms, cluster, status);
+    }
+finish:
+    if (result == 0 &&
+        (*cluster >= hal->cluster_count || !*status))
+        result = -EPROTO;
+    if (result < 0) {
+        *cluster = NPU_HAL_ANY_CLUSTER;
+        *status = 0;
+    }
+    pthread_mutex_unlock(&hal->irq_mutex);
+    return result;
 }
 
 int npu_hal_irq_ack(npu_hal_t *hal, uint32_t cluster, uint32_t mask)

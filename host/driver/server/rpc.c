@@ -7,6 +7,7 @@
 #include "trap.h"
 
 #define NPU_MAX_PRINT_BYTES (1024U * 1024U)
+#define NPU_RPC_IRQ_WAIT_TIMEOUT_MS 100U
 
 static int range_valid(npu_service_device_t *device, npu_hal_core_t core,
                        uint64_t address, uint64_t size)
@@ -307,8 +308,10 @@ void *npu_rpc_worker(void *arg)
     npu_service_device_t *device = arg;
 
     for (;;) {
-        uint32_t saw_pending = 0;
         uint32_t cluster;
+        uint32_t pending;
+        uint32_t core_index;
+        int wait_status;
 
         pthread_mutex_lock(&device->mutex);
         if (device->worker_stop) {
@@ -316,51 +319,49 @@ void *npu_rpc_worker(void *arg)
             break;
         }
         pthread_mutex_unlock(&device->mutex);
-        for (cluster = 0; cluster < device->hal_info.cluster_count;
-             ++cluster) {
-            uint32_t pending = 0;
-            uint32_t core_index;
+        wait_status = npu_hal_irq_wait(device->hal,
+                                       NPU_RPC_IRQ_WAIT_TIMEOUT_MS,
+                                       &cluster, &pending);
+        if (wait_status == -ETIMEDOUT)
+            continue;
+        if (wait_status < 0) {
+            npu_delay_us(device->options.rpc_poll_interval_us);
+            continue;
+        }
+        for (core_index = 0;
+             core_index < device->hal_info.cores_per_cluster;
+             ++core_index) {
+            npu_hal_core_t core = { cluster, core_index };
+            uint32_t mask = UINT32_C(1) << core_index;
+            uint64_t command;
+            int is_response;
 
-            if (npu_hal_irq_status(device->hal, cluster, &pending) < 0)
+            if (!(pending & mask))
                 continue;
-            saw_pending |= pending;
-            for (core_index = 0;
-                 core_index < device->hal_info.cores_per_cluster;
-                 ++core_index) {
-                npu_hal_core_t core = { cluster, core_index };
-                uint32_t mask = UINT32_C(1) << core_index;
-                uint64_t command;
-                int is_response;
+            if (npu_hal_irq_mailbox(device->hal, core, &command) < 0)
+                continue;
+            pthread_mutex_lock(&device->mutex);
+            is_response = pending_response(device, core, command);
+            pthread_mutex_unlock(&device->mutex);
+            if (!is_response)
+                (void)npu_rpc_dispatch(device, core, command);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            if (npu_hal_irq_ack(device->hal, cluster, mask) < 0)
+                continue;
+            if (is_response) {
+                struct npu_pending_call *call =
+                    &device->calls[npu_service_core_index(device, core)];
 
-                if (!(pending & mask))
-                    continue;
-                if (npu_hal_irq_mailbox(device->hal, core, &command) < 0)
-                    continue;
                 pthread_mutex_lock(&device->mutex);
-                is_response = pending_response(device, core, command);
-                pthread_mutex_unlock(&device->mutex);
-                if (!is_response)
-                    (void)npu_rpc_dispatch(device, core, command);
-                __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                if (npu_hal_irq_ack(device->hal, cluster, mask) < 0)
-                    continue;
-                if (is_response) {
-                    struct npu_pending_call *call =
-                        &device->calls[npu_service_core_index(device, core)];
-
-                    pthread_mutex_lock(&device->mutex);
-                    if (pending_response(device, core, command)) {
-                        call->response = command;
-                        call->status = 0;
-                        call->pending = 0;
-                        pthread_cond_broadcast(&device->condition);
-                    }
-                    pthread_mutex_unlock(&device->mutex);
+                if (pending_response(device, core, command)) {
+                    call->response = command;
+                    call->status = 0;
+                    call->pending = 0;
+                    pthread_cond_broadcast(&device->condition);
                 }
+                pthread_mutex_unlock(&device->mutex);
             }
         }
-        if (!saw_pending)
-            npu_delay_us(device->options.rpc_poll_interval_us);
     }
     return 0;
 }

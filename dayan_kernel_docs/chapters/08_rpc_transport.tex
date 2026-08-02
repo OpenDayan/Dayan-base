@@ -50,8 +50,9 @@ outbound bit 清零，写 mailbox 并置位，再等待 Host 清零。最后执�
 
 \subsection{Host 侧处理}
 
-Service 启动独立后台 worker，通过 HAL 轮询或等待每个 Cluster 的 outbound IRQ。
-每个置位 Core 的处理顺序为：
+Service 启动独立后台 worker，调用 \code{npu_hal_irq_wait} 等待 outbound IRQ。HAL 在
+超时时返回 \code{-ETIMEDOUT}；收到中断时返回 Cluster 编号和 IRQ status。具体后端可
+等待事件，也可在 HAL 内部兼容轮询，Service 不区分两种实现。每个置位 Core 的处理顺序为：
 
 \begin{enumerate}
   \item 读取 Device--Host mailbox；

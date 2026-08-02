@@ -28,6 +28,7 @@ struct server_event;
 struct server_command;
 struct server_launch_group;
 struct server_invocation;
+struct server_output;
 
 enum server_command_kind {
     SERVER_COMMAND_EVENT = 1,
@@ -113,10 +114,22 @@ struct server_invocation {
     npu_service_launch_t *launch;
     size_t slot_index;
     uint64_t resident;
+    uint32_t proc_id;
     uint32_t task_id[3];
     uint32_t polling;
     struct server_launch_group *group;
     struct server_invocation *next;
+};
+
+struct server_output {
+    struct server_output *next;
+    size_t size;
+    size_t offset;
+    uint32_t cluster;
+    uint32_t core;
+    uint32_t proc;
+    uint32_t flags;
+    unsigned char data[];
 };
 
 struct server_launch_group {
@@ -196,6 +209,9 @@ struct server_session {
     int control_fd;
     int data_fd;
     uint32_t closing;
+    size_t output_bytes;
+    struct server_output *output_head;
+    struct server_output *output_tail;
     struct server_context *contexts;
     struct server_session *next;
 };
@@ -221,6 +237,11 @@ struct dayan_server {
     size_t slot_count;
     struct server_session *sessions;
     struct server_package_cache *packages;
+    npu_service_trap_fn service_trap;
+    void *service_callback_context;
+    size_t pending_output_bytes;
+    struct server_output *pending_outputs;
+    struct server_output *pending_output_tail;
 };
 
 int server_enqueue_locked(dayan_server_t *server,
@@ -235,6 +256,12 @@ void server_complete_command_locked(dayan_server_t *server,
 void server_cancel_context_locked(dayan_server_t *server,
                                   struct server_context *context);
 void server_collect_contexts_locked(dayan_server_t *server);
+int server_queue_output_locked(dayan_server_t *server,
+                               struct server_session *session,
+                               uint32_t cluster, uint32_t core,
+                               uint32_t proc, const void *data, size_t size,
+                               uint32_t flags);
+void server_route_pending_outputs_locked(dayan_server_t *server);
 void *dayan_scheduler_main(void *argument);
 
 #endif

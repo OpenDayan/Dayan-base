@@ -156,14 +156,36 @@ socket 提交 package 与 logical task，不接触固件符号表或物理拓扑
 
 ### Kernel demos
 
-[`demo/`](demo/README.md) 提供可独立构建和运行的基础 kernel。当前
-`printf_grid` 示例在 Device 上打印每个 logical task 的三维 grid ID、grid 维度、
+[`demo/`](demo/README.md) 提供可独立构建和运行的基础 kernel。当前单文件
+`print_demo.cpp` 示例在 Device 上打印每个 logical task 的三维 grid ID、grid 维度、
 task mode 和 Host 传入的 7 个参数：
 
 ```sh
 make demo-check
 make -C demo run
 ```
+
+后端已经单独启动时，可用通用脚本启动 Runtime server。它只等待 XDMA 兼容设备文件，
+不关心设备来自 cmodel、`npu-cluster-sim` 的 RTL 模拟器还是硬件：
+
+```sh
+NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
+```
+
+需要由一个脚本同时启动 cmodel 与 Runtime server 时运行：
+
+```sh
+./run_cmodel_server.sh
+```
+
+脚本就绪后，在另一个终端运行：
+
+```sh
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/print_demo
+```
+
+Device `printf` 经对应 Runtime Session 返回并由应用进程输出，不会写到
+`dayan_server` 的标准输出。
 
 配置示例：
 

@@ -1,5 +1,5 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 demo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$demo_dir/.." && pwd)
@@ -7,10 +7,11 @@ cmodel_dir=${RVTNG_CMODEL_DIR:-/home/wangzhe/rvtng-cmodel}
 qemu=${RVTNG_QEMU:-/home/wangzhe/npu-qemu/build/dl-riscv64}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}
-socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-printf-grid-$$.sock}
+socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-print-demo-$$.sock}
 build_dir="$repo_dir/build/demo"
 cmodel_log="$build_dir/cmodel.log"
 server_log="$build_dir/dayan_server.log"
+demo_log="$build_dir/print_demo.log"
 emulator_pid=
 server_pid=
 
@@ -109,15 +110,20 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 demo_status=0
+set +e
 DAYAN_SERVER_SOCKET="$socket_path" \
-    "$build_dir/printf_grid_demo" "$@" || demo_status=$?
-printf '%s\n' '[dayan_server device output]'
-sed -n '1,200p' "$server_log"
+    "$build_dir/print_demo" "$@" 2>&1 | tee "$demo_log"
+demo_status=${PIPESTATUS[0]}
+set -e
 for grid_id in '(0,0,0)' '(1,0,0)' '(0,1,0)' '(1,1,0)'; do
     if ! grep -Fq "[device] grid_id=$grid_id grid_dim=(2,2,1) mode=1 " \
-            "$server_log"; then
+            "$demo_log"; then
         echo "missing Device output for grid_id=$grid_id" >&2
         demo_status=1
     fi
 done
+if [ "$demo_status" -ne 0 ]; then
+    echo "dayan_server log:" >&2
+    sed -n '1,200p' "$server_log" >&2
+fi
 exit "$demo_status"

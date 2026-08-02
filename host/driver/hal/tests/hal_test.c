@@ -3,11 +3,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "hal.h"
@@ -41,6 +43,38 @@ static int endpoint_fd(const char *directory, uint32_t index,
     assert(snprintf(path, sizeof(path), "%s/xdma%u_%s", directory, index,
                     suffix) > 0);
     return open(path, flags);
+}
+
+static void create_event_endpoint(const char *directory, uint32_t index)
+{
+    char path[512];
+
+    assert(snprintf(path, sizeof(path), "%s/xdma%u_events_0", directory,
+                    index) > 0);
+    assert(mkfifo(path, 0600) == 0);
+}
+
+struct irq_writer {
+    int status_fd;
+    int event_fd;
+    uint32_t status;
+};
+
+static void *write_irq(void *argument)
+{
+    const struct timespec delay = { 0, 10 * 1000 * 1000L };
+    struct irq_writer *writer = argument;
+    uint32_t event_count = 1;
+
+    assert(nanosleep(&delay, 0) == 0);
+    assert(pwrite(writer->status_fd, &writer->status,
+                  sizeof(writer->status), 0) ==
+           (ssize_t)sizeof(writer->status));
+    if (writer->event_fd >= 0) {
+        assert(write(writer->event_fd, &event_count, sizeof(event_count)) ==
+               (ssize_t)sizeof(event_count));
+    }
+    return 0;
 }
 
 int main(void)
@@ -98,6 +132,27 @@ int main(void)
     assert(info.cluster_count == 2 && info.cores_per_cluster == 4);
     assert(info.data_provider == NPU_HAL_DATA_PROVIDER_FD_OFFSET);
     assert(info.data_handle_count == 4 && info.transfer_alignment == 1);
+    {
+        struct irq_writer writer;
+        pthread_t thread;
+        uint32_t irq_cluster = 0;
+
+        assert(npu_hal_irq_wait(hal, 0, &irq_cluster, &pending) ==
+               -ETIMEDOUT);
+        assert(irq_cluster == NPU_HAL_ANY_CLUSTER && pending == 0);
+        writer.status_fd = endpoint_fd(directory, 2, "user", O_RDWR);
+        writer.event_fd = -1;
+        writer.status = UINT32_C(1) << core1.core;
+        assert(writer.status_fd >= 0);
+        assert(pthread_create(&thread, 0, write_irq, &writer) == 0);
+        assert(npu_hal_irq_wait(hal, 100, &irq_cluster, &pending) == 0);
+        assert(pthread_join(thread, 0) == 0);
+        assert(irq_cluster == core1.cluster && pending == writer.status);
+        pending = 0;
+        assert(pwrite(writer.status_fd, &pending, sizeof(pending), 0) ==
+               (ssize_t)sizeof(pending));
+        close(writer.status_fd);
+    }
 
     assert(npu_hal_copy_to_address(hal, 1, 0x1230, &value,
                                    sizeof(value)) == 0);
@@ -178,6 +233,37 @@ int main(void)
     assert(npu_hal_memory_free(hal, local1) == 0);
     assert(npu_hal_memory_free(hal, local0) == 0);
     assert(npu_hal_memory_free(hal, global) == 0);
+    npu_hal_close(hal);
+    hal = 0;
+    create_event_endpoint(directory, 0);
+    create_event_endpoint(directory, 2);
+    options.memory_regions = regions;
+    options.memory_region_count = sizeof(regions) / sizeof(regions[0]);
+    assert(npu_hal_open(&hal, &options) == 0);
+    {
+        struct irq_writer writer;
+        pthread_t thread;
+        uint32_t irq_cluster = 0;
+        int event0 = endpoint_fd(directory, 0, "events_0",
+                                 O_WRONLY | O_NONBLOCK);
+        int event1 = endpoint_fd(directory, 2, "events_0",
+                                 O_WRONLY | O_NONBLOCK);
+
+        assert(event0 >= 0 && event1 >= 0);
+        assert(npu_hal_irq_wait(hal, 0, &irq_cluster, &pending) ==
+               -ETIMEDOUT);
+        writer.status_fd = endpoint_fd(directory, 2, "user", O_RDWR);
+        writer.event_fd = event1;
+        writer.status = UINT32_C(1) << core1.core;
+        assert(writer.status_fd >= 0);
+        assert(pthread_create(&thread, 0, write_irq, &writer) == 0);
+        assert(npu_hal_irq_wait(hal, 100, &irq_cluster, &pending) == 0);
+        assert(pthread_join(thread, 0) == 0);
+        assert(irq_cluster == core1.cluster && pending == writer.status);
+        close(writer.status_fd);
+        close(event1);
+        close(event0);
+    }
     npu_hal_close(hal);
     hal = 0;
     options.memory_regions = overlapping_regions;

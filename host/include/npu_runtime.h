@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define NPU_RUNTIME_OPTIONS_VERSION 2U
+#define NPU_RUNTIME_OPTIONS_VERSION 3U
 #define NPU_CONTEXT_DESC_VERSION    1U
 #define NPU_BUFFER_DESC_VERSION     1U
 #define NPU_STREAM_DESC_VERSION     1U
@@ -16,6 +16,8 @@ extern "C" {
 #define NPU_TIMEOUT_INFINITE        UINT32_MAX
 #define NPU_KERNEL_MAX_ARGS         8U
 #define NPU_DEFAULT_SERVER_SOCKET   "/tmp/dayan-server.sock"
+#define NPU_RUNTIME_OUTPUT_CLEAR    (1U << 0)
+#define NPU_RUNTIME_OUTPUT_CONTINUED (1U << 1)
 
 typedef struct NPUTaskDim3 {
     uint32_t x;
@@ -49,6 +51,11 @@ typedef struct npu_module npu_module_t;
 typedef struct npu_kernel npu_kernel_t;
 typedef struct npu_event npu_event_t;
 
+typedef void (*npu_runtime_output_fn)(void *context, uint32_t cluster,
+                                      uint32_t core, uint32_t proc,
+                                      const void *data, size_t size,
+                                      uint32_t flags);
+
 typedef enum npu_buffer_flags {
     NPU_BUFFER_DEVICE_LOCAL = 1U << 0,
     NPU_BUFFER_COHERENT = 1U << 1,
@@ -74,12 +81,19 @@ typedef enum npu_event_state {
     NPU_EVENT_CANCELLED = 4,
 } npu_event_state_t;
 
+/*
+ * Device stdout is delivered when Runtime observes command progress through
+ * Event query/wait or Stream synchronization.  The callback runs in the
+ * calling application thread and may be null to discard Device output.
+ */
 typedef struct npu_runtime_options {
     uint32_t version;
     uint32_t flags;
     const char *server_socket;
     uint32_t connect_timeout_ms;
     uint32_t default_timeout_ms;
+    npu_runtime_output_fn output;
+    void *output_context;
 } npu_runtime_options_t;
 
 typedef struct npu_context_desc {

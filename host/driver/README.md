@@ -118,11 +118,14 @@ H2D/D2H 流程如下：
 ## BL1 生命周期与 RPC
 
 Service 为每个 Cluster 分别加载 BL1 `ET_EXEC` 的 `PT_LOAD` 段，向选定 Core 的 BL0
-mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 RPC worker 始终遍历
-所有启用 Cluster/Core：
+mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 RPC worker 调用
+`npu_hal_irq_wait()`，由 HAL 在超时前返回发生中断的 Cluster 和 IRQ status。FUSE/XDMA
+后端优先等待 `_events_0`；事件接口缺失或不支持阻塞等待时，兼容轮询也只存在于 HAL
+内部。
 
-- Device→Host：输出、清屏、Device heap acquire/release 和 trap report；回调携带
-  Cluster、Core 与 proc ID。
+- Device→Host：输出、清屏、Device heap acquire/release 和 trap report；输出携带
+  Cluster、Core 与 proc ID，由 Server 归属到发起任务的 Runtime Session。Runtime
+  在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
 - Host→Device：`RPC_PROC_CREATE` 与 `RPC_ICACHE_FLUSH`；每个 Core 同时至多一笔，
   不同 Core 可并行。
 
@@ -188,6 +191,19 @@ make -C host/driver check
 
 ```sh
 make -C host/driver cmodel-smoke
+```
+
+模拟器或硬件已经独立运行并暴露 XDMA 兼容设备文件时，从仓库根目录启动 Server：
+
+```sh
+NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
+```
+
+该脚本不启动具体后端，因此可连接 cmodel、`npu-cluster-sim` 的 RTL 模拟器或硬件。
+需要由脚本同时启动 cmodel 与 `dayan_server` 时运行：
+
+```sh
+./run_cmodel_server.sh
 ```
 
 可用 `RVTNG_CMODEL_DIR`、`RVTNG_QEMU`、`NPU_DEVICE_PREFIX` 和

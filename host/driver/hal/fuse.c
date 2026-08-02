@@ -5,10 +5,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "platform_regs.h"
@@ -25,6 +27,7 @@ struct npu_hal_fuse_endpoint {
 
 struct npu_hal_fuse {
     uint32_t cluster_count;
+    uint32_t event_wait_disabled;
     uint64_t memory_address_bias;
     struct npu_hal_fuse_endpoint endpoints[];
 };
@@ -176,6 +179,123 @@ static int fuse_register_write(void *opaque, uint32_t cluster,
                                 NPU_FUSE_CONTROL_BASE + offset, value, size);
 }
 
+static int monotonic_ms(uint64_t *value)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -errno;
+    *value = (uint64_t)now.tv_sec * 1000U +
+             (uint64_t)now.tv_nsec / 1000000U;
+    return 0;
+}
+
+static int fuse_pending_irq(struct npu_hal_fuse *state,
+                            uint32_t *cluster_out, uint32_t *status_out)
+{
+    uint32_t cluster;
+
+    for (cluster = 0; cluster < state->cluster_count; ++cluster) {
+        uint32_t pending = 0;
+        int status = fuse_register_read(state, cluster, 0, &pending,
+                                        sizeof(pending));
+
+        if (status < 0)
+            return status;
+        if (pending) {
+            *cluster_out = cluster;
+            *status_out = pending;
+            return 0;
+        }
+    }
+    return -EAGAIN;
+}
+
+static int fuse_irq_wait(void *opaque, uint32_t timeout_ms,
+                         uint32_t *cluster_out, uint32_t *status_out)
+{
+    struct npu_hal_fuse *state = opaque;
+    struct pollfd events[NPU_HAL_MAX_CLUSTERS];
+    uint64_t deadline = 0;
+    uint32_t cluster;
+    int status;
+
+    status = fuse_pending_irq(state, cluster_out, status_out);
+    if (status != -EAGAIN)
+        return status;
+    if (state->event_wait_disabled)
+        return -ENOTSUP;
+    for (cluster = 0; cluster < state->cluster_count; ++cluster) {
+        if (state->endpoints[cluster].event_fd < 0)
+            return -ENOTSUP;
+        events[cluster].fd = state->endpoints[cluster].event_fd;
+        events[cluster].events = POLLIN;
+        events[cluster].revents = 0;
+    }
+    if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
+        status = monotonic_ms(&deadline);
+        if (status < 0)
+            return status;
+        deadline += timeout_ms;
+    }
+    for (;;) {
+        int poll_timeout = -1;
+        int result;
+
+        if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
+            uint64_t now = 0;
+            uint64_t remaining;
+
+            status = monotonic_ms(&now);
+            if (status < 0)
+                return status;
+            if (now >= deadline)
+                return -ETIMEDOUT;
+            remaining = deadline - now;
+            poll_timeout = remaining > INT_MAX ? INT_MAX : (int)remaining;
+        }
+        result = poll(events, state->cluster_count, poll_timeout);
+        if (result < 0) {
+            if (errno == EINTR)
+                continue;
+            return -errno;
+        }
+        if (!result)
+            return -ETIMEDOUT;
+        for (cluster = 0; cluster < state->cluster_count; ++cluster) {
+            uint32_t event_count;
+            ssize_t count;
+
+            if (!(events[cluster].revents & POLLIN)) {
+                if (events[cluster].revents &
+                    (POLLERR | POLLHUP | POLLNVAL)) {
+                    state->event_wait_disabled = 1;
+                    return -ENOTSUP;
+                }
+                continue;
+            }
+            do {
+                count = read(events[cluster].fd, &event_count,
+                             sizeof(event_count));
+            } while (count < 0 && errno == EINTR);
+            if (count != (ssize_t)sizeof(event_count)) {
+                state->event_wait_disabled = 1;
+                return -ENOTSUP;
+            }
+            status = fuse_register_read(state, cluster, 0, status_out,
+                                        sizeof(*status_out));
+            if (status < 0)
+                return status;
+            if (*status_out) {
+                *cluster_out = cluster;
+                return 0;
+            }
+            state->event_wait_disabled = 1;
+            return -ENOTSUP;
+        }
+    }
+}
+
 static int fuse_export_data_plane(void *opaque,
                                   npu_hal_data_export_t *exported,
                                   int handles[NPU_HAL_DATA_MAX_HANDLES])
@@ -256,6 +376,7 @@ static const struct npu_hal_ops fuse_ops = {
     .copy_from_address = fuse_copy_from_address,
     .register_read = fuse_register_read,
     .register_write = fuse_register_write,
+    .irq_wait = fuse_irq_wait,
     .export_data_plane = fuse_export_data_plane,
     .prepare_transfer = fuse_prepare_transfer,
     .finish_transfer = fuse_finish_transfer,

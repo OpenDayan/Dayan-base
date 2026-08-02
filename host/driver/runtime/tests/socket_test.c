@@ -20,6 +20,34 @@ struct run_state {
     int status;
 };
 
+struct output_capture {
+    char data[128];
+    size_t size;
+    uint32_t cluster;
+    uint32_t core;
+    uint32_t proc;
+    uint32_t flags;
+    unsigned calls;
+};
+
+static void capture_output(void *context, uint32_t cluster, uint32_t core,
+                           uint32_t proc, const void *data, size_t size,
+                           uint32_t flags)
+{
+    struct output_capture *capture = context;
+
+    assert(capture);
+    assert(size <= sizeof(capture->data) - capture->size);
+    if (size)
+        memcpy(capture->data + capture->size, data, size);
+    capture->size += size;
+    capture->cluster = cluster;
+    capture->core = core;
+    capture->proc = proc;
+    capture->flags = flags;
+    ++capture->calls;
+}
+
 static void create_file(const char *directory, const char *name, size_t size)
 {
     char path[512];
@@ -106,6 +134,7 @@ int main(void)
         UINT64_C(0x1122334455667788), UINT64_C(0xaabbccddeeff0011),
     };
     uint64_t output[2] = { 0, 0 };
+    struct output_capture output_capture = { { 0 }, 0, 0, 0, 0, 0, 0 };
     dayan_server_options_t server_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
@@ -142,6 +171,8 @@ int main(void)
 
     npu_runtime_options_init(&runtime_options);
     runtime_options.server_socket = socket_path;
+    runtime_options.output = capture_output;
+    runtime_options.output_context = &output_capture;
     assert(npu_runtime_open(&runtime, &runtime_options) == 0);
     assert(npu_context_create(runtime, 0, &context) == 0);
     {
@@ -150,6 +181,24 @@ int main(void)
         assert(npu_buffer_create(context, &desc, &buffer) == 0);
     }
     assert(npu_stream_create(context, 0, &stream) == 0);
+    {
+        static const char message[] = "Device output belongs to Runtime\n";
+        struct server_session *session;
+
+        pthread_mutex_lock(&server->mutex);
+        session = server->sessions;
+        assert(session && !session->next);
+        assert(server_queue_output_locked(server, session, 1, 2, 3,
+                                          message, sizeof(message) - 1,
+                                          0) == 0);
+        pthread_mutex_unlock(&server->mutex);
+        assert(npu_stream_synchronize(stream, 5000) == 0);
+        assert(output_capture.calls == 1);
+        assert(output_capture.cluster == 1 && output_capture.core == 2 &&
+               output_capture.proc == 3 && !output_capture.flags);
+        assert(output_capture.size == sizeof(message) - 1);
+        assert(memcmp(output_capture.data, message, sizeof(message) - 1) == 0);
+    }
 
     assert(npu_memcpy_h2d_async(stream, buffer, 0, input, sizeof(input),
                                 &event) == 0);

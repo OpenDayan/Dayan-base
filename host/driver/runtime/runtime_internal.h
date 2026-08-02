@@ -23,6 +23,8 @@ struct npu_runtime {
     uint64_t next_request_id;
     uint32_t default_timeout_ms;
     uint32_t closing;
+    npu_runtime_output_fn output;
+    void *output_context;
     pthread_mutex_t control_mutex;
     pthread_mutex_t data_mutex;
     pthread_mutex_t mutex;

@@ -16,6 +16,8 @@ struct npu_hal_ops {
                          void *value, size_t size);
     int (*register_write)(void *state, uint32_t cluster, uint64_t offset,
                           const void *value, size_t size);
+    int (*irq_wait)(void *state, uint32_t timeout_ms,
+                    uint32_t *cluster, uint32_t *status);
     int (*export_data_plane)(void *state, npu_hal_data_export_t *exported,
                              int handles[NPU_HAL_DATA_MAX_HANDLES]);
     int (*prepare_transfer)(void *state, uint32_t cluster, uint64_t address,
@@ -53,6 +55,7 @@ struct npu_hal {
     uint32_t backend;
     uint32_t cluster_count;
     uint32_t cores_per_cluster;
+    pthread_mutex_t irq_mutex;
     pthread_mutex_t memory_mutex;
     struct npu_hal_arena *arenas;
     uint32_t arena_count;

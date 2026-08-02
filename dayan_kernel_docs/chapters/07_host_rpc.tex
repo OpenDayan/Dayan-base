@@ -54,8 +54,11 @@ WRITE 和 CLEAR 的 request 都是 24-byte \code{rpc_print_request}：
   16 & \code{data_size} & \code{uint64_t} & WRITE 数据长度；CLEAR 为 0。 \\
 \end{dayantable}
 
-Host 按 Cluster/Core/proc 区分输出流。当前 Service 将单次 WRITE 限制为 16 MiB，并在读取前
-检查整个数据范围位于 Device RAM。
+Host 按 Cluster/Core/proc 区分输出流。当前 Service 将单次 WRITE 限制为 1 MiB，并在读取前
+检查整个数据范围位于 Device RAM。Server 根据正在执行的 proc 将数据放入对应 Runtime
+Session 的队列；Runtime 在 Event 查询、等待或 Stream 同步后通过
+\code{NPU_IPC_OUTPUT_READ} 取回数据，并在应用线程调用 output callback。因此算子输出
+属于发起调用的应用，而不是 \code{dayan_server} 的标准输出。
 
 \subsection{堆服务}
 

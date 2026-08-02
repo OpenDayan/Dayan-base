@@ -7,7 +7,7 @@
 #include "hal/dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
-#define NPU_IPC_VERSION           2U
+#define NPU_IPC_VERSION           3U
 #define NPU_IPC_HEADER_SIZE       40U
 #define NPU_IPC_MAX_PAYLOAD       (64U * 1024U * 1024U)
 #define NPU_IPC_RESPONSE          (1U << 0)
@@ -15,6 +15,11 @@
 #define NPU_IPC_ROLE_CONTROL      1U
 #define NPU_IPC_ROLE_DATA         2U
 #define NPU_IPC_CAP_DIRECT_TRANSFER (1U << 0)
+#define NPU_IPC_CAP_DEVICE_OUTPUT   (1U << 1)
+
+#define NPU_IPC_OUTPUT_CLEAR        (1U << 0)
+#define NPU_IPC_OUTPUT_CONTINUED    (1U << 1)
+#define NPU_IPC_OUTPUT_CHUNK_SIZE   4096U
 
 typedef enum npu_ipc_opcode {
     NPU_IPC_HELLO = 1,
@@ -39,6 +44,7 @@ typedef enum npu_ipc_opcode {
     NPU_IPC_EVENT_QUERY,
     NPU_IPC_EVENT_WAIT,
     NPU_IPC_EVENT_DESTROY,
+    NPU_IPC_OUTPUT_READ = 0x0700,
 } npu_ipc_opcode_t;
 
 typedef struct npu_ipc_header {
@@ -185,6 +191,15 @@ typedef struct npu_ipc_event_wait {
     uint32_t reserved;
 } npu_ipc_event_wait_t;
 
+typedef struct npu_ipc_output {
+    uint32_t cluster;
+    uint32_t core;
+    uint32_t proc;
+    uint32_t flags;
+    uint32_t data_size;
+    uint32_t reserved;
+} npu_ipc_output_t;
+
 #ifdef __cplusplus
 static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
               "Dayan socket header ABI");
@@ -192,6 +207,8 @@ static_assert(sizeof(npu_ipc_hello_response_t) == 64,
               "Dayan HELLO response ABI");
 static_assert(offsetof(npu_ipc_hello_response_t, data_plane) == 16,
               "Dayan data-plane export offset");
+static_assert(sizeof(npu_ipc_output_t) == 24,
+              "Dayan Device output header ABI");
 #else
 _Static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
                "Dayan socket header ABI");
@@ -199,6 +216,8 @@ _Static_assert(sizeof(npu_ipc_hello_response_t) == 64,
                "Dayan HELLO response ABI");
 _Static_assert(offsetof(npu_ipc_hello_response_t, data_plane) == 16,
                "Dayan data-plane export offset");
+_Static_assert(sizeof(npu_ipc_output_t) == 24,
+               "Dayan Device output header ABI");
 #endif
 
 void npu_ipc_header_init(npu_ipc_header_t *header, uint16_t opcode,

@@ -10,11 +10,12 @@
 extern "C" {
 #endif
 
-#define NPU_HAL_ABI_VERSION          3U
+#define NPU_HAL_ABI_VERSION          4U
 #define NPU_HAL_OPTIONS_VERSION      2U
 #define NPU_HAL_MEMORY_REQUEST_VERSION 1U
 #define NPU_HAL_MAX_CLUSTERS         32U
 #define NPU_HAL_MAX_CORES_PER_CLUSTER 32U
+#define NPU_HAL_TIMEOUT_INFINITE     UINT32_MAX
 
 #define NPU_HAL_BACKEND_FUSE_XDMA    1U
 #define NPU_HAL_ANY_CLUSTER          UINT32_MAX
@@ -132,6 +133,9 @@ int npu_hal_register_read(npu_hal_t *hal, uint32_t cluster, uint64_t offset,
 int npu_hal_register_write(npu_hal_t *hal, uint32_t cluster, uint64_t offset,
                            const void *value, size_t size);
 int npu_hal_irq_status(npu_hal_t *hal, uint32_t cluster, uint32_t *status);
+/* Returns -ETIMEDOUT with cluster/status reset when no IRQ arrives. */
+int npu_hal_irq_wait(npu_hal_t *hal, uint32_t timeout_ms,
+                     uint32_t *cluster, uint32_t *status);
 int npu_hal_irq_ack(npu_hal_t *hal, uint32_t cluster, uint32_t mask);
 int npu_hal_irq_mailbox(npu_hal_t *hal, npu_hal_core_t core,
                         uint64_t *command);

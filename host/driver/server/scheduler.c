@@ -585,6 +585,13 @@ static struct dispatch_result dispatch_group(
             result.status = status;
             break;
         }
+        {
+            npu_service_launch_info_t info;
+
+            memset(&info, 0, sizeof(info));
+            if (npu_service_launch_query(invocation->launch, &info) == 0)
+                invocation->proc_id = info.proc_id;
+        }
         invocation->slot_index = slots[lane];
         invocation->resident = launch_resident_size(metadata);
         memcpy(invocation->task_id, desc.task_id,
@@ -847,6 +854,7 @@ static void merge_dispatch_result_locked(
         command->data.launch.invocations = result.invocations;
         result.group->next = command->data.launch.groups;
         command->data.launch.groups = result.group;
+        server_route_pending_outputs_locked(server);
     } else {
         if (result.group && result.group->shared_allocation)
             (void)npu_hal_memory_free(server->hal,
@@ -943,6 +951,10 @@ static int poll_invocation(dayan_server_t *server,
     pthread_mutex_lock(&server->mutex);
     command->dispatching = 0;
     invocation->polling = 0;
+    if (status == 0 && info.proc_id) {
+        invocation->proc_id = info.proc_id;
+        server_route_pending_outputs_locked(server);
+    }
     if (!terminal) {
         if (status < 0 && !command->data.launch.aggregate_status) {
             command->data.launch.aggregate_status = status;

@@ -14,6 +14,7 @@
 
 #define DAYAN_SERVER_BACKLOG 64U
 #define DAYAN_SERVER_DEFAULT_RESIDENT (64U * 1024U * 1024U)
+#define DAYAN_SERVER_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 
 struct server_connection {
     dayan_server_t *server;
@@ -23,6 +24,194 @@ struct server_connection {
 static uint32_t all_mask(uint32_t count)
 {
     return count == 32U ? UINT32_MAX : (UINT32_C(1) << count) - 1U;
+}
+
+static size_t output_charge(const struct server_output *output)
+{
+    return sizeof(*output) + output->size;
+}
+
+static struct server_output *output_create(
+    uint32_t cluster, uint32_t core, uint32_t proc,
+    const void *data, size_t size, uint32_t flags)
+{
+    struct server_output *output;
+
+    if ((size && !data) || size > NPU_IPC_MAX_PAYLOAD - sizeof(*output) ||
+        (flags & ~NPU_IPC_OUTPUT_CLEAR))
+        return 0;
+    output = malloc(sizeof(*output) + size);
+    if (!output)
+        return 0;
+    output->next = 0;
+    output->size = size;
+    output->offset = 0;
+    output->cluster = cluster;
+    output->core = core;
+    output->proc = proc;
+    output->flags = flags;
+    if (size)
+        memcpy(output->data, data, size);
+    return output;
+}
+
+static void output_list_free(struct server_output *output)
+{
+    while (output) {
+        struct server_output *next = output->next;
+
+        free(output);
+        output = next;
+    }
+}
+
+static int session_append_output_locked(struct server_session *session,
+                                        struct server_output *output)
+{
+    size_t charge = output_charge(output);
+
+    if (session->closing ||
+        charge > DAYAN_SERVER_MAX_OUTPUT_BYTES - session->output_bytes)
+        return -ENOSPC;
+    if (session->output_tail)
+        session->output_tail->next = output;
+    else
+        session->output_head = output;
+    session->output_tail = output;
+    session->output_bytes += charge;
+    return 0;
+}
+
+int server_queue_output_locked(dayan_server_t *server,
+                               struct server_session *session,
+                               uint32_t cluster, uint32_t core,
+                               uint32_t proc, const void *data, size_t size,
+                               uint32_t flags)
+{
+    struct server_output *output;
+    int status;
+
+    if (!server || !session)
+        return -EINVAL;
+    output = output_create(cluster, core, proc, data, size, flags);
+    if (!output)
+        return -ENOMEM;
+    status = session_append_output_locked(session, output);
+    if (status < 0)
+        free(output);
+    return status;
+}
+
+static struct server_session *output_session_locked(
+    dayan_server_t *server, uint32_t cluster, uint32_t core, uint32_t proc)
+{
+    struct server_session *session;
+
+    for (session = server->sessions; session; session = session->next) {
+        struct server_context *context;
+
+        for (context = session->contexts; context; context = context->next) {
+            struct server_stream *stream;
+
+            for (stream = context->streams; stream; stream = stream->next) {
+                struct server_command *command;
+
+                for (command = stream->head; command;
+                     command = command->next) {
+                    struct server_invocation *invocation;
+
+                    if (command->kind != SERVER_COMMAND_LAUNCH)
+                        continue;
+                    for (invocation = command->data.launch.invocations;
+                         invocation; invocation = invocation->next) {
+                        npu_hal_core_t target =
+                            server->slots[invocation->slot_index].target;
+
+                        if (invocation->proc_id == proc &&
+                            target.cluster == cluster &&
+                            target.core == core)
+                            return session;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+void server_route_pending_outputs_locked(dayan_server_t *server)
+{
+    struct server_output **link = &server->pending_outputs;
+    struct server_output *tail = 0;
+
+    while (*link) {
+        struct server_output *output = *link;
+        struct server_session *session = output_session_locked(
+            server, output->cluster, output->core, output->proc);
+
+        if (!session) {
+            link = &output->next;
+            continue;
+        }
+        *link = output->next;
+        server->pending_output_bytes -= output_charge(output);
+        output->next = 0;
+        if (session_append_output_locked(session, output) < 0)
+            free(output);
+    }
+    for (tail = server->pending_outputs; tail && tail->next;
+         tail = tail->next)
+        ;
+    server->pending_output_tail = tail;
+}
+
+static void server_device_output(void *context, uint32_t cluster,
+                                 uint32_t core, uint32_t proc,
+                                 const void *data, size_t size,
+                                 uint32_t flags)
+{
+    dayan_server_t *server = context;
+    struct server_output *output;
+    struct server_session *session;
+    size_t charge;
+
+    _Static_assert(NPU_SERVICE_OUTPUT_CLEAR == NPU_IPC_OUTPUT_CLEAR,
+                   "Service and socket output flags");
+    if (!server)
+        return;
+    output = output_create(cluster, core, proc, data, size, flags);
+    if (!output)
+        return;
+    charge = output_charge(output);
+    pthread_mutex_lock(&server->mutex);
+    session = output_session_locked(server, cluster, core, proc);
+    if (session) {
+        if (session_append_output_locked(session, output) < 0)
+            free(output);
+    } else if (charge <= DAYAN_SERVER_MAX_OUTPUT_BYTES -
+                         server->pending_output_bytes) {
+        if (server->pending_output_tail)
+            server->pending_output_tail->next = output;
+        else
+            server->pending_outputs = output;
+        server->pending_output_tail = output;
+        server->pending_output_bytes += charge;
+    } else {
+        free(output);
+    }
+    pthread_mutex_unlock(&server->mutex);
+}
+
+static void server_device_trap(void *context, uint32_t cluster,
+                               uint32_t core,
+                               const struct trap_record *record)
+{
+    dayan_server_t *server = context;
+
+    if (server && server->service_trap) {
+        server->service_trap(server->service_callback_context, cluster, core,
+                             record);
+    }
 }
 
 void dayan_server_options_init(dayan_server_options_t *options)
@@ -155,6 +344,7 @@ void server_collect_contexts_locked(dayan_server_t *server)
         if (session->closing && !session->contexts &&
             session->control_fd < 0 && session->data_fd < 0) {
             *session_link = session->next;
+            output_list_free(session->output_head);
             free(session);
         } else {
             session_link = &session->next;
@@ -236,6 +426,11 @@ int dayan_server_create(dayan_server_t **server_out,
         return -ENOMEM;
     server->listen_fd = -1;
     server->options = *options;
+    server->service_trap = options->service.trap;
+    server->service_callback_context = options->service.callback_context;
+    server->options.service.output = server_device_output;
+    server->options.service.trap = server_device_trap;
+    server->options.service.callback_context = server;
     server->socket_path = strdup(options->socket_path);
     if (!server->socket_path) {
         status = -ENOMEM;
@@ -258,7 +453,7 @@ int dayan_server_create(dayan_server_t **server_out,
     if (status < 0)
         goto fail;
     status = npu_service_open(&server->device, server->hal,
-                              &options->service);
+                              &server->options.service);
     if (status < 0)
         goto fail;
     status = npu_hal_get_info(server->hal, &server->hal_info);
@@ -1170,6 +1365,43 @@ static int payload_exact(const npu_ipc_header_t *header, size_t expected)
     return header->payload_size == expected;
 }
 
+static int output_read_locked(struct server_session *session,
+                              npu_ipc_output_t *response,
+                              size_t *response_size)
+{
+    struct server_output *output = session->output_head;
+    size_t remaining;
+    size_t chunk;
+
+    if (!output)
+        return -EAGAIN;
+    remaining = output->size - output->offset;
+    chunk = remaining < NPU_IPC_OUTPUT_CHUNK_SIZE ?
+                remaining : NPU_IPC_OUTPUT_CHUNK_SIZE;
+    memset(response, 0, sizeof(*response));
+    response->cluster = output->cluster;
+    response->core = output->core;
+    response->proc = output->proc;
+    response->flags = output->offset ? 0 : output->flags;
+    response->data_size = (uint32_t)chunk;
+    if (chunk)
+        memcpy(response + 1, output->data + output->offset, chunk);
+    output->offset += chunk;
+    if (output->offset < output->size) {
+        response->flags |= NPU_IPC_OUTPUT_CONTINUED;
+    } else {
+        size_t charge = output_charge(output);
+
+        session->output_head = output->next;
+        if (!session->output_head)
+            session->output_tail = 0;
+        session->output_bytes -= charge;
+        free(output);
+    }
+    *response_size = sizeof(*response) + chunk;
+    return 0;
+}
+
 static int dispatch_control(dayan_server_t *server,
                             struct server_session *session,
                             const npu_ipc_header_t *header,
@@ -1369,6 +1601,12 @@ static int dispatch_control(dayan_server_t *server,
         status = payload_exact(header, 0) ?
             event_destroy_locked(session, header->object_id) : -EMSGSIZE;
         break;
+    case NPU_IPC_OUTPUT_READ:
+        if (!payload_exact(header, 0) || header->object_id)
+            status = -EMSGSIZE;
+        else
+            status = output_read_locked(session, response, response_size);
+        break;
     default:
         status = -ENOSYS;
         break;
@@ -1563,7 +1801,8 @@ static int connection_hello(struct server_connection *connection,
         goto reply;
     memset(&response, 0, sizeof(response));
     response.service_version = NPU_IPC_VERSION;
-    response.capabilities = NPU_IPC_CAP_DIRECT_TRANSFER;
+    response.capabilities = NPU_IPC_CAP_DIRECT_TRANSFER |
+                            NPU_IPC_CAP_DEVICE_OUTPUT;
     pthread_mutex_lock(&server->mutex);
     if (hello->role == NPU_IPC_ROLE_CONTROL && !hello->session_id) {
         session = create_control_session_locked(server, connection->fd,
@@ -1679,6 +1918,10 @@ static void *connection_main(void *argument)
                 npu_ipc_event_info_t event;
                 npu_ipc_kernel_info_t kernel;
                 npu_ipc_transfer_grant_t grant;
+                struct {
+                    npu_ipc_output_t header;
+                    unsigned char data[NPU_IPC_OUTPUT_CHUNK_SIZE];
+                } output;
             } response;
             int handles[NPU_HAL_DATA_MAX_HANDLES];
             npu_ipc_header_t header;
@@ -1850,6 +2093,7 @@ void dayan_server_destroy(dayan_server_t *server)
         free(package);
         package = next;
     }
+    output_list_free(server->pending_outputs);
     (void)npu_service_close(server->device);
     npu_hal_close(server->hal);
     free(server->slots);
