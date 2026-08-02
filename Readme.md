@@ -63,6 +63,7 @@ make check
 可供运行时算子重定位使用。
 
 - `npu-os.elf`：供加载和调试的 ELF；
+- `npu-os-api.elf`：与固件地址一致、但符号表只保留公开 API 的算子链接视图；
 - `npu-os.bin`：只包含可加载镜像的平坦二进制；
 - `npu-os.objdump`、`npu-os.map`：反汇编和链接布局。
 
@@ -117,11 +118,55 @@ proc_init(&proc, (proc_fn)task_main, stack, stack_size, 2,
 ```
 
 `proc_init()`/`proc_vinit()` 成功时直接把 proc 加入当前 CPU 的 ready queue。运行中的
-proc 可调用 `proc_yield()` 主动让出。`proc_wait_internal(ready)` 进入内部等待队列，
+proc 可调用 `proc_yield()` 主动让出。`proc_wait_internal(ready, arg)` 进入内部等待队列，
 scheduler 每轮调用其 predicate，返回非零后移回 ready queue；内部等待非空时不会执行
 `wfi`。`proc_wait_external()` 进入不被遍历的外部等待队列，外部事件 callback 通过
 `proc_wake()` 将其移回 ready queue。`entry()` 正常返回等价于调用 `proc_exit()`，不会
 被重新排队。当前没有抢占、跨 hart 迁移或退出后自动回收 proc/栈。
+
+## 算子 API 与同步
+
+`include/api/` 是外部算子唯一受支持的头文件根目录。它包含当前的小型 libc 标准头，
+以及只声明 Dayan 系统接口的 `dayan_sys.h`；该头文件不会包含或暴露 `proc`、`thread`、
+`cpu` 和 scheduler 等内部类型。算子应使用 `-Iinclude/api` 编译，不能加入内部
+`include/`。旧的 `lib/include/` 仅保留为转发层，公开声明以 `include/api/` 为准。
+
+所有公开 libc 函数和 DAPI 分别标注到 `.text.api.libc`、`.text.api.dapi`。完整的
+`npu-os.elf` 仍保留全部系统符号，供固件加载和调试；构建同时根据
+`dayan-api.symbols` 生成 `npu-os-api.elf`，其中调试信息及非白名单符号已经移除。
+运行时算子重定位器应只读取这个 API ELF 的符号表，而不能用完整固件 ELF 解析算子
+未定义符号。`make check` 会检查白名单、两个 API section 和 API ELF 的全局符号集合
+完全一致，并分别用 C11 与 C++17 在只有公开 include 路径的环境下编译算子样例。
+
+第一批 proc 包装为 `dayan_yield()`，以及 `dayan_wait_lsu/mat/vec/macro()` 四个同步
+入口。它们把当前 proc 的 `tp` 作为 token，分别通过 BASE 单元地址 1、2、3、4 发出
+Produce，然后进入 external-event 等待；`dayan_wait_dma()` 是 LSU 入口的兼容别名。
+scheduler 每轮通过 BASE 全局地址 0 的 pop 读取所有已完成 token，并由
+`proc_scan_produce()` 调用内部 `proc_wake()`。external-wait 链表本身仍不遍历；只要
+其中存在等待者，scheduler 就持续扫描 Produce，而不会进入 `wfi`。每次等待占用一个
+Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项的无阻塞保证，不能无界
+发射同步项。
+
+资源分为单核和跨核两种类型，两者提供相同的
+`FREE -> BUSY -> READY -> FREE` 状态机。`alloc()` 设置生产者和消费者计数；生产者为
+0 时直接进入 READY，消费者必须非零。最后一次 `produce()` 进入 READY，最后一次
+`consume()` 回到 FREE。`wait_ready/free()` 使用 internal-event predicate 协作式切出，
+状态满足后再返回。所有返回 `int` 的资源接口均以 0 表示成功、负值表示参数或状态错误。
+
+`dayan_resource_t` 只允许当前 hart 的 proc 共享，可放在该 hart 的栈或普通私有堆中。
+其状态、计数、上锁和解锁全部使用普通 load/store，不包含 `__atomic`、AMO 或 fence；
+非抢占调度保证资源操作不会与本核另一个 proc 同时执行。
+
+`dayan_shared_resource_t` 供多个 hart 共享，所有字段通过 `__atomic` 访问，临界区使用
+RV64A 原子锁。对象必须分配在 4 MiB 一致性窗口中，例如：
+
+```c
+DAYAN_COHERENT dayan_shared_resource_t shared_resource;
+```
+
+一个 hart 应在发布对象前调用一次 `dayan_shared_resource_init()`；该函数会拒绝一致性
+窗口之外的地址。运行时加载器必须把算子 `.o` 的 `.coherent` section 分配到该窗口，
+不能用普通 `malloc()` 为跨核资源分配内存。
 
 `lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度

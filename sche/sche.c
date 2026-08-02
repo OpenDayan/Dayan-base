@@ -96,6 +96,7 @@ int proc_vinit(struct proc *proc, proc_fn entry,
                       PROC_BOOTSTRAP_PC_OFFSET(argc);
     INIT_LIST_HEAD(&proc->node);
     proc->ready = 0;
+    proc->ready_arg = 0;
     proc->thread.state = THREAD_READY;
     list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
     return 0;
@@ -125,20 +126,26 @@ int proc_wake(struct proc *proc)
     if (proc->thread.type != THREAD_TYPE_PROC ||
         proc->thread.state != THREAD_WAIT_EXTERNAL_EVENT)
         return -EBUSY;
+    proc->ready = 0;
+    proc->ready_arg = 0;
     proc->thread.state = THREAD_READY;
     list_move_tail(&proc->node, &sche->ready);
     return 0;
 }
 
-void proc_wait_internal(proc_ready_fn ready)
+int proc_wait_internal(proc_ready_fn ready, void *arg)
 {
     struct proc *proc = current_proc();
 
-    if (!proc || !ready)
-        return;
+    if (!ready)
+        return -EINVAL;
+    if (!proc)
+        return -EPERM;
     proc->ready = ready;
+    proc->ready_arg = arg;
     proc->thread.state = THREAD_WAIT_INTERNAL_EVENT;
     switch_to_scheduler(&proc->thread);
+    return 0;
 }
 
 void proc_wait_external(void)
@@ -148,6 +155,7 @@ void proc_wait_external(void)
     if (!proc)
         return;
     proc->ready = 0;
+    proc->ready_arg = 0;
     proc->thread.state = THREAD_WAIT_EXTERNAL_EVENT;
     switch_to_scheduler(&proc->thread);
 }
@@ -158,6 +166,8 @@ void proc_yield(void)
 
     if (!proc)
         return;
+    proc->ready = 0;
+    proc->ready_arg = 0;
     proc->thread.state = THREAD_READY;
     switch_to_scheduler(&proc->thread);
 }
@@ -183,12 +193,15 @@ _Noreturn void scheduler(void)
         struct list_head *next;
         struct proc *proc;
 
+        proc_scan_produce();
+
         list_for_each_safe(node, next, &sche->wait_internal_event) {
             struct proc *waiting = list_entry(node, struct proc, node);
 
-            if (!waiting->ready(waiting))
+            if (!waiting->ready(waiting, waiting->ready_arg))
                 continue;
             waiting->ready = 0;
+            waiting->ready_arg = 0;
             waiting->thread.state = THREAD_READY;
             list_move_tail(node, &sche->ready);
         }
@@ -196,7 +209,8 @@ _Noreturn void scheduler(void)
         proc = list_first_entry_or_null(&sche->ready, struct proc, node);
 
         if (!proc) {
-            if (list_empty(&sche->wait_internal_event))
+            if (list_empty(&sche->wait_internal_event) &&
+                list_empty(&sche->wait_external_event))
                 platform_idle();
             continue;
         }

@@ -23,7 +23,22 @@ SECTIONS
     .text : ALIGN(16)
     {
         KEEP(*(.text.bl1))
-        *(.text .text.*)
+        *(.text)
+    } > RAM
+
+    .text.api.libc : ALIGN(16)
+    {
+        KEEP(*(.text.api.libc))
+    } > RAM
+
+    .text.api.dapi : ALIGN(16)
+    {
+        KEEP(*(.text.api.dapi))
+    } > RAM
+
+    .text.runtime : ALIGN(16)
+    {
+        *(.text.*)
     } > RAM
 
     .rodata : ALIGN(16)
