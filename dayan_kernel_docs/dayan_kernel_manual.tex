@@ -1,0 +1,44 @@
+\documentclass{dayan-manual}
+
+\InputIfFileExists{build/version.tex}{}{\providecommand{\DocVersion}{unknown}}
+
+\title{Dayan Kernel 编程与 ABI 手册}
+\subtitle{协作式 NPU Runtime 接口规范}
+\author{中国科学院计算技术研究所}
+\version{\DocVersion}
+\date{2026-08-02}
+
+\hypersetup{
+  pdftitle={Dayan Kernel编程与ABI手册},
+  pdfsubject={Dayan协作式NPU Runtime接口规范},
+  pdfauthor={中国科学院计算技术研究所}
+}
+
+\usepackage{subfiles}
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\maketitle
+\hypersetup{pageanchor=true}
+\pagenumbering{Roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\subfile{chapters/01_overview}
+\clearpage
+\subfile{chapters/02_programming_model}
+\clearpage
+\subfile{chapters/03_build_and_load}
+\clearpage
+\subfile{chapters/04_dayan_api}
+\clearpage
+\subfile{chapters/05_libc}
+\clearpage
+\subfile{chapters/06_abi}
+\clearpage
+\subfile{chapters/07_rpc_and_trap}
+\clearpage
+\subfile{chapters/08_checklist}
+
+\end{document}

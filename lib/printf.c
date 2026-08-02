@@ -4,6 +4,7 @@
 
 #include "limits.h"
 #include "rpc.h"
+#include "sche.h"
 #include "stdio.h"
 #include "string.h"
 
@@ -256,43 +257,44 @@ int snprintf(char *restrict dst, size_t size,
     return result;
 }
 
-struct rpc_output {
-    char data[128];
-    size_t size;
-};
-
-static int rpc_flush(struct rpc_output *out)
+static int proc_flush(struct proc *proc)
 {
-    if (!out->size)
-        return 0;
-    if (rpc_write(out->data, out->size) < 0)
+    if (!proc || proc->printf_size > proc->printf_capacity ||
+        (!proc->printf_buffer != !proc->printf_capacity))
         return -1;
-    out->size = 0;
+    if (!proc->printf_size)
+        return 0;
+    if (rpc_write(proc->printf_buffer, proc->printf_size) < 0)
+        return -1;
+    proc->printf_size = 0;
     return 0;
 }
 
-static int rpc_put(void *context, char ch)
+static int proc_put(void *context, char ch)
 {
-    struct rpc_output *out = context;
+    struct proc *proc = context;
 
-    if (out->size == sizeof(out->data) && rpc_flush(out) < 0)
+    if (!proc || !proc->printf_buffer || !proc->printf_capacity ||
+        proc->printf_size > proc->printf_capacity)
         return -1;
-    out->data[out->size++] = ch;
+    if (proc->printf_size == proc->printf_capacity &&
+        proc_flush(proc) < 0)
+        return -1;
+    proc->printf_buffer[proc->printf_size++] = ch;
+    if (proc->printf_size == proc->printf_capacity &&
+        proc_flush(proc) < 0)
+        return -1;
     return 0;
 }
 
 int vprintf(const char *restrict fmt, va_list args)
 {
-    struct rpc_output rpc = { { 0 }, 0 };
-    struct output out = { rpc_put, &rpc, 0, 0 };
-    int result;
+    struct proc *proc = proc_self();
+    struct output out = { proc_put, proc, 0, 0 };
 
-    if (!fmt)
+    if (!fmt || !proc || !proc->printf_buffer || !proc->printf_capacity)
         return -1;
-    result = format(&out, fmt, args);
-    if (result >= 0 && rpc_flush(&rpc) < 0)
-        result = -1;
-    return result;
+    return format(&out, fmt, args);
 }
 
 int printf(const char *restrict fmt, ...)
@@ -308,14 +310,31 @@ int printf(const char *restrict fmt, ...)
 
 int putchar(int ch)
 {
-    char value = (char)ch;
+    struct proc *proc = proc_self();
 
-    return rpc_write(&value, 1) < 0 ? EOF : (unsigned char)value;
+    if (!proc || proc_put(proc, (char)ch) < 0)
+        return EOF;
+    return (unsigned char)ch;
 }
 
 int puts(const char *str)
 {
-    if (!str || rpc_write(str, strlen(str)) < 0 || rpc_write("\n", 1) < 0)
+    struct proc *proc = proc_self();
+
+    if (!str || !proc)
+        return EOF;
+    while (*str) {
+        if (proc_put(proc, *str++) < 0)
+            return EOF;
+    }
+    if (proc_put(proc, '\n') < 0)
         return EOF;
     return 0;
+}
+
+int fflush(FILE *stream)
+{
+    if (stream && stream != stdout)
+        return EOF;
+    return proc_flush(proc_self()) < 0 ? EOF : 0;
 }

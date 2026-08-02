@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+dycc_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+dycc_bin="$dycc_dir/../../build/host/dycc/dycc-bin"
+
+if [ ! -x "$dycc_bin" ]; then
+    make --no-print-directory -C "$dycc_dir" all
+fi
+
+exec "$dycc_bin" "$@"

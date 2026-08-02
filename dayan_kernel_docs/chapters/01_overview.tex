@@ -1,0 +1,74 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{手册概述}\label{sec:kernel-001}
+
+本文档说明 Dayan 协作式 NPU Runtime 向算子 kernel 提供的编程接口，以及
+Runtime、运行时加载器和 Host RPC 服务之间必须共同遵守的 ABI。本文中的
+\textbf{kernel} 指由 Host 提交、以可重定位目标文件形式加载到 NPU 上执行的算子程序；
+\textbf{Runtime} 指本仓库中的裸机系统本体。除专门标为“Runtime 内部”的内容外，
+算子 kernel 只能使用 \code{include/api/} 中声明并由公开符号表导出的接口。
+
+Dayan Runtime 面向 Host--Device 系统：Host 负责加载、共享一致性内存分配和 RPC
+服务，NPU 侧负责每核初始化、协作式 proc 调度、私有堆管理与张量单元同步。默认四核
+配置可以视为四个相互独立的 Runtime 实例；普通内存不具备跨核一致性，跨核共享必须
+显式放入硬件 coherent window。
+
+\begin{dayannote}
+本文档描述当前源码，而不是未来接口规划。若文档与构建产物不一致，以
+\code{include/api/*.h}、\code{dayan-api.symbols}、代码中的静态断言和
+\code{make check} 结果为准。
+\end{dayannote}
+
+\subsection{目标读者}
+
+\begin{itemize}
+  \item 编写 C 或受限 C++ 算子 kernel 的开发者；
+  \item 实现算子目标文件重定位、proc 创建与 shared allocation 绑定的 Runtime/Host
+        开发者；
+  \item 实现字符串输出、堆扩展、异常接收等 RPC 服务的 Host 开发者；
+  \item 调试上下文切换、trap、链接布局和跨核同步问题的系统开发者。
+\end{itemize}
+
+\subsection{规范来源}
+
+\begin{dayantable}{手册内容的权威来源}{tab:kernel-001}{X[28,l] X[72,l]}
+  来源 & 约束内容 \\
+  \code{include/api/*.h} & 算子可包含的头文件、公开类型、函数原型与宏。 \\
+  \code{dayan-api.symbols} & 运行时加载器可用于解析算子未定义符号的完整白名单。 \\
+  \code{Makefile} & RISC-V ISA、调用约定、代码模型、禁止 small-data/TLS 的编译参数。 \\
+  \code{include/context.h}、\code{include/thread.h} & thread、上下文切换帧和新 proc 启动帧布局。 \\
+  \code{include/rpc.h}、\code{include/trap.h} & Device--Host RPC 描述符与异常记录 ABI。 \\
+  \code{linker.ld} & 固件镜像、CPU-local、栈和初始堆的链接期布局。 \\
+  \code{release/docs/chapters/07_register_list.tex} & mailbox、CLINT、中断控制器和 coherent window 的硬件地址。 \\
+\end{dayantable}
+
+\subsection{接口分层}
+
+\begin{dayantable}{接口稳定性分层}{tab:kernel-002}{X[22,l] X[29,l] X[49,l]}
+  层级 & 使用者 & 约束 \\
+  Dayan API（DAPI） & 算子 kernel & 由 \code{dayan_sys.h} 声明；符号必须存在于 \code{npu-os-api.elf}。 \\
+  精简 libc & 算子 kernel & 使用标准头文件名，但仅实现本手册列出的子集，不等价于 POSIX 或完整 ISO C 库。 \\
+  Host ABI & Host 与 Runtime & 包括 shared pointer、RPC command/packet、mailbox 握手和 trap record。 \\
+  Runtime 内部 ABI & Runtime 开发者 & 包括 \code{struct thread}、上下文帧和 \code{proc_*}；算子不得直接链接这些符号。 \\
+\end{dayantable}
+
+公开函数分别放入 \code{.text.api.dapi} 和 \code{.text.api.libc}。完整固件
+\code{npu-os.elf} 保留内部符号供调试使用；算子加载器只能读取
+\code{npu-os-api.elf}，不得因为某个内部符号恰好出现在完整 ELF 中就允许算子引用。
+
+\subsection{当前范围与限制}
+
+当前版本有意保持最小化，以下能力不属于已支持接口：
+
+\begin{itemize}
+  \item 抢占、时间片、优先级、跨 hart proc 迁移；
+  \item 用户态/内核态隔离、独立虚拟地址空间或 POSIX 进程模型；
+  \item 文件、网络、标准输入、环境变量、时间与完整 locale；
+  \item ELF TLS、传统 RISC-V small-data global pointer 和 C/C++ 全局构造器；
+  \item 双精度数学库、浮点 \code{printf} 格式、C++ 异常与 RTTI；
+  \item 由固件链接器静态分配的跨核 coherent 对象。
+\end{itemize}
+
+\end{document}

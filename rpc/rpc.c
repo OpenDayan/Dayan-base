@@ -156,12 +156,14 @@ int rpc_init(void)
     platform_rpc_init();
 
     status = proc_init(&rpc->receive, rpc_receive_main,
-                       (void *)base, CONFIG_RPC_STACK_SIZE, 0, 0);
+                       (void *)base, CONFIG_RPC_STACK_SIZE, 0,
+                       0, 0, 0);
     if (status < 0)
         return status;
     base += CONFIG_RPC_STACK_SIZE;
     status = proc_init(&rpc->send, rpc_send_main,
-                       (void *)base, CONFIG_RPC_STACK_SIZE, 0, 0);
+                       (void *)base, CONFIG_RPC_STACK_SIZE, 0,
+                       0, 0, 0);
     if (status < 0)
         return status;
     rpc->initialized = 1;
@@ -225,14 +227,60 @@ long rpc_call(uint32_t service,
 
 long rpc_write(const void *data, size_t size)
 {
+    struct rpc_print_request request;
+    struct proc *proc;
+
     if (!size)
         return 0;
-    return rpc_call(RPC_WRITE, data, size, 0, 0);
+    if (!data)
+        return -EINVAL;
+    proc = proc_self();
+    if (!proc)
+        return -EPERM;
+    request.hart_id = (uint32_t)platform_hart_id();
+    request.proc_id = proc->thread.id;
+    request.data_addr = (uintptr_t)data;
+    request.data_size = size;
+    platform_cache_clean(data, size);
+    return rpc_call(RPC_WRITE, &request, sizeof(request), 0, 0);
 }
 
 long rpc_clear(void)
 {
-    return rpc_call(RPC_CLEAR, 0, 0, 0, 0);
+    struct rpc_print_request request;
+    struct proc *proc = proc_self();
+
+    if (!proc)
+        return -EPERM;
+    request.hart_id = (uint32_t)platform_hart_id();
+    request.proc_id = proc->thread.id;
+    request.data_addr = 0;
+    request.data_size = 0;
+    return rpc_call(RPC_CLEAR, &request, sizeof(request), 0, 0);
+}
+
+long rpc_heap_acquire(size_t size, struct rpc_heap_response *response)
+{
+    struct rpc_heap_request request;
+
+    if (!size || !response)
+        return -EINVAL;
+    request.size = size;
+    response->addr = 0;
+    response->size = 0;
+    return rpc_call(RPC_HEAP_ACQUIRE, &request, sizeof(request),
+                    response, sizeof(*response));
+}
+
+long rpc_heap_release(uintptr_t addr, size_t size)
+{
+    struct rpc_heap_release release;
+
+    if (!addr || !size)
+        return -EINVAL;
+    release.addr = addr;
+    release.size = size;
+    return rpc_call(RPC_HEAP_RELEASE, &release, sizeof(release), 0, 0);
 }
 
 static void rpc_trap_cleanup(struct rpc_transaction *transaction, void *arg)

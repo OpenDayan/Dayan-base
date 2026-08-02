@@ -1,0 +1,145 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{RISC-V 与 Runtime ABI}\label{sec:kernel-050}
+
+\subsection{基础数据与调用约定}
+
+当前 ABI 为 RISC-V RV64 \code{lp64}：\code{char}/\code{short}/\code{int} 分别为
+8/16/32 bit，\code{long}、指针、\code{size_t} 和 \code{uintptr_t} 为 64 bit。
+栈在公开函数边界和上下文帧边界均保持 16-byte 对齐。
+
+\code{lp64} 是整数 procedure-call ABI，不是 \code{lp64f}。目标 ISA 含 F 扩展，
+编译器可以在函数内部使用单精度浮点指令，但参数和返回值按基础整数调用约定传递。
+Runtime 在上下文切换时保存 \code{fcsr}；没有 ABI callee-saved F 寄存器，编译器会在
+调用可能切出的函数前保存仍然存活的浮点临时值。
+
+\subsection{保留寄存器}\label{sec:kernel-051}
+
+\begin{dayantable}{Dayan 对 RISC-V 寄存器的固定用途}{tab:kernel-050}{X[13,l] X[19,l] X[68,l]}
+  寄存器 & Dayan 名称 & 约束 \\
+  \code{x2/sp} & stack pointer & 每 proc 独立；上下文切出时保存到 thread。 \\
+  \code{x3/gp} & \code{shared} & 当前 proc 的 Host coherent allocation 基址；不得作为传统 small-data global pointer。 \\
+  \code{x4/tp} & \code{current} & 指向当前 \code{struct thread}；不得用于 ELF TLS，算子不得写入。 \\
+  \code{x10--x17} & \code{a0--a7} & 普通调用参数；新 proc 最多恢复 8 个机器字参数。 \\
+\end{dayantable}
+
+\code{shared} 在 \code{dayan_sys.h} 中声明为绑定 \code{gp} 的全局寄存器变量，没有
+对应内存对象或可重定位符号。上下文切换保存和恢复 \code{gp}，因此不同 proc 可以在
+同一 hart 上拥有不同 shared allocation。init/scheduler 与两个内部 RPC proc 的
+\code{gp} 为 0。
+
+固件不定义 \code{__global_pointer\$}。Runtime 与算子都使用
+\code{-mno-relax -msmall-data-limit=0}，构建检查拒绝 GP-relative relocation。
+同理，链接脚本拒绝 \code{.tdata}/\code{.tbss}，构建检查拒绝 TP-relative/TLS
+relocation。
+
+\subsection{proc 参数 ABI}\label{sec:kernel-052}
+
+Runtime 内部通过下列抽象创建 proc：
+
+\begin{dayancode}
+proc_init(proc, entry, stack, stack_size, shared_base,
+          printf_buffer, printf_capacity, argc, ...)
+\end{dayancode}
+
+\code{printf_buffer} 与 \code{printf_capacity} 必须同时为零或同时非零；非零缓冲由
+调用者所有，并在 proc 结束前保持有效。Runtime 在 \code{struct proc} 中记录 buffer、
+capacity 和当前 size，不把它们放入新 proc 启动帧。\code{argc} 范围为 0--8，每个
+可变参数必须由调用者以 \code{uintptr_t} 提供。
+底层启动帧固定为 96 bytes：
+
+\begin{dayantable}{新 proc 启动帧}{tab:kernel-051}{X[18,l] X[20,l] X[62,l]}
+  offset & 字段 & 含义 \\
+  0 & \code{entry} & kernel entry 地址。 \\
+  8 & \code{ra} & 固定为 Runtime \code{proc_exit}，entry 正常返回时结束 proc。 \\
+  16--72 & \code{a0--a7} & 8 个 64-bit 参数槽。 \\
+  80 & \code{shared} & 写入 \code{gp} 的 Host allocation 基址。 \\
+  88 & reserved & 必须为 0。 \\
+\end{dayantable}
+
+bootstrap 按 \code{a7,a6,...,a0} 顺序排列 8 条固定宽度 load，新 proc 的初始 PC 为
+\code{proc_bootstrap + (8 - argc) * 4}，因此只执行实际参数数量对应的尾部 load。
+随后加载 \code{gp}、清零 \code{fcsr}、恢复 entry/ra 并释放启动帧。
+
+指针和整数可直接转换成 \code{uintptr_t}。单精度浮点值应由类型安全的上层 wrapper
+把 32-bit 位模式装入机器字，并让与调用约定匹配的 entry wrapper 解码；不得在
+\code{proc_init} 的可变参数中直接传 \code{float}，因为 C 默认参数提升和
+\code{va_arg(uintptr_t)} 不匹配。当前 Runtime 不提供通用的浮点参数封装。
+
+\subsection{thread 与上下文布局}
+
+本节属于 Runtime 内部 ABI，算子不能包含 \code{thread.h} 或引用 \code{current}。
+它对汇编上下文切换、trap 诊断和 Runtime 扩展仍是固定约束。
+
+\begin{dayantable}{\code{struct thread} 固定前缀}{tab:kernel-052}{X[17,l] X[23,l] X[17,l] X[43,l]}
+  offset & 字段 & 大小 & 含义 \\
+  0 & \code{id} & 4 & hart 内 Runtime 分配的 thread ID；init 为 0。 \\
+  4 & \code{state} & 4 & 第~\ref{sec:kernel-010}~节中的状态值。 \\
+  8 & \code{cpu} & 8 & 所属 CPU-local 状态指针。 \\
+  16 & \code{sp} & 8 & 切出时的栈指针。 \\
+  24 & \code{pc} & 8 & 恢复入口。 \\
+  32 & \code{type} & 4 & BASE 为 0，PROC 为 1。 \\
+  36 & padding & 4 & 结构体总大小为 40 bytes。 \\
+\end{dayantable}
+
+派生 thread 类型必须把 \code{struct thread} 放在 offset 0；当前
+\code{struct proc} 即采用这种 C 语言“继承”方式。\code{tp} 直接指向该固定前缀，
+不是指向 \code{struct cpu}。当前 \code{struct proc} 总大小为 120 bytes；在 thread、
+链表节点和 poll callback 之后，offset 72/80/88 分别保存输出 buffer、capacity 和
+当前 size，offset 96/104 保存退出 cleanup callback 及其参数，offset 112 保存退出
+status。这些字段属于 Runtime 内部布局，不是算子可直接访问的 API。
+
+切出帧为 128 bytes，依次保存 \code{ra}、\code{s0--s11}、\code{gp}、
+\code{fcsr} 和一个 reserved word。\code{switch_context} 把帧地址和恢复入口写入
+旧 thread，再加载目标 thread 的 sp/pc、更新 \code{tp} 并跳转。因为调度是协作式，
+调用者保存的 \code{a*}/\code{t*} 寄存器由普通函数调用 ABI 负责，不重复进入切出帧。
+
+\subsection{公开结构体 ABI}
+
+\begin{dayantable}{算子可见结构体布局}{tab:kernel-053}{X[29,l] X[15,l] X[56,l]}
+  类型 & 大小/对齐 & 字段 offset \\
+  \code{struct list_head} & 16/8 & \code{next=0}、\code{prev=8}。 \\
+  \code{dayan_resource_t} & 64/8 & \code{state=0}、\code{producer_count=4}、\code{consumer_count=8}、\code{lock=12}、三条 list 分别为 16/32/48。 \\
+  \code{dayan_shared_resource_t} & 16/4 & \code{state=0}、\code{producer_count=4}、\code{consumer_count=8}、\code{lock=12}。 \\
+\end{dayantable}
+
+resource state 数值固定为 \code{FREE=0}、\code{BUSY=1}、\code{READY=2}。结构体字段
+是 ABI 可见但语义私有的；算子通过 DAPI 修改，不应自行 load/store 状态字段来替代
+接口中的原子和唤醒语义。
+
+\subsection{固件链接布局}
+
+\begin{dayantable}{默认固件 RAM 预留}{tab:kernel-054}{X[25,l] X[24,l] X[51,l]}
+  区域 & 默认大小 & 说明 \\
+  Runtime RAM & 64 MiB @ \code{0x80000000} & 可加载镜像和全部每核私有区域。 \\
+  CPU-local & 4 KiB / hart & scheduler、allocator、RPC、trap 状态。 \\
+  init 栈 & 64 KiB / hart & BL1、初始化和 scheduler。 \\
+  RPC 栈 & 4 KiB $\times$ 2 / hart & receive proc 和 send proc。 \\
+  trap 栈 & 4 KiB / hart & 同步异常入口。 \\
+  初始堆 & 1 MiB / hart & 私有 allocator 的首个 region。 \\
+  coherent window & 4 MiB @ \code{0x00400000} & Host 所有，不进入固件 ELF 的 RAM 预留。 \\
+\end{dayantable}
+
+固件链接顺序为代码/API 代码/只读数据、CPU-local、各类栈和初始堆。链接器断言固件
+普通 \code{.data}/\code{.bss}、\code{.init_array}、\code{.coherent} 和 TLS section
+均为空，并检查全部预留未越过配置的 RAM 末端。
+
+\subsection{公开符号 ABI}
+
+\code{dayan-api.symbols} 是精确白名单，不采用“名字前缀即公开”的规则。
+\code{DAYAN_API} 把 DAPI 函数放入 \code{.text.api.dapi}；\code{DAYAN_LIBC_API}
+把 libc 函数放入 \code{.text.api.libc}。\code{make check} 要求：
+
+\begin{itemize}
+  \item API ELF 的全局定义集合与白名单完全一致；
+  \item 两个 API text section 中的标记符号集合与白名单完全一致；
+  \item 仅使用公开 include path 的 C11/C++17 样例可以编译；
+  \item 样例的所有未定义符号都是白名单成员。
+\end{itemize}
+
+因此，ABI 扩展必须同时修改声明、section attribute、实现、白名单、测试和本文档；
+只新增一个全局 C 函数不会自动使其成为 Dayan API。
+
+\end{document}

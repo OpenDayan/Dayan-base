@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "cpu.h"
+#include "errno.h"
 #include "platform.h"
 #include "rpc_internal.h"
 #include "sche.h"
@@ -40,6 +41,6 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
         platform_halt();
     cpu->trap.active = 0;
     if (current->type == THREAD_TYPE_PROC)
-        proc_exit();
+        proc_exit_status(-EIO);
     platform_halt();
 }

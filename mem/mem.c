@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "errno.h"
 #include "mem.h"
+#include "platform.h"
 #include "rpc.h"
 #include "rbtree.h"
 #include "string.h"
@@ -144,6 +145,9 @@ static int region_add(struct mem_state *mem, uintptr_t raw, size_t raw_size,
             return -EINVAL;
     }
 
+    if (dynamic)
+        platform_cache_invalidate((void *)raw, raw_size);
+
     region = (struct mem_region *)start;
     block = (struct block *)(start + REGION_SIZE);
     sentinel = (struct block *)(end - sizeof(*sentinel));
@@ -170,23 +174,27 @@ static int region_add(struct mem_state *mem, uintptr_t raw, size_t raw_size,
 
 static int region_grow(struct mem_state *mem, size_t need)
 {
-    struct rpc_heap_request request;
     struct rpc_heap_response response;
+    size_t request_size;
     long status;
 
     if (need > SIZE_MAX - REGION_SIZE - sizeof(struct block) -
                2 * (ALIGNMENT - 1))
         return -EOVERFLOW;
-    request.size = need + REGION_SIZE + sizeof(struct block) +
+    request_size = need + REGION_SIZE + sizeof(struct block) +
                    2 * (ALIGNMENT - 1);
-    response.addr = 0;
-    response.size = 0;
-    status = rpc_call(RPC_HEAP_ACQUIRE,
-                      &request, sizeof(request),
-                      &response, sizeof(response));
+    status = rpc_heap_acquire(request_size, &response);
     if (status < 0)
         return (int)status;
-    return region_add(mem, response.addr, response.size, 1);
+    if (!response.addr || response.size < request_size)
+        status = -ENOMEM;
+    else
+        status = region_add(mem, (uintptr_t)response.addr,
+                            (size_t)response.size, 1);
+    if (status < 0 && response.addr && response.size)
+        (void)rpc_heap_release((uintptr_t)response.addr,
+                               (size_t)response.size);
+    return (int)status;
 }
 
 static struct mem_region *find_region(struct mem_state *mem, const void *ptr)
@@ -205,7 +213,6 @@ static struct mem_region *find_region(struct mem_state *mem, const void *ptr)
 static int release_region(struct mem_state *mem,
                           struct mem_region *region, struct block *block)
 {
-    struct rpc_heap_release release;
     struct list_head *prev;
     struct list_head *next;
     size_t size;
@@ -215,17 +222,16 @@ static int release_region(struct mem_state *mem,
         block_size(next_block(block)) != 0)
         return 0;
 
-    release.addr = region->raw;
-    release.size = region->raw_size;
     prev = region->node.prev;
     next = region->node.next;
     size = block_size(block);
-    status = rpc_call(RPC_HEAP_RELEASE,
-                      &release, sizeof(release), 0, 0);
+    platform_cache_clean((void *)region->raw, region->raw_size);
+    status = rpc_heap_release(region->raw, region->raw_size);
     if (status < 0)
         return 0;
 
     /* The host may reclaim region immediately after the successful call. */
+    platform_cache_invalidate((void *)region->raw, region->raw_size);
     __list_del(prev, next);
     mem->capacity -= size;
     mem->available -= size;

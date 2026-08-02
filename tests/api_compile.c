@@ -36,6 +36,8 @@ int operator_api_compile(dayan_resource_t *resource,
     dayan_wait_mat();
     dayan_wait_vec();
     dayan_wait_macro();
+    (void)printf("status=%d", status);
+    (void)fflush(stdout);
     free(memory);
 
     return snprintf(buffer, size, "%d %x", status,

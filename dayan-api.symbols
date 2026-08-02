@@ -22,6 +22,7 @@ dayan_yield
 exit
 expf
 fabsf
+fflush
 fmaxf
 fminf
 free

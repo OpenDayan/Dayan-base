@@ -54,12 +54,23 @@ RPC 和 trap 状态；hart ID 由平台直接读取 `mhartid`，不在 CPU-local
 
 ## 构建
 
-需要本机 `clang`、`ld.lld` 和 LLVM binutils：
+需要本机 `clang`、`ld.lld`、LLVM binutils 和 `qemu-system-riscv64`：
 
 ```sh
 make
 make check
 ```
+
+`make check` 会先执行独立脚本中的 ELF/ABI 静态检查，再把 `tests/` 中的 list、
+RBTree、allocator、math、RPC ABI 和 printf 测试编译为 RV64 bare-metal ELF，并在
+QEMU `virt` 上逐一运行。QEMU 不在 `PATH` 时可显式指定：
+
+```sh
+make check QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64
+```
+
+这些测试覆盖标准 RV64IMAF 上可独立执行的 Device 基础组件；Dayan 自定义执行单元和
+Host↔Device 完整链路仍由 `host/runtime/run_cmodel_smoke.sh` 在 RVTNG cmodel 中验证。
 
 默认目标为 `rv64imaf_zicsr_zifencei` / `lp64`，与 `npu-kernels` 的软浮点调用
 约定兼容，同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机
@@ -79,6 +90,62 @@ make check
 - `npu-os-api.elf`：与固件地址一致、但符号表只保留公开 API 的算子链接视图；
 - `npu-os.bin`：只包含可加载镜像的平坦二进制；
 - `npu-os.objdump`、`npu-os.map`：反汇编和链接布局。
+
+### 安装布局
+
+GNU 风格安装默认使用 `/usr/local`，也可以选择独立 SDK 前缀或先安装到打包目录：
+
+```sh
+make install
+make install PREFIX=/opt/dayan
+make install PREFIX=/usr DESTDIR="$PWD/package-root"
+```
+
+默认安装内容如下；所有路径都会随 `PREFIX` 改变：
+
+| 内容 | 默认路径 |
+| --- | --- |
+| `dycc` driver | `/usr/local/bin/dycc` |
+| Host 公共头文件 | `/usr/local/include/{dayan_*,npu_*}.h` |
+| Host runtime 静态/动态库 | `/usr/local/lib/libDayanRuntime.{a,so}` |
+| `pkg-config` 元数据 | `/usr/local/lib/pkgconfig/dayan-runtime.pc` |
+| Device 交叉编译头文件及 dycc 内部资源 | `/usr/local/lib/dayan/` |
+| BL1、公开 API ELF 和固件二进制 | `/usr/local/lib/dayan/firmware/` |
+
+Device 的 `stdio.h`、`stdlib.h` 等 freestanding 头文件不会放进系统
+`/usr/local/include`，避免覆盖 Host libc；它们由安装后的 `dycc` 从私有 SDK 目录自动
+加入。`DESTDIR` 只用于发行包暂存。安装后的 driver 会相对自身定位 SDK，也可用
+`DAYAN_ROOT` 或 `--dayan-root` 显式覆盖。
+
+Host 应用可用 `pkg-config --cflags --libs dayan-runtime` 获取编译和动态链接参数；静态
+链接时使用 `pkg-config --static --cflags --libs dayan-runtime`。
+
+### dycc 算子编译器
+
+`host/dycc` 提供类似 `nvcc` 的 Dayan C++ compiler driver。源码使用 `__host__`、
+`__device__` 和 `__kernel__` 标注；未标注的全局函数进入 Host 与 Device 两侧，所有
+全局变量则必须显式标注所属侧。算子源文件必须显式包含 `<dayan_kernel.h>`，以引用
+`dayan_kernel_launch_attrs_t` 等公共类型。构建与调用示例：
+
+```sh
+make dycc
+host/dycc/dycc -c demo.cpp -o build/demo.o
+```
+
+带 `-c` 时输出可供后续链接的 Host `.o`；不带 `-c` 时，dycc 会像 gcc 一样继续调用
+Host clang++ 并自动链接 `libDayanRuntime.a`：
+
+```sh
+host/dycc/dycc operator.cpp main.cpp -o build/app
+```
+
+编译阶段产生的 Host `.o` 内部已经嵌入 RISC-V Device `.o`。自动生成的同名 kernel
+wrapper 追加 `dayan_kernel_launch_attrs_t *` 参数，并以线程安全的 static descriptor
+缓存完成延迟加载。应用在调用 wrapper 前通过 `dayan_runtime_set_api_elf_file()` 注册
+`npu-os-api.elf`；Host runtime 产出 `libDayanRuntime.a` 与 `libDayanRuntime.so`。
+完整选项、切分规则和同步/异步调用示例见 [`host/dycc/README.md`](host/dycc/README.md)。
+- `host/runtime/`：与 BL0/BL1 mailbox ABI 配套的 Linux 用户态驱动；
+- `build/host/runtime/libnpu_runtime.a`：Host 静态 runtime 库。
 
 配置示例：
 
@@ -100,7 +167,10 @@ Linux 风格 intrusive 泛型。当前兼容常用的 `container_of/list_entry`�
 `sche/` 的调度队列和 `mem/` 的 region 集合都使用 `list_head`。`mem/` 的空闲块
 使用按块大小排序的 intrusive RBTree 做 best-fit 分配，并通过边界信息合并
 相邻空闲块。初始 region 永不归还；堆不足时通过 `RPC_HEAP_ACQUIRE` 请求 Host，
-Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。
+Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。Host 返回的 region 必须不小于
+请求值并能通过地址、对齐和重叠检查；无效 region 会立即通过 release RPC 回滚，且不会
+进入 allocator 的 RBTree。动态 region 接收后先 invalidate 本核缓存；归还前先 clean，
+Host 确认回收后再 invalidate，避免非一致性缓存中的旧行污染后续所有者。
 
 Cache 接口保留为弱符号，默认实现采用当前平台的 64-byte cache line 和
 `cbo.flush`/`cbo.inval` 指令编码。RPC 在发布请求前 clean Device 缓存，在 Host
@@ -127,14 +197,26 @@ Host 命令，调用弱的 `rpc_receive(opcode, arg, &response)` 分派接口，
 把响应加入发送队列，最后清除 `msip`。send proc 独占本核发送队列；队列为空时使用
 `proc_wait_event()`，有事务时写 Device → Host mailbox，等待 Host 清除状态位，再执行
 事务 cleanup 并唤醒调用者。receive handler 返回 1 表示发送 `response`，返回 0 表示
-无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行，因此不应发起
-需要 Host 嵌套处理的阻塞式反向 RPC。
+无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行；若它发起阻塞式
+反向 RPC，Host 必须在等待 response 的同时继续服务 Device→Host mailbox。仓库内置的
+create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套扩堆，配套
+`host/runtime` 支持这一流程。
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
 有符号 status。当前 opcode 1–5 分别为字符串输出、清空输出缓冲、申请堆 region、
 归还堆 region 和异常报告。前四类使用 packet；异常报告的低 48 位参数直接指向一份
-稳定的 320-byte `struct trap_record`。
+稳定的 320-byte `struct trap_record`。输出和清空操作的 packet request 指向固定
+24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
+可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
+响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
+
+Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
+152-byte `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+0–8 个 ABI 参数以及完成状态。BL1 校验后分配托管 proc 并回复 opcode `0x8100`；算子
+退出后，scheduler 已回到自己的栈，才调用 cleanup 释放 proc 私有资源，并把描述符从
+`RUNNING` 更新为 `EXITED` 或 `FAILED`。因此 Host 必须保留描述符直到终态，不能只把
+create response 当作算子执行完成。
 
 同步异常从 `mtvec` 进入独立的每核 trap 栈，保存 x0–x31（其中 x2 为异常前的 sp）、
 `mstatus`、`mepc`、`mcause`、`mtval` 和 `fcsr`。C handler 再附加版本、记录大小、
@@ -150,32 +232,38 @@ hart ID 与当前 thread 的 ID/type/state，异步排入 RPC 发送队列，然
 保留的 F 寄存器；有存活浮点值时，编译器会在调用 `proc_yield()` 等函数前自行溢出，
 而每个 thread 的浮点控制状态由 `fcsr` 保存。
 
-`proc_init(proc, entry, stack, stack_size, shared_base, argc, ...)` 使用调用者提供的
-栈区间和 Host 分配的 shared 基址构造启动帧，
+`proc_init(proc, entry, stack, stack_size, shared_base, printf_buffer,
+printf_capacity, argc, ...)` 使用调用者提供的栈区间、Host 分配的 shared 基址，以及
+proc 私有输出缓冲区构造任务，
 栈顶按 16 字节向下对齐，支持 0 到 8 个寄存器参数。可变参数是底层 ABI 机器字，调用者
 必须逐个按 `uintptr_t` 传入；后续类型安全封装可负责指针转换、浮点位模式打包以及自动
 加入 proc 指针。实际实现位于接收 `va_list` 的 `proc_vinit()`；`proc_init()` 仅负责
 建立和销毁参数列表，因此其它可变参数封装可以直接调用 `proc_vinit()`，不需要中间
 数组。bootstrap 开头按 `a7` 到 `a0` 连续排列八条定长加载指令，新 proc 的
 初始 `pc` 为 `proc_bootstrap + (8 - argc) * 4`，因此只恢复实际提供的参数寄存器，再
-加载任务入口和返回地址。未使用的高位参数寄存器不作初始化。该栈在 proc 到达
-`THREAD_WAIT_EXIT` 前必须一直有效。
+加载任务入口和返回地址。未使用的高位参数寄存器不作初始化。该栈与输出缓冲区在 proc
+到达 `THREAD_WAIT_EXIT` 前必须一直有效；传入空指针和 0 可为不使用 stdio 的内核 proc
+禁用输出。
 
 例如，底层接口创建一个具有两个机器字参数的 proc：
 
 ```c
-proc_init(&proc, (proc_fn)task_main, stack, stack_size, shared_base, 2,
+proc_init(&proc, (proc_fn)task_main, stack, stack_size, shared_base,
+          printf_buffer, printf_capacity, 2,
           (uintptr_t)&proc, (uintptr_t)arg);
 ```
 
-`proc_init()`/`proc_vinit()` 成功时直接把 proc 加入当前 CPU 的 ready queue。运行中的
+`proc_init()`/`proc_vinit()`/`proc_init_args()` 成功时直接把 proc 加入当前 CPU 的
+ready queue；最后一个接口供 RPC 这类已有机器字数组的调用者使用。可选 cleanup 在
+proc 停止使用自己的栈后由 scheduler 调用，因而可以安全回收托管栈。运行中的
 proc 可调用 `proc_yield()` 主动让出。`proc_wait_poll(poll, arg)` 进入轮询等待队列，
 scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队列非空时不会执行
 `wfi`。`proc_wait_event(event)` 则立即把当前 proc 的 intrusive `node` 挂入指定事件
 链表，scheduler 不遍历它；事件所有者调用 `proc_event_wake_one/all()` 或
 `proc_wake()` 将等待者移回 ready queue。传入空指针会使用 scheduler 的默认外部事件
-链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。当前没有抢占、
-跨 hart 迁移或退出后自动回收 proc/栈。
+链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。普通 proc 仍由
+所有者管理生命周期；Host RPC 创建的托管 proc 注册了 scheduler cleanup，可在退出后
+回收 proc、栈和输出缓冲。当前没有抢占或跨 hart 迁移。
 
 ## 算子 API 与同步
 
@@ -234,4 +322,15 @@ dayan_shared_resource_t *resource = (dayan_shared_resource_t *)shared;
 `lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度
 `fabsf/copysignf/fminf/fmaxf/sqrtf/rsqrtf/expf/logf`。浮点格式化暂未实现，
-`printf` 的输出统一走 RPC。
+`printf/puts/putchar` 共享当前 proc 在创建时配置的有限缓冲区；缓冲恰好填满时自动通过
+RPC 发送，未填满的内容跨调用保留，直到 `fflush(stdout)` 或 `fflush(NULL)`。RPC
+失败时普通 flush 会保留缓冲内容以便重试。proc 退出时会做一次 best-effort flush；若
+要求确认尾部输出已经送达，仍应在返回前显式调用并检查 `fflush`。
+
+## Host 用户态驱动
+
+`host/runtime/` 参考旧 `npu-runtime` 的 XDMA 文件访问方式，同时使用 `xdma0_user`
+读取 IRQ status/mailbox；在 cmodel 中这些路径由 QEMU FUSE 原样提供。runtime 能加载
+BL1 ELF、通知 BL0 启动多 hart、后台处理 BL1 反向 RPC、管理普通/一致性 Device 内存、
+执行 H2D/D2H/D2D 搬运，并通过 create-proc RPC 异步提交和等待算子。详细 API、生命周期
+约束和 cmodel smoke 命令见 `host/runtime/README.md`。

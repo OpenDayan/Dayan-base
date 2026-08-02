@@ -1,0 +1,77 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{开发检查清单}\label{sec:kernel-070}
+
+\subsection{算子 kernel 交付}
+
+\begin{dayantable}{算子目标文件检查}{tab:kernel-070}{X[14,l] X[86,l]}
+  状态 & 检查项 \\
+  \code{[ ]} & 使用 \code{riscv64-unknown-elf}、\code{rv64imaf_zicsr_zifencei}、\code{lp64} 和 \code{medany}。 \\
+  \code{[ ]} & 使用 \code{-mno-relax -msmall-data-limit=0}，只包含 \code{include/api}。 \\
+  \code{[ ]} & relocation 中没有 GP-relative、TP-relative、TLS、动态链接器或 Host libc 依赖。 \\
+  \code{[ ]} & 所有未定义函数都能在 \code{npu-os-api.elf} 中找到。 \\
+  \code{[ ]} & kernel entry 的参数数量不超过 8，底层参数按机器字编码。 \\
+  \code{[ ]} & proc-local printf buffer 在 proc 结束前保持有效；要求送达的尾部输出在返回前调用 \code{fflush(stdout)}。 \\
+  \code{[ ]} & 不使用全局构造器、C++ exception/RTTI、ELF TLS 或传统 small data。 \\
+  \code{[ ]} & 所有可能阻塞的位置都通过 DAPI/libc 协作式等待，没有自行轮询硬件造成 scheduler 饥饿。 \\
+\end{dayantable}
+
+\subsection{内存与资源}
+
+\begin{dayantable}{内存和同步检查}{tab:kernel-071}{X[14,l] X[86,l]}
+  状态 & 检查项 \\
+  \code{[ ]} & 普通指针只在创建它的 hart/Runtime 内使用，不假设普通 cache 跨核一致。 \\
+  \code{[ ]} & \code{shared} 只读，且 Host 提供的 allocation 位于从 \code{0x00400000} 开始的 4 MiB coherent window。 \\
+  \code{[ ]} & 单核对象使用 \code{dayan_resource_t}，对象和等待者始终属于同一 hart。 \\
+  \code{[ ]} & 跨核对象使用 \code{dayan_shared_resource_t}，由一个参与者在发布前初始化。 \\
+  \code{[ ]} & resource 的 producer/consumer 数量与每轮实际调用次数一致，consumer 数量不为 0。 \\
+  \code{[ ]} & 有等待者时不复制、移动、重新初始化或释放本地 resource。 \\
+  \code{[ ]} & 不用 \code{malloc} 分配跨核对象，不用 \code{free} 释放 shared allocation。 \\
+  \code{[ ]} & Produce/Bar 同时追踪数量不超过全局 32、每单元 2。 \\
+\end{dayantable}
+
+\subsection{Host/Runtime 对接}
+
+\begin{dayantable}{Host ABI 检查}{tab:kernel-072}{X[14,l] X[86,l]}
+  状态 & 检查项 \\
+  \code{[ ]} & 加载器只使用 API ELF 解析算子符号，不读取完整固件 ELF 暴露内部接口。 \\
+  \code{[ ]} & 每个 proc 的栈顶保持 16-byte 对齐，并在 proc EXIT 前维持栈存储有效。 \\
+  \code{[ ]} & Host 分配的 shared 基址写入 proc 初始 \code{gp}，init/scheduler/RPC proc 使用 0。 \\
+  \code{[ ]} & RPC command 使用高 16 位 opcode、低 48 位 arg，指针不越过 48-bit。 \\
+  \code{[ ]} & mailbox、doorbell 和 cache ownership 顺序符合第~\ref{sec:kernel-060}~节。 \\
+  \code{[ ]} & Host 实现 WRITE、CLEAR、HEAP ACQUIRE/RELEASE 和 TRAP REPORT 所需服务。 \\
+  \code{[ ]} & Host 按固定 offset 解码 40-byte rpc packet、24-byte print request、heap 描述符与 320-byte trap record。 \\
+  \code{[ ]} & HEAP ACQUIRE 返回 region 不小于请求值，并与 Device 遵守接入/归还 cache ownership 顺序。 \\
+\end{dayantable}
+
+\subsection{已知限制}
+
+\begin{dayantable}{当前版本限制}{tab:kernel-073}{X[28,l] X[72,l]}
+  项目 & 当前行为 \\
+  调度公平性 & ready queue 轮转但没有优先级、期限、预算或抢占保证。 \\
+  proc 回收 & EXIT 后不自动释放 proc 对象或栈，由上层生命周期管理。 \\
+  同时异常 & 每 hart 只有一个稳定 trap RPC 槽；前一报告未完成时再次异常会停机。 \\
+  RPC 并发 & 每个方向、每个 hart 的硬件 mailbox 只允许一笔未确认 command；Device 发送由软件队列串行化。 \\
+  shared 边界 & Device 只知道 hardware window 和 allocation 起点，不知道 Host 分配的精确长度。 \\
+  libc & 无文件/输入/时间/locale，格式化和数学仅为本手册所列子集。 \\
+  数值精度 & \code{rsqrtf}/\code{expf}/\code{logf} 是小型单精度近似，未给出通用正确舍入保证。 \\
+  C++ & 无异常、RTTI、构造器、析构器或标准 C++ runtime。 \\
+\end{dayantable}
+
+\subsection{文档与代码同步}
+
+修改公开接口时，应执行以下顺序：
+
+\begin{enumerate}
+  \item 更新 \code{include/api} 中的声明和必要的结构体静态断言；
+  \item 更新实现及 \code{dayan-api.symbols}；
+  \item 执行仓库根目录 \code{make check}，确认 API ELF、relocation、原子性和汇编
+        ABI 检查通过；
+  \item 更新本手册对应章节；
+  \item 在 \code{dayan_kernel_docs} 执行 \code{make check}，确认 PDF 可构建且每个
+        白名单符号均有文档条目。
+\end{enumerate}
+
+\end{document}

@@ -103,6 +103,11 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
     __asm__ volatile("fence rw, rw" ::: "memory");
 }
 
+void platform_instruction_fence(void)
+{
+    __asm__ volatile("fence.i" ::: "memory");
+}
+
 void platform_rpc_init(void)
 {
     uint32_t mask = rpc_interrupt_mask();

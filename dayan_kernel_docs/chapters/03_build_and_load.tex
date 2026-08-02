@@ -1,0 +1,115 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{算子构建与加载}\label{sec:kernel-020}
+
+\subsection{目标架构与编译参数}
+
+算子目标文件必须使用与 Runtime 相同的 RISC-V 架构和调用约定：
+
+\begin{dayantable}{必要编译约定}{tab:kernel-020}{X[32,l] X[68,l]}
+  项目 & 当前值 \\
+  target & \code{riscv64-unknown-elf} \\
+  ISA & \code{rv64imaf_zicsr_zifencei} \\
+  procedure-call ABI & \code{lp64}（整数调用约定；允许函数内部使用 F 指令） \\
+  code model & \code{medany} \\
+  relaxation & \code{-mno-relax} \\
+  small data & \code{-msmall-data-limit=0} \\
+  runtime model & freestanding、static、non-PIC、无系统 libc \\
+\end{dayantable}
+
+推荐的最小 C 编译命令如下；实际项目可以调整优化级别和调试信息，但不得改变 target、
+ISA、ABI、relaxation、small-data 与 freestanding 约束。
+
+\begin{dayancode}
+clang --target=riscv64-unknown-elf \
+  -march=rv64imaf_zicsr_zifencei -mabi=lp64 \
+  -mcmodel=medany -mno-relax -msmall-data-limit=0 \
+  -ffreestanding -fno-builtin -fno-common -fno-pic \
+  -fno-stack-protector -fno-unwind-tables \
+  -fno-asynchronous-unwind-tables \
+  -Iinclude/api -O2 -g -c kernel.c -o kernel.o
+\end{dayancode}
+
+算子编译时只应加入公开目录 \code{include/api}。如果把 Runtime 内部 \code{include/}
+加入 include path，源码可能偶然编译成功，但运行时加载器仍会拒绝不在白名单中的符号。
+
+\subsection{最小 kernel 示例}
+
+\begin{dayancode}
+#include <dayan_sys.h>
+#include <stdint.h>
+#include <stdio.h>
+
+void vector_kernel(uintptr_t count)
+{
+    /* Issue asynchronous VEC work before this point. */
+    dayan_wait_vec();
+    printf("vector kernel done: %lu\n", (unsigned long)count);
+    fflush(stdout);
+    dayan_yield();
+}
+\end{dayancode}
+
+kernel entry 的签名不是公开固定原型。Host/Runtime 创建 proc 时最多准备 8 个机器字
+参数，并由上层封装决定参数含义。为保持底层 ABI 明确，直接使用该接口的参数应按
+\code{uintptr_t} 编码；浮点参数的处理见第~\ref{sec:kernel-052}~节。
+
+创建 proc 的上层还应提供一片 proc-local 输出缓冲区。\code{printf}/\code{puts}/
+\code{putchar} 先写该缓冲，缓冲满或算子调用 \code{fflush(stdout)} 时才通过 RPC
+发送给 Host。缓冲区在 proc 结束前必须保持有效。
+
+\subsection{目标文件检查}
+
+交付给加载器前至少执行以下静态检查：
+
+\begin{dayancode}
+llvm-readelf --file-header --relocations kernel.o
+llvm-nm --undefined-only kernel.o
+\end{dayancode}
+
+\begin{itemize}
+  \item ELF 必须是 64-bit little-endian RISC-V relocatable object；
+  \item 不得出现 \code{R_RISCV_GPREL*}；\code{gp} 已保留给 \code{shared}；
+  \item 不得出现 \code{R_RISCV_TPREL*} 或 \code{R_RISCV_TLS_*}；\code{tp} 已保留给
+        当前 thread；
+  \item 未定义函数必须全部存在于 \code{npu-os-api.elf}；
+  \item 不应依赖动态链接器、GOT/PLT、系统启动文件或主机 libc。
+\end{itemize}
+
+\subsection{符号解析模型}
+
+Runtime 与其 libc 静态链接为 \code{npu-os.elf}。构建同时产生地址一致但只保留公开
+符号的 \code{npu-os-api.elf}。Host/Runtime 加载器读取算子 \code{.o} 的 relocation，
+用 API ELF 中的地址解析外部函数，再把完成重定位的代码和每 proc 数据装入 NPU。
+
+完整 ELF 中的 \code{proc_init}、\code{rpc_call}、\code{platform_*} 等符号仅供固件
+链接与调试。它们不构成算子 ABI，即使开发者能够从完整 ELF 中看到地址也不得引用。
+
+\subsection{C++ 子集}
+
+公开头文件可以用 C++17 编译，并用 \code{extern "C"} 保持函数符号稳定。当前推荐：
+
+\begin{dayancode}
+clang++ ... -std=c++17 -fno-exceptions -fno-rtti -c kernel.cc
+\end{dayancode}
+
+Runtime 不执行 \code{.init_array}，不提供异常展开器、RTTI runtime、全局析构或完整
+C++ 标准库。可以使用不依赖这些设施的类、模板和内联泛型；含非平凡全局构造的对象
+不受支持。
+
+\subsection{公开头文件}
+
+\begin{dayantable}{算子可包含的头文件}{tab:kernel-021}{X[25,l] X[75,l]}
+  头文件 & 内容 \\
+  \code{dayan_sys.h} & yield、张量单元等待、单核/跨核 resource，以及 \code{shared}。 \\
+  \code{stdio.h} & 字符串输出与内存格式化。 \\
+  \code{stdlib.h} & 私有堆分配与停机接口。 \\
+  \code{string.h} & 内存和 NUL 结尾字符串操作。 \\
+  \code{math.h} & 小型单精度数学子集与分类宏。 \\
+  \code{stdint.h}、\code{stddef.h}、\code{limits.h} & ABI 基本整数、大小、偏移和边界类型。 \\
+  \code{stdarg.h}、\code{stdbool.h} & 可变参数与布尔类型支持。 \\
+\end{dayantable}
+
+\end{document}

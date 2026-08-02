@@ -63,7 +63,10 @@ float fmaxf(float left, float right)
 
 float sqrtf(float value)
 {
-    return __builtin_sqrtf(value);
+    float result;
+
+    __asm__ volatile("fsqrt.s %0, %1" : "=f"(result) : "f"(value));
+    return result;
 }
 
 float rsqrtf(float value)

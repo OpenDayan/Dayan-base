@@ -6,15 +6,16 @@
 #include "context.h"
 #include "errno.h"
 #include "platform.h"
+#include "rpc.h"
 #include "sche.h"
 
 extern void proc_bootstrap(void);
 
-static struct proc *current_proc(void)
+struct proc *proc_self(void)
 {
     struct thread *thread = current;
 
-    if (thread->type != THREAD_TYPE_PROC)
+    if (!thread || thread->type != THREAD_TYPE_PROC)
         return 0;
     return container_of(thread, struct proc, thread);
 }
@@ -62,10 +63,10 @@ int thread_init(struct thread *thread, uint32_t type)
     return 0;
 }
 
-__attribute__((noinline))
-int proc_vinit(struct proc *proc, proc_fn entry,
-               void *stack, size_t stack_size, void *shared_base,
-               size_t argc, va_list args)
+int proc_init_args(struct proc *proc, proc_fn entry,
+                   void *stack, size_t stack_size, void *shared_base,
+                   void *printf_buffer, size_t printf_capacity,
+                   size_t argc, const uintptr_t *args)
 {
     struct proc_frame *frame;
     uintptr_t base;
@@ -73,7 +74,11 @@ int proc_vinit(struct proc *proc, proc_fn entry,
     size_t i;
     int status;
 
-    if (!proc || !entry || !stack || argc > PROC_MAX_ARGS)
+    if (!proc || !entry || !stack || argc > PROC_MAX_ARGS ||
+        (argc && !args) ||
+        (!printf_buffer != !printf_capacity) ||
+        (printf_buffer && printf_capacity >
+         UINTPTR_MAX - (uintptr_t)printf_buffer))
         return -EINVAL;
 
     base = (uintptr_t)stack;
@@ -91,7 +96,7 @@ int proc_vinit(struct proc *proc, proc_fn entry,
     frame->entry = (uintptr_t)entry;
     frame->ra = (uintptr_t)proc_exit;
     for (i = 0; i < argc; ++i)
-        frame->args[i] = va_arg(args, uintptr_t);
+        frame->args[i] = args[i];
     frame->shared = (uintptr_t)shared_base;
     frame->reserved = 0;
 
@@ -101,13 +106,37 @@ int proc_vinit(struct proc *proc, proc_fn entry,
     INIT_LIST_HEAD(&proc->node);
     proc->poll = 0;
     proc->poll_arg = 0;
+    proc->printf_buffer = printf_buffer;
+    proc->printf_capacity = printf_capacity;
+    proc->printf_size = 0;
+    proc->cleanup = 0;
+    proc->cleanup_arg = 0;
+    proc->exit_status = 0;
     proc->thread.state = THREAD_READY;
     list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
     return 0;
 }
 
+__attribute__((noinline))
+int proc_vinit(struct proc *proc, proc_fn entry,
+               void *stack, size_t stack_size, void *shared_base,
+               void *printf_buffer, size_t printf_capacity,
+               size_t argc, va_list args)
+{
+    uintptr_t words[PROC_MAX_ARGS];
+    size_t i;
+
+    if (argc > PROC_MAX_ARGS)
+        return -EINVAL;
+    for (i = 0; i < argc; ++i)
+        words[i] = va_arg(args, uintptr_t);
+    return proc_init_args(proc, entry, stack, stack_size, shared_base,
+                          printf_buffer, printf_capacity, argc, words);
+}
+
 int proc_init(struct proc *proc, proc_fn entry,
               void *stack, size_t stack_size, void *shared_base,
+              void *printf_buffer, size_t printf_capacity,
               size_t argc, ...)
 {
     va_list args;
@@ -115,9 +144,22 @@ int proc_init(struct proc *proc, proc_fn entry,
 
     va_start(args, argc);
     status = proc_vinit(proc, entry, stack, stack_size, shared_base,
-                        argc, args);
+                        printf_buffer, printf_capacity, argc, args);
     va_end(args);
     return status;
+}
+
+int proc_set_cleanup(struct proc *proc, proc_cleanup_fn cleanup, void *arg)
+{
+    if (!proc || proc->thread.type != THREAD_TYPE_PROC)
+        return -EINVAL;
+    if (proc->thread.cpu != cpu_self())
+        return -EPERM;
+    if (proc->thread.state != THREAD_READY || proc->cleanup)
+        return -EBUSY;
+    proc->cleanup = cleanup;
+    proc->cleanup_arg = arg;
+    return 0;
 }
 
 int proc_wake(struct proc *proc)
@@ -163,7 +205,7 @@ size_t proc_event_wake_all(struct list_head *event)
 
 int proc_wait_poll(proc_poll_fn poll, void *arg)
 {
-    struct proc *proc = current_proc();
+    struct proc *proc = proc_self();
 
     if (!poll)
         return -EINVAL;
@@ -178,7 +220,7 @@ int proc_wait_poll(proc_poll_fn poll, void *arg)
 
 int proc_wait_event(struct list_head *event)
 {
-    struct proc *proc = current_proc();
+    struct proc *proc = proc_self();
     struct sche_state *sche;
 
     if (!proc)
@@ -199,7 +241,7 @@ int proc_wait_event(struct list_head *event)
 
 void proc_yield(void)
 {
-    struct proc *proc = current_proc();
+    struct proc *proc = proc_self();
 
     if (!proc)
         return;
@@ -209,15 +251,24 @@ void proc_yield(void)
     switch_to_scheduler(&proc->thread);
 }
 
-_Noreturn void proc_exit(void)
+_Noreturn void proc_exit_status(int status)
 {
-    struct proc *proc = current_proc();
+    struct proc *proc = proc_self();
 
     if (proc) {
+        if (proc->printf_size &&
+            rpc_write(proc->printf_buffer, proc->printf_size) >= 0)
+            proc->printf_size = 0;
+        proc->exit_status = status;
         proc->thread.state = THREAD_WAIT_EXIT;
         switch_to_scheduler(&proc->thread);
     }
     platform_halt();
+}
+
+_Noreturn void proc_exit(void)
+{
+    proc_exit_status(0);
 }
 
 _Noreturn void scheduler(void)
@@ -260,6 +311,14 @@ _Noreturn void scheduler(void)
             list_add_tail(&proc->node, &sche->ready);
         } else if (proc->thread.state == THREAD_WAIT_POLL) {
             list_add_tail(&proc->node, &sche->wait_poll);
+        } else if (proc->thread.state == THREAD_WAIT_EXIT &&
+                   proc->cleanup) {
+            proc_cleanup_fn cleanup = proc->cleanup;
+            void *cleanup_arg = proc->cleanup_arg;
+
+            proc->cleanup = 0;
+            proc->cleanup_arg = 0;
+            cleanup(proc, cleanup_arg);
         }
     }
 }

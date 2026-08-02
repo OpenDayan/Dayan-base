@@ -1,0 +1,20 @@
+# Generated documentation output.
+/build/
+
+# LaTeX intermediates, including files produced by direct latexmk/xelatex use.
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+*.xdv
+
+# Editor and operating-system metadata.
+.DS_Store
+.vscode/

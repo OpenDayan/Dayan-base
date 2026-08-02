@@ -15,38 +15,57 @@ struct cpu test_cpu;
 
 static _Alignas(64) unsigned char initial_region[REGION_BYTES];
 static _Alignas(64) unsigned char host_region[REGION_BYTES];
+static _Alignas(64) unsigned char invalid_region[32];
 static int acquired;
 static int released;
+static int invalid_next;
+static int invalid_outstanding;
+static int rollback_released;
+static int host_cleaned;
+static int host_invalidated;
 
-long rpc_call(uint32_t service,
-              const void *request, size_t request_size,
-              void *response, size_t response_size)
+void platform_cache_clean(const void *addr, size_t size)
 {
-    if (service == RPC_HEAP_ACQUIRE) {
-        const struct rpc_heap_request *get = request;
-        struct rpc_heap_response *result = response;
+    assert(addr == host_region && size == sizeof(host_region));
+    ++host_cleaned;
+}
 
-        assert(request_size == sizeof(*get));
-        assert(response_size == sizeof(*result));
-        if (acquired || get->size > sizeof(host_region))
-            return -ENOMEM;
-        acquired = 1;
-        result->addr = (uintptr_t)host_region;
-        result->size = sizeof(host_region);
+void platform_cache_invalidate(void *addr, size_t size)
+{
+    assert(addr == host_region && size == sizeof(host_region));
+    ++host_invalidated;
+}
+
+long rpc_heap_acquire(size_t size, struct rpc_heap_response *result)
+{
+    if (invalid_next) {
+        invalid_next = 0;
+        invalid_outstanding = 1;
+        result->addr = (uintptr_t)invalid_region;
+        result->size = sizeof(invalid_region);
         return 0;
     }
+    if (acquired || size > sizeof(host_region))
+        return -ENOMEM;
+    acquired = 1;
+    result->addr = (uintptr_t)host_region;
+    result->size = sizeof(host_region);
+    return 0;
+}
 
-    if (service == RPC_HEAP_RELEASE) {
-        const struct rpc_heap_release *put = request;
-
-        assert(request_size == sizeof(*put));
-        assert(!response && !response_size);
-        assert(put->addr == (uintptr_t)host_region);
-        assert(put->size == sizeof(host_region));
-        ++released;
+long rpc_heap_release(uintptr_t addr, size_t size)
+{
+    if (addr == (uintptr_t)invalid_region) {
+        assert(invalid_outstanding);
+        assert(size == sizeof(invalid_region));
+        invalid_outstanding = 0;
+        ++rollback_released;
         return 0;
     }
-    return -ENOSYS;
+    assert(addr == (uintptr_t)host_region);
+    assert(size == sizeof(host_region));
+    ++released;
+    return 0;
 }
 
 static void basic_test(void)
@@ -111,6 +130,19 @@ static void growth_test(size_t initial_capacity)
     }
 
     assert(released == 1);
+    assert(host_cleaned == 1);
+    assert(host_invalidated == 2);
+    assert(mem_capacity() == initial_capacity);
+    assert(mem_available() == initial_capacity);
+}
+
+static void invalid_growth_test(size_t initial_capacity)
+{
+    invalid_next = 1;
+    assert(!mem_alloc(REGION_BYTES * 2));
+    assert(!invalid_outstanding);
+    assert(rollback_released == 1);
+    assert(!host_cleaned && !host_invalidated);
     assert(mem_capacity() == initial_capacity);
     assert(mem_available() == initial_capacity);
 }
@@ -123,6 +155,7 @@ int main(void)
     assert(mem_alloc(0) == 0);
     initial_capacity = mem_capacity();
     assert(initial_capacity == mem_available());
+    invalid_growth_test(initial_capacity);
     basic_test();
     assert(mem_available() == initial_capacity);
     growth_test(initial_capacity);

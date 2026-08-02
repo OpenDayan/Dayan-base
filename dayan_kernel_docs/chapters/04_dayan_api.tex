@@ -1,0 +1,135 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{Dayan API 参考}\label{sec:kernel-030}
+
+本章中的函数由 \code{dayan_sys.h} 声明，是算子 kernel 可直接链接的 Dayan API。
+所有返回 \code{int} 的 resource 接口以 0 表示成功、负值表示失败；公开头文件当前
+没有导出 errno 名称，算子应使用 \code{status < 0} 判断失败，不应依赖具体负数值。
+
+\subsection{协作式让出}
+
+\begin{dayantable}{调度接口}{tab:kernel-030}{X[27,l] X[73,l]}
+  符号 & 语义 \\
+  \code{dayan_yield} & 将当前 proc 重新放到本 hart ready queue 尾部并切回 scheduler；再次被选择后从调用点继续。 \\
+\end{dayantable}
+
+\code{dayan_yield} 不保证其它特定 proc 一定执行，也不是内存屏障或跨核同步原语。
+如果当前 proc 是唯一 ready 的普通任务，仍可能很快再次运行。
+
+\subsection{张量单元等待}
+
+\begin{dayantable}{Produce/Bar 等待接口}{tab:kernel-031}{X[27,l] X[18,l] X[55,l]}
+  符号 & 单元 & 语义 \\
+  \code{dayan_wait_lsu} & LSU & 等待调用前已经发射到 LSU 的异步工作完成。 \\
+  \code{dayan_wait_dma} & LSU/DMA & \code{dayan_wait_lsu} 的兼容别名；DMA 由 LSU 路径实现。 \\
+  \code{dayan_wait_mat} & MAT & 等待调用前已经发射到矩阵执行单元的工作完成。 \\
+  \code{dayan_wait_vec} & VEC & 等待调用前已经发射到向量执行单元的工作完成。 \\
+  \code{dayan_wait_macro} & MACRO & 等待调用前已经发射到宏指令执行单元的工作完成。 \\
+\end{dayantable}
+
+这些函数把 \code{tp} 的当前值直接作为 Produce token 写入硬件队列，然后协作式切出。
+返回表示对应 token 已从全局完成队列取出，不表示其它单元或调用之后发射的工作完成。
+
+\begin{dayancode}
+issue_vec_operations();
+dayan_wait_vec();
+consume_vec_results();
+\end{dayancode}
+
+不得以短循环无界发出 wait：全局 Produce 队列保证容量不少于 32 项，每单元队列保证
+容量不少于 2 项，但超过该上限的软件行为可能阻塞硬件。
+
+\subsection{单核 resource}
+
+\code{dayan_resource_t} 只允许同一 hart 上的 proc 共享。其操作不使用原子指令；
+Runtime 利用非抢占执行和对象内嵌的事件链表完成等待与唤醒。
+
+\begin{dayantable}{单核 resource 接口}{tab:kernel-032}{X[34,l] X[66,l]}
+  符号 & 语义 \\
+  \code{dayan_resource_init} & 初始化为 FREE，计数清零并初始化三条等待链表。对象首次使用前调用一次。 \\
+  \code{dayan_resource_alloc} & 仅在 FREE 时设置 producer/consumer 数量；consumer 必须非零，producer 可以为零。 \\
+  \code{dayan_resource_produce} & 在 BUSY 状态减少 producer 数量；最后一个 producer 把状态改为 READY 并唤醒全部 ready waiter。 \\
+  \code{dayan_resource_consume} & 在 READY 状态减少 consumer 数量；最后一个 consumer 把状态改为 FREE 并唤醒全部 free waiter。 \\
+  \code{dayan_resource_wait_ready} & 状态不是 READY 时，把当前 proc 挂入该对象的 ready 等待链表；可能多次睡眠和复查。 \\
+  \code{dayan_resource_wait_free} & 状态不是 FREE 时，把当前 proc 挂入该对象的 free 等待链表；可能多次睡眠和复查。 \\
+\end{dayantable}
+
+对象可以位于当前 hart 的 proc 栈或私有堆。初始化后，只要可能存在等待者，就不得复制、
+移动、释放或再次初始化对象；其 \code{list_head} 字段保存的是实际 proc 节点链接。
+字段公开是为了固定 C ABI，不表示算子可以直接修改状态、计数、锁或链表。
+
+一个典型使用模式如下：
+
+\begin{dayancode}
+int prepare_resource(dayan_resource_t *resource)
+{
+    int status = dayan_resource_init(resource);
+    if (status < 0)
+        return status;
+    return dayan_resource_alloc(resource, 2, 1);
+}
+
+void producer_done(dayan_resource_t *resource)
+{
+    if (dayan_resource_produce(resource) < 0)
+        return;
+}
+
+void consumer(dayan_resource_t *resource)
+{
+    if (dayan_resource_wait_ready(resource) == 0)
+        (void)dayan_resource_consume(resource);
+}
+\end{dayancode}
+
+\subsection{跨核 shared resource}
+
+\code{dayan_shared_resource_t} 用于多个 hart 通过 coherent window 共享状态。对象必须
+放在当前 proc 的 \code{shared} allocation 中，并由一个明确的初始化者在发布指针前
+完成初始化。
+
+\begin{dayantable}{跨核 resource 接口}{tab:kernel-033}{X[38,l] X[62,l]}
+  符号 & 语义 \\
+  \code{dayan_shared_resource_init} & 校验对象位于 \code{0x00400000--0x007fffff} 且不低于当前 \code{shared}，原子初始化为 FREE。 \\
+  \code{dayan_shared_resource_alloc} & 在原子锁内由 FREE 建立 producer/consumer 计数。 \\
+  \code{dayan_shared_resource_produce} & 在原子锁内减少 producer 计数，最后一次操作以 release 语义发布 READY。 \\
+  \code{dayan_shared_resource_consume} & 在原子锁内减少 consumer 计数，最后一次操作以 release 语义发布 FREE。 \\
+  \code{dayan_shared_resource_wait_ready} & 以 acquire load 检查 READY；未满足时进入 Runtime poll wait。 \\
+  \code{dayan_shared_resource_wait_free} & 以 acquire load 检查 FREE；未满足时进入 Runtime poll wait。 \\
+\end{dayantable}
+
+\begin{dayancode}
+struct shared_layout {
+    dayan_shared_resource_t resource;
+    uint32_t payload[64];
+};
+
+struct shared_layout *layout = (struct shared_layout *)shared;
+
+/* Exactly one participant, before publishing the object: */
+int status = dayan_shared_resource_init(&layout->resource);
+\end{dayancode}
+
+初始化函数只能验证硬件窗口边界，无法知道 Host 给当前 proc 分配的精确长度。Host
+必须保证整个对象位于 allocation 内，并保证多个参与 hart 看到的是同一个 coherent
+物理对象。
+
+shared resource 不内嵌 proc 等待链表，因为普通 NPU 缓存中的 proc 指针属于单个
+Runtime 实例，不能作为跨核一致性对象的一部分。等待使用 scheduler poll，状态变化
+不需要也不能从另一个 hart 直接操作本核 ready queue。
+
+\subsection{错误与所有权规则}
+
+\begin{itemize}
+  \item 空指针、consumer 数量为 0 或 shared 地址非法会失败；
+  \item 在错误状态调用 alloc/produce/consume 会失败，不会自动修复状态机；
+  \item resource 函数不会输出错误信息，也不会终止 proc；
+  \item 同一个 \code{dayan_resource_t} 不得跨 hart 使用；
+  \item 同一个 \code{dayan_shared_resource_t} 不得由多个 hart 并发初始化；
+  \item Host 回收 shared allocation 前，必须确保所有使用该对象的 proc 已结束且没有
+        hart 仍在轮询。
+\end{itemize}
+
+\end{document}
