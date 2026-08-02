@@ -2,119 +2,84 @@
 
 \begin{document}
 
-\section{精简 C 库参考}\label{sec:kernel-040}
+\section{标准库}\label{sec:kernel-040}
 
-Dayan libc 使用常见标准头文件名，但实现目标是裸机算子所需的最小子集。未在本章和
-\code{dayan-api.symbols} 中出现的标准函数均不可用。
+Dayan 提供一组 freestanding C 头文件。它们使用标准名称，但只实现本章列出的接口；
+没有文件系统、输入流、时间、locale 或完整 libm。
 
-\subsection{标准输出与格式化}
+\subsection{输出与格式化}
 
-\begin{dayantable}{\code{stdio.h} 导出函数}{tab:kernel-040}{X[22,l] X[78,l]}
+\begin{dayantable}{\code{stdio.h}}{tab:kernel-040}{X[24,l] X[76,l]}
   符号 & 行为 \\
-  \code{putchar} & 向当前 proc 的输出缓冲追加一个字节；成功返回该 unsigned char 值，失败返回 \code{EOF}。 \\
-  \code{puts} & 向当前 proc 的输出缓冲追加字符串和换行；成功返回 0，失败返回 \code{EOF}。 \\
-  \code{fflush} & 刷新 \code{stdout} 或空 stream；不支持的 stream 返回 \code{EOF}。 \\
-  \code{printf} & 格式化到当前 proc 的输出缓冲；缓冲填满时自动 RPC flush，返回字符数或 -1。 \\
-  \code{vprintf} & 接收 \code{va_list} 的 \code{printf} 版本。 \\
-  \code{snprintf} & 只写本地内存，不发 RPC；遵循 size 限制并返回未截断时所需字符数。 \\
-  \code{vsnprintf} & 接收 \code{va_list} 的 \code{snprintf} 版本。 \\
+  \code{putchar} & 向当前 proc 输出缓冲追加一个字节；失败返回 \code{EOF}。 \\
+  \code{puts} & 追加字符串和换行；失败返回 \code{EOF}。 \\
+  \code{fflush} & 刷新 \code{stdout} 或空 stream；其它 stream 返回 \code{EOF}。 \\
+  \code{printf} & 写入 proc 输出缓冲，缓冲满时通过 RPC 发送。 \\
+  \code{vprintf} & 接收 \code{va_list} 的 printf。 \\
+  \code{snprintf} & 写本地内存，遵循 size 限制并返回完整输出所需长度。 \\
+  \code{vsnprintf} & 接收 \code{va_list} 的 snprintf。 \\
 \end{dayantable}
 
-当前格式化器支持：
+格式化支持 \code{\%\%}、\code{\%c}、\code{\%s}、有符号/无符号十进制、十六进制
+和指针；支持 \code{-}/\code{0} flag、十进制宽度以及 \code{l}/\code{ll}/\code{z}
+length。不支持浮点、precision、八进制或 \code{\%n}。
 
-\begin{itemize}
-  \item conversion：\code{\%\%}、\code{\%c}、\code{\%s}、\code{\%d}、
-        \code{\%i}、\code{\%u}、\code{\%x}、\code{\%X}、\code{\%p}；
-  \item flag：左对齐 \code{-} 和数字零填充 \code{0}；
-  \item 十进制 field width；
-  \item length：\code{l}、\code{ll} 和 \code{z}。
-\end{itemize}
+输出缓冲由 proc 创建者提供。容量为 0 时，流式输出失败；\code{snprintf} 不受此限制。
+proc 退出会尝试刷新，但无法向 kernel 返回失败。需要确认输出送达时，在返回前检查
+\code{fflush(stdout)}。
 
-不支持 precision、\code{\#}/\code{+}/space flag、八进制、浮点 conversion 或
-\code{\%n}。未知 conversion 会按百分号加原字符输出。
+\subsection{私有堆}
 
-每个 proc 的输出缓冲由创建者传给 Runtime，并由创建者保持其生命周期。容量为 0
-表示该 proc 不支持流式输出，此时 \code{printf}/\code{puts}/\code{putchar} 失败。
-缓冲写满时自动调用 RPC；否则内容会一直保留到 \code{fflush(stdout)} 或
-\code{fflush(NULL)}。当前 \code{FILE} 是不透明占位类型，只定义一个
-\code{stdout} sentinel，没有可创建的文件对象、\code{stderr} 或输入流。
-
-proc 退出时会尝试一次 best-effort flush，但退出路径无法把失败返回给算子。若要求尾部
-输出一定到达 Host，必须在返回前调用 \code{fflush} 刷新 \code{stdout} 并确认成功。
-所有流式输出函数必须在普通 proc 上调用；
-\code{snprintf} 和 \code{vsnprintf} 只访问本地内存，不受 proc 输出缓冲限制。
-
-\subsection{私有堆分配}
-
-\begin{dayantable}{\code{stdlib.h} 导出函数}{tab:kernel-041}{X[22,l] X[78,l]}
+\begin{dayantable}{\code{stdlib.h}}{tab:kernel-041}{X[24,l] X[76,l]}
   符号 & 行为 \\
-  \code{malloc} & 从当前 hart 私有堆分配至少 16-byte 对齐的块；size 为 0 或失败时返回空指针。 \\
-  \code{calloc} & 检查乘法溢出，成功后把请求范围清零。 \\
-  \code{realloc} & 空 ptr 等价于 malloc；size 为 0 时释放并返回空；扩展时分配、复制、释放，当前不会原地扩大或主动缩小。 \\
-  \code{free} & 释放当前 hart 私有堆块；空指针无操作。 \\
-  \code{abort} & 停止当前 hart 的整个 Runtime，不返回。 \\
-  \code{exit} & 忽略 status 并停止当前 hart 的整个 Runtime，不返回。 \\
+  \code{malloc} & 从当前 hart 私有堆分配至少 16-byte 对齐的块；size 为 0 或失败时返回空。 \\
+  \code{calloc} & 检查乘法溢出，并把分配范围清零。 \\
+  \code{realloc} & 支持空 ptr 和 size 为 0；扩展时分配、复制、释放，不原地扩大。 \\
+  \code{free} & 释放当前 hart 的私有堆块；空指针无操作。 \\
+  \code{abort} & 停止当前 hart 的 Dayan OS，不返回。 \\
+  \code{exit} & 忽略 status，停止当前 hart 的 Dayan OS，不返回。 \\
 \end{dayantable}
 
-\begin{dayannote}
-算子 entry 正常返回时，Runtime 只结束对应 proc；调用 \code{exit} 或 \code{abort}
-则会让整个 hart 进入 halt。算子通常应通过返回结束，不应把标准 C 的进程退出语义套用
-到这两个函数。
-\end{dayannote}
-
-传给 \code{free}/\code{realloc} 的地址必须来自同一 hart 的 Dayan allocator。
-跨 hart 释放、释放 shared allocation、重复释放或传入对象内部地址不受支持。当前实现
-会忽略一部分可检测的非法 \code{free}，但算子不能依赖这种容错行为。
+地址必须来自同一 hart 的 allocator。不能跨 hart 释放，也不能把 coherent allocation
+交给 \code{free}/\code{realloc}。kernel 正常返回只结束当前 proc；通常不应调用
+\code{exit} 或 \code{abort}。
 
 \subsection{内存与字符串}
 
-\begin{dayantable}{\code{string.h} 导出函数}{tab:kernel-042}{X[22,l] X[78,l]}
+\begin{dayantable}{\code{string.h}}{tab:kernel-042}{X[25,l] X[75,l]}
   符号 & 行为 \\
-  \code{memcpy} & 复制不重叠的 size 个字节并返回 dst。 \\
-  \code{memmove} & 允许源和目的区间重叠的字节复制。 \\
-  \code{memset} & 用 value 的低 8 位填充 size 个字节。 \\
-  \code{memcmp} & 按 unsigned byte 比较，返回首个不同字节之差或 0。 \\
-  \code{strlen} & 返回 NUL 之前的字符数。 \\
-  \code{strnlen} & 最多检查 maxlen 个字节。 \\
-  \code{strcpy} & 包含终止 NUL 地复制字符串；调用者保证容量。 \\
-  \code{strncpy} & 最多复制 size 字节，不足时补 NUL；源过长时结果可能没有终止 NUL。 \\
-  \code{strcmp} & 按 unsigned char 比较两个 NUL 结尾字符串。 \\
-  \code{strncmp} & 最多比较 size 个字符。 \\
-  \code{strchr} & 返回字符第一次出现的位置，也可以查找终止 NUL。 \\
-  \code{strrchr} & 返回字符最后一次出现的位置，也可以查找终止 NUL。 \\
+  \code{memcpy} & 复制不重叠的字节区间。 \\
+  \code{memmove} & 复制可重叠的字节区间。 \\
+  \code{memset} & 用 value 的低 8 位填充。 \\
+  \code{memcmp} & 按 unsigned byte 比较。 \\
+  \code{strlen}、\code{strnlen} & 计算字符串长度；后者限制最大检查长度。 \\
+  \code{strcpy}、\code{strncpy} & 复制字符串；源过长时 strncpy 可能不写终止 NUL。 \\
+  \code{strcmp}、\code{strncmp} & 比较 NUL 结尾字符串。 \\
+  \code{strchr}、\code{strrchr} & 查找字符第一次或最后一次出现的位置。 \\
 \end{dayantable}
 
-这些函数是简单的标量实现，没有针对宽向量、cache line 或 DMA 做特化，也不隐含任何
-跨核 acquire/release 语义。对 coherent 数据的发布仍应使用 shared resource 或明确的
-原子协议。
+这些函数是标量实现，不提供 DMA 优化或跨核内存顺序。
 
 \subsection{单精度数学}
 
-\begin{dayantable}{\code{math.h} 导出函数}{tab:kernel-043}{X[22,l] X[78,l]}
+\begin{dayantable}{\code{math.h}}{tab:kernel-043}{X[24,l] X[76,l]}
   符号 & 行为 \\
-  \code{fabsf} & 清除单精度符号位。 \\
-  \code{copysignf} & 将 sign 的符号位复制到 value。 \\
-  \code{fminf} & 返回较小值，按 C 语义处理单个 NaN 和有符号零。 \\
-  \code{fmaxf} & 返回较大值，按 C 语义处理单个 NaN 和有符号零。 \\
-  \code{sqrtf} & 使用编译器生成的单精度平方根实现。 \\
-  \code{rsqrtf} & 倒平方根近似；初始位级估计后执行三轮 Newton 迭代。 \\
-  \code{expf} & 单精度 range reduction 与多项式近似，处理 NaN、上溢和下溢。 \\
-  \code{logf} & 单精度 range reduction 与级数近似，处理零、负数、NaN 和无穷。 \\
+  \code{fabsf} & 清除符号位。 \\
+  \code{copysignf} & 复制符号位。 \\
+  \code{fminf}、\code{fmaxf} & 按 C 语义处理单个 NaN 和有符号零。 \\
+  \code{sqrtf} & 使用 RISC-V 单精度平方根指令。 \\
+  \code{rsqrtf} & 位级初值加三轮 Newton 迭代的倒平方根近似。 \\
+  \code{expf} & 单精度 range reduction 与多项式近似。 \\
+  \code{logf} & 单精度 range reduction 与级数近似。 \\
 \end{dayantable}
 
-头文件另提供 \code{INFINITY}、\code{NAN}、\code{HUGE_VALF}，以及编译器内建的
-\code{isnan}、\code{isinf}、\code{isfinite}、\code{signbit} 宏。当前没有 double
-版本，也不承诺与高精度 libm 完全相同的误差界；对数值误差敏感的算子应针对目标输入
-范围自行验证。
+头文件还定义 \code{INFINITY}、\code{NAN}、\code{HUGE_VALF} 和浮点分类宏。没有
+double 版本；\code{rsqrtf}/\code{expf}/\code{logf} 不保证通用正确舍入。
 
-\subsection{基础类型头文件}
+\subsection{基础头文件}
 
-\code{stdint.h} 提供定宽整数、\code{intptr_t}/\code{uintptr_t} 和对应边界宏；
-\code{stddef.h} 提供 \code{size_t}、\code{ptrdiff_t}、\code{wchar_t}、
-\code{max_align_t}、\code{NULL} 与 \code{offsetof}；\code{limits.h} 提供基础整数
-边界；\code{stdarg.h} 与 \code{stdbool.h} 分别封装编译器可变参数和布尔类型。
-
-这些头文件只覆盖当前 Runtime 所需内容。例如 \code{stdint.h} 没有完整的
-\code{INTN_C}/\code{PRI*} 宏族，\code{stdlib.h} 也没有文本转换、排序或随机数接口。
+\code{stdint.h}、\code{stddef.h} 和 \code{limits.h} 提供当前 ABI 所需的类型与边界；
+\code{stdarg.h} 和 \code{stdbool.h} 封装编译器的可变参数与布尔类型。它们不是完整的
+Hosted C 标准头，例如没有 \code{PRI*} 宏族。
 
 \end{document}

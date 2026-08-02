@@ -1,66 +1,48 @@
-#ifndef DAYAN_HOST_KERNEL_H
-#define DAYAN_HOST_KERNEL_H
+#ifndef NPU_HOST_COMPILED_KERNEL_H
+#define NPU_HOST_COMPILED_KERNEL_H
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "npu_package.h"
+#include "npu_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DAYAN_KERNEL_LAUNCH_ATTRS_VERSION 1U
-#define DAYAN_KERNEL_LAUNCH_ASYNC         (1U << 0)
-#define DAYAN_KERNEL_MAX_ARGS             8U
+#define NPU_KERNEL_LAUNCH_ATTRS_VERSION 2U
+#define NPU_KERNEL_LAUNCH_ASYNC         (1U << 0)
 
-typedef struct npu_runtime npu_runtime_t;
-typedef struct npu_launch npu_launch_t;
-typedef struct dayan_kernel_descriptor dayan_kernel_descriptor_t;
+typedef struct npu_kernel_descriptor npu_kernel_descriptor_t;
 
-/*
- * launch_count is the Dayan launch scale.  Invocation i is submitted to
- * (first_hart + i) modulo the runtime hart count.  A synchronous call waits
- * for and releases every invocation.  An asynchronous call returns ownership
- * of every npu_launch_t through async_launches.
- */
-typedef struct dayan_kernel_launch_attrs {
+typedef struct npu_kernel_launch_attrs {
     uint32_t version;
     uint32_t flags;
-    npu_runtime_t *runtime;
-    uint32_t first_hart;
-    uint32_t launch_count;
+    npu_context_t *context;
+    npu_stream_t *stream;
+    NPULaunchConfig config;
     uint32_t timeout_ms;
     uint32_t reserved;
-    uint64_t stack_size;
-    uint64_t shared_size;
-    uint64_t printf_buffer_size;
     uint64_t cookie;
-    npu_launch_t **async_launches;
-    size_t async_launch_capacity;
-    size_t *async_launch_count;
-} dayan_kernel_launch_attrs_t;
+    npu_event_t **event_out;
+} npu_kernel_launch_attrs_t;
 
-void dayan_kernel_launch_attrs_init(dayan_kernel_launch_attrs_t *attrs,
-                                    npu_runtime_t *runtime);
+void npu_kernel_launch_attrs_init(npu_kernel_launch_attrs_t *attrs,
+                                  npu_context_t *context,
+                                  npu_stream_t *stream);
 
-/* Register the public-symbol ELF used to resolve Device object relocations. */
-int dayan_runtime_set_api_elf(npu_runtime_t *runtime,
-                              const void *elf_image, size_t elf_size);
-int dayan_runtime_set_api_elf_file(npu_runtime_t *runtime, const char *path);
+/* Entry points used by dycc-generated Host wrappers. */
+int npu_kernel_descriptor_create(
+    const void *object, size_t object_size, const char *entry_symbol,
+    const npu_package_argument_t *arguments, size_t argument_count,
+    npu_kernel_descriptor_t **descriptor_out);
+void npu_kernel_descriptor_destroy(npu_kernel_descriptor_t *descriptor);
+int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
+                                 const npu_kernel_arg_t *args, size_t argc,
+                                 const npu_kernel_launch_attrs_t *attrs);
 
-/*
- * These entry points are used by dycc-generated wrappers.  The descriptor
- * references (rather than copies) object, so that storage must outlive the
- * descriptor.  dycc satisfies this with its embedded const array.
- */
-int dayan_kernel_descriptor_create(const void *object, size_t object_size,
-                                   const char *entry_symbol,
-                                   dayan_kernel_descriptor_t **descriptor_out);
-void dayan_kernel_descriptor_destroy(dayan_kernel_descriptor_t *descriptor);
-int dayan_kernel_launch(dayan_kernel_descriptor_t *descriptor,
-                        const uint64_t *args, size_t argc,
-                        const dayan_kernel_launch_attrs_t *attrs);
-
-static inline uint64_t dayan_kernel_pack_f32(float value)
+static inline uint64_t npu_kernel_pack_f32(float value)
 {
     uint32_t bits;
 
@@ -68,7 +50,7 @@ static inline uint64_t dayan_kernel_pack_f32(float value)
     return (uint64_t)bits;
 }
 
-static inline uint64_t dayan_kernel_pack_f64(double value)
+static inline uint64_t npu_kernel_pack_f64(double value)
 {
     uint64_t bits;
 

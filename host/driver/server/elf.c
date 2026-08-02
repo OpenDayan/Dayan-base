@@ -1,0 +1,327 @@
+#include "service_internal.h"
+
+#include <elf.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define ELF_ZERO_CHUNK   (64U * 1024U)
+#define IRQ_ENABLE_OFFSET 0x04U
+
+struct load_segment {
+    uint64_t address;
+    uint64_t file_offset;
+    uint64_t file_size;
+    uint64_t memory_size;
+    uint32_t flags;
+};
+
+static int segment_compare(const void *left, const void *right)
+{
+    const struct load_segment *a = left;
+    const struct load_segment *b = right;
+
+    return a->address < b->address ? -1 : a->address != b->address;
+}
+
+static int parse_segments(npu_service_device_t *device, npu_hal_core_t viewer,
+                          const unsigned char *image, size_t size,
+                          struct load_segment **segments_out,
+                          size_t *count_out, uint64_t *entry_out)
+{
+    Elf64_Ehdr header;
+    struct load_segment *segments;
+    size_t count = 0;
+    size_t index;
+    int entry_executable = 0;
+
+    if (size < sizeof(header))
+        return -ENOEXEC;
+    memcpy(&header, image, sizeof(header));
+    if (memcmp(header.e_ident, ELFMAG, SELFMAG) != 0 ||
+        header.e_ident[EI_CLASS] != ELFCLASS64 ||
+        header.e_ident[EI_DATA] != ELFDATA2LSB ||
+        header.e_ident[EI_VERSION] != EV_CURRENT ||
+        header.e_type != ET_EXEC || header.e_machine != EM_RISCV ||
+        header.e_version != EV_CURRENT || header.e_ehsize != sizeof(header) ||
+        header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum ||
+        header.e_phnum == PN_XNUM || header.e_phoff > size ||
+        header.e_phnum > (size - header.e_phoff) / sizeof(Elf64_Phdr))
+        return -ENOEXEC;
+    segments = calloc(header.e_phnum, sizeof(*segments));
+    if (!segments)
+        return -ENOMEM;
+    for (index = 0; index < header.e_phnum; ++index) {
+        Elf64_Phdr program;
+        uint64_t alignment;
+
+        memcpy(&program,
+               image + header.e_phoff + index * sizeof(program),
+               sizeof(program));
+        if (program.p_type != PT_LOAD)
+            continue;
+        alignment = program.p_align;
+        if (!program.p_memsz || program.p_filesz > program.p_memsz ||
+            program.p_offset > size ||
+            program.p_filesz > size - program.p_offset ||
+            program.p_vaddr != program.p_paddr ||
+            !npu_hal_address_valid(device->hal, viewer, program.p_paddr,
+                                   program.p_memsz) ||
+            (alignment > 1U &&
+             ((alignment & (alignment - 1U)) ||
+              (program.p_paddr & (alignment - 1U)) !=
+                  (program.p_offset & (alignment - 1U))))) {
+            free(segments);
+            return -ENOEXEC;
+        }
+        segments[count].address = program.p_paddr;
+        segments[count].file_offset = program.p_offset;
+        segments[count].file_size = program.p_filesz;
+        segments[count].memory_size = program.p_memsz;
+        segments[count].flags = program.p_flags;
+        if ((program.p_flags & PF_X) && header.e_entry >= program.p_paddr &&
+            header.e_entry < program.p_paddr + program.p_memsz)
+            entry_executable = 1;
+        ++count;
+    }
+    if (!count || !entry_executable ||
+        (header.e_entry & ~RPC_COMMAND_ARG_MASK)) {
+        free(segments);
+        return -ENOEXEC;
+    }
+    qsort(segments, count, sizeof(*segments), segment_compare);
+    for (index = 1; index < count; ++index) {
+        if (segments[index].address <
+            segments[index - 1].address +
+                segments[index - 1].memory_size) {
+            free(segments);
+            return -ENOEXEC;
+        }
+    }
+    *segments_out = segments;
+    *count_out = count;
+    *entry_out = header.e_entry;
+    return 0;
+}
+
+static int region_contains(const npu_hal_memory_region_t *region,
+                           uint64_t address, uint64_t size)
+{
+    return size <= region->size && address >= region->base &&
+           address - region->base <= region->size - size;
+}
+
+static struct npu_service_firmware_allocation *find_global_segment(
+    npu_service_device_t *device, uint64_t address, uint64_t size)
+{
+    struct npu_service_firmware_allocation *item;
+
+    for (item = device->firmware_allocations; item; item = item->next) {
+        if (item->scope == NPU_HAL_MEMORY_DEVICE &&
+            item->address == address && item->size == size)
+            return item;
+    }
+    return 0;
+}
+
+static int reserve_segment(npu_service_device_t *device, uint32_t cluster,
+                           const struct load_segment *segment)
+{
+    npu_hal_memory_request_t request;
+    npu_hal_allocation_t *allocation;
+    struct npu_service_firmware_allocation *tracking;
+    npu_hal_memory_region_t region;
+    uint32_t pass;
+    uint32_t index;
+    int status = -ENOMEM;
+
+    npu_hal_memory_request_init(&request);
+    request.memory_class = NPU_HAL_MEMORY_NORMAL;
+    request.usage = NPU_HAL_MEMORY_FIRMWARE;
+    request.owner = UINT32_MAX;
+    request.size = segment->memory_size;
+    request.alignment = 1;
+    request.fixed_address = segment->address;
+    for (pass = 0; pass < 2; ++pass) {
+        uint32_t wanted_scope = pass == 0 ? NPU_HAL_MEMORY_CLUSTER :
+                                            NPU_HAL_MEMORY_DEVICE;
+
+        for (index = 0; index < device->hal_info.memory_region_count;
+             ++index) {
+            status = npu_hal_get_memory_region(device->hal, index, &region);
+            if (status < 0)
+                return status;
+            if (region.memory_class != NPU_HAL_MEMORY_NORMAL ||
+                region.scope != wanted_scope ||
+                (wanted_scope == NPU_HAL_MEMORY_CLUSTER &&
+                 region.cluster != cluster) ||
+                !region_contains(&region, segment->address,
+                                 segment->memory_size))
+                continue;
+            if (wanted_scope == NPU_HAL_MEMORY_DEVICE &&
+                find_global_segment(device, segment->address,
+                                    segment->memory_size))
+                return 0;
+            request.scope = wanted_scope;
+            request.location.cluster =
+                wanted_scope == NPU_HAL_MEMORY_DEVICE ?
+                    NPU_HAL_ANY_CLUSTER : cluster;
+            request.location.core = NPU_HAL_ANY_CORE;
+            status = npu_hal_memory_reserve(device->hal, &request,
+                                            &allocation);
+            if (status < 0)
+                return status;
+            tracking = calloc(1, sizeof(*tracking));
+            if (!tracking) {
+                (void)npu_hal_memory_free(device->hal, allocation);
+                return -ENOMEM;
+            }
+            tracking->allocation = allocation;
+            tracking->scope = wanted_scope;
+            tracking->cluster = wanted_scope == NPU_HAL_MEMORY_DEVICE ?
+                NPU_HAL_ANY_CLUSTER : cluster;
+            tracking->address = segment->address;
+            tracking->size = segment->memory_size;
+            tracking->next = device->firmware_allocations;
+            device->firmware_allocations = tracking;
+            return 0;
+        }
+    }
+    return status;
+}
+
+static void rollback_reservations(
+    npu_service_device_t *device,
+    struct npu_service_firmware_allocation *previous_head)
+{
+    while (device->firmware_allocations != previous_head) {
+        struct npu_service_firmware_allocation *item =
+            device->firmware_allocations;
+
+        device->firmware_allocations = item->next;
+        (void)npu_hal_memory_free(device->hal, item->allocation);
+        free(item);
+    }
+}
+
+static int load_segments(npu_service_device_t *device, uint32_t cluster,
+                         const unsigned char *image,
+                         const struct load_segment *segments, size_t count)
+{
+    unsigned char *zeros = calloc(1, ELF_ZERO_CHUNK);
+    size_t index;
+    int status = 0;
+
+    if (!zeros)
+        return -ENOMEM;
+    for (index = 0; index < count && status == 0; ++index) {
+        uint64_t zeroed = segments[index].file_size;
+
+        if (segments[index].file_size)
+            status = npu_hal_copy_to_address(
+                device->hal, cluster, segments[index].address,
+                image + segments[index].file_offset,
+                (size_t)segments[index].file_size);
+        while (status == 0 && zeroed < segments[index].memory_size) {
+            uint64_t left = segments[index].memory_size - zeroed;
+            size_t chunk = left < ELF_ZERO_CHUNK ? (size_t)left :
+                                                   ELF_ZERO_CHUNK;
+
+            status = npu_hal_copy_to_address(
+                device->hal, cluster, segments[index].address + zeroed,
+                zeros, chunk);
+            zeroed += chunk;
+        }
+    }
+    free(zeros);
+    return status;
+}
+
+static int wait_runtime_ready(npu_service_device_t *device, uint32_t cluster,
+                              uint32_t core_mask)
+{
+    uint64_t deadline = npu_now_ms() + device->options.default_timeout_ms;
+
+    for (;;) {
+        uint32_t enabled = 0;
+        int status = npu_hal_register_read(device->hal, cluster,
+                                           IRQ_ENABLE_OFFSET, &enabled,
+                                           sizeof(enabled));
+
+        if (status < 0)
+            return status;
+        if ((enabled & core_mask) == core_mask)
+            return 0;
+        if (npu_now_ms() >= deadline)
+            return -ETIMEDOUT;
+        npu_delay_us(device->options.rpc_poll_interval_us);
+    }
+}
+
+int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
+                             const void *image_data, size_t size,
+                             uint32_t core_mask)
+{
+    const unsigned char *image = image_data;
+    struct npu_service_firmware_allocation *previous_head;
+    struct load_segment *segments = 0;
+    npu_hal_core_t viewer = { cluster, 0 };
+    size_t segment_count = 0;
+    uint64_t entry = 0;
+    uint32_t valid_mask;
+    uint32_t core;
+    int status;
+
+    if (!device || !image || cluster >= device->hal_info.cluster_count)
+        return -EINVAL;
+    valid_mask = device->hal_info.cores_per_cluster == 32U ? UINT32_MAX :
+        (UINT32_C(1) << device->hal_info.cores_per_cluster) - 1U;
+    if (!core_mask || (core_mask & ~valid_mask))
+        return -EINVAL;
+    pthread_mutex_lock(&device->mutex);
+    if (device->clusters[cluster].firmware_loaded ||
+        device->clusters[cluster].booted_cores) {
+        pthread_mutex_unlock(&device->mutex);
+        return -EBUSY;
+    }
+    pthread_mutex_unlock(&device->mutex);
+    status = parse_segments(device, viewer, image, size, &segments,
+                            &segment_count, &entry);
+    if (status < 0)
+        return status;
+    previous_head = device->firmware_allocations;
+    for (core = 0; core < segment_count; ++core) {
+        status = reserve_segment(device, cluster, &segments[core]);
+        if (status < 0) {
+            rollback_reservations(device, previous_head);
+            goto out;
+        }
+    }
+    status = load_segments(device, cluster, image, segments, segment_count);
+    if (status < 0) {
+        rollback_reservations(device, previous_head);
+        goto out;
+    }
+    for (core = 0; core < device->hal_info.cores_per_cluster; ++core) {
+        npu_hal_core_t target = { cluster, core };
+
+        if (!(core_mask & (UINT32_C(1) << core)))
+            continue;
+        status = npu_hal_boot_core(device->hal, target, entry,
+                                   device->options.default_timeout_ms);
+        if (status < 0)
+            goto out;
+    }
+    status = wait_runtime_ready(device, cluster, core_mask);
+    if (status < 0)
+        goto out;
+    pthread_mutex_lock(&device->mutex);
+    device->clusters[cluster].firmware_entry = entry;
+    device->clusters[cluster].booted_cores = core_mask;
+    device->clusters[cluster].firmware_loaded = 1;
+    pthread_mutex_unlock(&device->mutex);
+
+out:
+    free(segments);
+    return status;
+}

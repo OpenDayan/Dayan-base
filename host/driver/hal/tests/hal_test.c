@@ -1,0 +1,189 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "hal.h"
+#include "platform_regs.h"
+#include "rpc.h"
+
+static void create_endpoint(const char *directory, uint32_t index)
+{
+    static const char *suffixes[] = { "h2c_0", "c2h_0", "user" };
+    size_t suffix;
+
+    for (suffix = 0; suffix < sizeof(suffixes) / sizeof(suffixes[0]);
+         ++suffix) {
+        char path[512];
+        int fd;
+
+        assert(snprintf(path, sizeof(path), "%s/xdma%u_%s", directory,
+                        index, suffixes[suffix]) > 0);
+        fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+        assert(fd >= 0);
+        assert(ftruncate(fd, 0x40000) == 0);
+        close(fd);
+    }
+}
+
+static int endpoint_fd(const char *directory, uint32_t index,
+                       const char *suffix, int flags)
+{
+    char path[512];
+
+    assert(snprintf(path, sizeof(path), "%s/xdma%u_%s", directory, index,
+                    suffix) > 0);
+    return open(path, flags);
+}
+
+int main(void)
+{
+    static const npu_hal_memory_region_t regions[] = {
+        { 0x1000, 0x8000, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_DEVICE,
+          NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
+        { 0x10000, 0x4000, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_CLUSTER,
+          0, NPU_HAL_ANY_CORE },
+        { 0x10000, 0x4000, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_CLUSTER,
+          1, NPU_HAL_ANY_CORE },
+        { 0x20000, 0x4000, NPU_HAL_MEMORY_COHERENT,
+          NPU_HAL_MEMORY_DEVICE, NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
+    };
+    static const npu_hal_memory_region_t overlapping_regions[] = {
+        { 0x1000, 0x2000, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_DEVICE,
+          NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
+        { 0x1800, 0x1000, NPU_HAL_MEMORY_COHERENT,
+          NPU_HAL_MEMORY_CLUSTER, 1, NPU_HAL_ANY_CORE },
+    };
+    char directory[] = "/tmp/dayan-hal-test-XXXXXX";
+    npu_hal_allocation_t *global = 0;
+    npu_hal_allocation_t *local0 = 0;
+    npu_hal_allocation_t *local1 = 0;
+    npu_hal_memory_request_t request;
+    npu_hal_data_export_t exported;
+    int handles[NPU_HAL_DATA_MAX_HANDLES];
+    npu_hal_data_token_t token;
+    npu_hal_options_t options;
+    npu_hal_data_client_t *client = 0;
+    npu_hal_info_t info;
+    npu_hal_t *hal = 0;
+    npu_hal_core_t core0 = { 0, 0 };
+    npu_hal_core_t core1 = { 1, 3 };
+    uint64_t address0;
+    uint64_t address1;
+    uint64_t value = UINT64_C(0x1122334455667788);
+    uint64_t observed = 0;
+    uint64_t command;
+    uint32_t pending = 0;
+    int fd;
+
+    assert(mkdtemp(directory));
+    create_endpoint(directory, 0);
+    create_endpoint(directory, 2);
+    npu_hal_options_init(&options);
+    options.device_prefix = directory;
+    options.cluster_count = 2;
+    options.cores_per_cluster = 4;
+    options.cluster_device_stride = 2;
+    options.memory_regions = regions;
+    options.memory_region_count = sizeof(regions) / sizeof(regions[0]);
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_get_info(hal, &info) == 0);
+    assert(info.cluster_count == 2 && info.cores_per_cluster == 4);
+    assert(info.data_provider == NPU_HAL_DATA_PROVIDER_FD_OFFSET);
+    assert(info.data_handle_count == 4 && info.transfer_alignment == 1);
+
+    assert(npu_hal_copy_to_address(hal, 1, 0x1230, &value,
+                                   sizeof(value)) == 0);
+    fd = endpoint_fd(directory, 2, "h2c_0", O_RDONLY);
+    assert(fd >= 0);
+    assert(pread(fd, &observed, sizeof(observed), 0x1230) ==
+           (ssize_t)sizeof(observed));
+    close(fd);
+    assert(observed == value);
+
+    command = rpc_command_pack(RPC_ICACHE_FLUSH,
+                               UINT64_C(0x123456789abc));
+    assert(npu_hal_command_submit(hal, core1, command) == 0);
+    fd = endpoint_fd(directory, 2, "h2c_0", O_RDONLY);
+    assert(fd >= 0);
+    observed = 0;
+    assert(pread(fd, &observed, sizeof(observed),
+                 DAYAN_DEVICE_MAILBOX(core1.core)) ==
+           (ssize_t)sizeof(observed));
+    assert(observed == command);
+    assert(pread(fd, &pending, sizeof(pending),
+                 DAYAN_CLINT_MSIP(core1.core)) ==
+           (ssize_t)sizeof(pending));
+    close(fd);
+    assert(pending == 1U);
+
+    npu_hal_memory_request_init(&request);
+    request.size = 0x100;
+    request.alignment = 0x100;
+    assert(npu_hal_memory_alloc(hal, &request, &global) == 0);
+    assert(npu_hal_memory_address(hal, global, core0, &address0) == 0);
+    assert(npu_hal_memory_address(hal, global, core1, &address1) == 0);
+    assert(address0 == 0x1000 && address1 == address0);
+
+    request.scope = NPU_HAL_MEMORY_CLUSTER;
+    request.location.cluster = 0;
+    request.location.core = NPU_HAL_ANY_CORE;
+    assert(npu_hal_memory_alloc(hal, &request, &local0) == 0);
+    request.location.cluster = 1;
+    assert(npu_hal_memory_alloc(hal, &request, &local1) == 0);
+    assert(npu_hal_memory_address(hal, local0, core0, &address0) == 0);
+    assert(npu_hal_memory_address(hal, local1, core1, &address1) == 0);
+    assert(address0 == 0x10000 && address1 == 0x10000);
+    assert(!npu_hal_memory_visible(hal, local0, core1));
+
+    assert(npu_hal_export_data_plane(hal, &exported, handles) == 0);
+    assert(exported.handle_count == 4);
+    assert(npu_hal_data_client_import(&client, &exported, handles,
+                                      exported.handle_count) == 0);
+    assert(npu_hal_prepare_transfer(hal, global, core1, 0, sizeof(value),
+                                    NPU_HAL_DATA_HOST_TO_DEVICE,
+                                    &token) == 0);
+    assert(token.provider == info.data_provider &&
+           token.direction == NPU_HAL_DATA_HOST_TO_DEVICE);
+    value = UINT64_C(0xaabbccddeeff0011);
+    assert(npu_hal_data_client_transfer(client, &token, &value,
+                                        sizeof(value)) == 0);
+    assert(npu_hal_finish_transfer(hal, &token, 0) == 0);
+    fd = endpoint_fd(directory, 2, "h2c_0", O_RDONLY);
+    assert(fd >= 0);
+    observed = 0;
+    assert(pread(fd, &observed, sizeof(observed), 0x1000) ==
+           (ssize_t)sizeof(observed));
+    close(fd);
+    assert(observed == value);
+
+    npu_hal_data_client_close(client);
+    {
+        npu_hal_data_export_t unsupported = exported;
+        npu_hal_data_client_t *unexpected = 0;
+
+        unsupported.provider = UINT32_MAX;
+        assert(npu_hal_data_client_import(&unexpected, &unsupported, handles,
+                                          unsupported.handle_count) ==
+               -ENOTSUP);
+        assert(!unexpected);
+    }
+    assert(npu_hal_memory_free(hal, local1) == 0);
+    assert(npu_hal_memory_free(hal, local0) == 0);
+    assert(npu_hal_memory_free(hal, global) == 0);
+    npu_hal_close(hal);
+    hal = 0;
+    options.memory_regions = overlapping_regions;
+    options.memory_region_count =
+        sizeof(overlapping_regions) / sizeof(overlapping_regions[0]);
+    assert(npu_hal_open(&hal, &options) == -EINVAL);
+    assert(!hal);
+    return 0;
+}

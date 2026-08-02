@@ -70,7 +70,7 @@ make check QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64
 ```
 
 这些测试覆盖标准 RV64IMAF 上可独立执行的 Device 基础组件；Dayan 自定义执行单元和
-Host↔Device 完整链路仍由 `host/runtime/run_cmodel_smoke.sh` 在 RVTNG cmodel 中验证。
+Host↔Device 完整链路仍由 `host/driver/run_cmodel_smoke.sh` 在 RVTNG cmodel 中验证。
 
 默认目标为 `rv64imaf_zicsr_zifencei` / `lp64`，与 `npu-kernels` 的软浮点调用
 约定兼容，同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机
@@ -125,7 +125,7 @@ Host 应用可用 `pkg-config --cflags --libs dayan-runtime` 获取编译和动�
 `host/dycc` 提供类似 `nvcc` 的 Dayan C++ compiler driver。源码使用 `__host__`、
 `__device__` 和 `__kernel__` 标注；未标注的全局函数进入 Host 与 Device 两侧，所有
 全局变量则必须显式标注所属侧。算子源文件必须显式包含 `<dayan_kernel.h>`，以引用
-`dayan_kernel_launch_attrs_t` 等公共类型。构建与调用示例：
+`npu_kernel_launch_attrs_t` 等公共类型。构建与调用示例：
 
 ```sh
 make dycc
@@ -140,12 +140,15 @@ host/dycc/dycc operator.cpp main.cpp -o build/app
 ```
 
 编译阶段产生的 Host `.o` 内部已经嵌入 RISC-V Device `.o`。自动生成的同名 kernel
-wrapper 追加 `dayan_kernel_launch_attrs_t *` 参数，并以线程安全的 static descriptor
-缓存完成延迟加载。应用在调用 wrapper 前通过 `dayan_runtime_set_api_elf_file()` 注册
-`npu-os-api.elf`；Host runtime 产出 `libDayanRuntime.a` 与 `libDayanRuntime.so`。
+wrapper 追加 `npu_kernel_launch_attrs_t *` 参数，并以线程安全的 static descriptor
+缓存完成延迟加载。`dayan_server` 启动时注册 `npu-os-api.elf`；Host Runtime 只通过
+socket 提交 package 与 logical task，不接触固件符号表或物理拓扑。Host driver 产出
+`libDayanRuntime.a` 与 `libDayanRuntime.so`。
 完整选项、切分规则和同步/异步调用示例见 [`host/dycc/README.md`](host/dycc/README.md)。
-- `host/runtime/`：与 BL0/BL1 mailbox ABI 配套的 Linux 用户态驱动；
-- `build/host/runtime/libnpu_runtime.a`：Host 静态 runtime 库。
+- `host/driver/hal/`：多 Cluster/Core 设备访问与物理内存管理；
+- `host/driver/server/`：BL1/RPC Service、socket daemon 与 logical grid scheduler；
+- `host/driver/runtime/`：不暴露物理拓扑的应用对象接口；
+- `build/host/driver/`：`dayan_server`、Dayan Runtime/HAL/Service 库。
 
 配置示例：
 
@@ -200,7 +203,7 @@ Host 命令，调用弱的 `rpc_receive(opcode, arg, &response)` 分派接口，
 无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行；若它发起阻塞式
 反向 RPC，Host 必须在等待 response 的同时继续服务 Device→Host mailbox。仓库内置的
 create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套扩堆，配套
-`host/runtime` 支持这一流程。
+`host/driver/server` Service 支持这一流程，并用 `(cluster, core)` 标识请求来源。
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
@@ -212,11 +215,18 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
 
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
-152-byte `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
-0–8 个 ABI 参数以及完成状态。BL1 校验后分配托管 proc 并回复 opcode `0x8100`；算子
+184-byte v2 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode` 以及完成状态。BL1 校验
+task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
+回复 opcode `0x8100`。算子
 退出后，scheduler 已回到自己的栈，才调用 cleanup 释放 proc 私有资源，并把描述符从
 `RUNNING` 更新为 `EXITED` 或 `FAILED`。因此 Host 必须保留描述符直到终态，不能只把
 create response 当作算子执行完成。
+
+Host 更新算子 text 后使用独立的 `RPC_ICACHE_FLUSH` (`0x0101`) 发布代码，并等待
+`0x8101` 响应。`fence.i` 只作用于当前 hart，因此模块 loader 会在发布 entry 前逐个
+刷新所有已启动 hart；创建 proc 不再重复刷新 I-cache。create 描述符的请求字段在终态
+前保持不变，Device invalidate 后直接使用 `request->...`，只回写 state 和结果字段。
 
 同步异常从 `mtvec` 进入独立的每核 trap 栈，保存 x0–x31（其中 x2 为异常前的 sp）、
 `mstatus`、`mepc`、`mcause`、`mtval` 和 `fcsr`。C handler 再附加版本、记录大小、
@@ -329,8 +339,21 @@ RPC 发送，未填满的内容跨调用保留，直到 `fflush(stdout)` 或 `ff
 
 ## Host 用户态驱动
 
-`host/runtime/` 参考旧 `npu-runtime` 的 XDMA 文件访问方式，同时使用 `xdma0_user`
-读取 IRQ status/mailbox；在 cmodel 中这些路径由 QEMU FUSE 原样提供。runtime 能加载
-BL1 ELF、通知 BL0 启动多 hart、后台处理 BL1 反向 RPC、管理普通/一致性 Device 内存、
-执行 H2D/D2H/D2D 搬运，并通过 create-proc RPC 异步提交和等待算子。详细 API、生命周期
-约束和 cmodel smoke 命令见 `host/runtime/README.md`。
+`host/driver/` 参考旧 `npu-runtime` 的 XDMA 文件访问方式，并按 `hal`、`server`、
+`runtime` 分层。HAL 显式使用 `(cluster, core)` 访问 register/mailbox、管理普通与
+coherent 物理 region；Server 为每个 Cluster 加载 BL1、服务反向 RPC，并把 Runtime
+提交的 logical task 调度到物理 Core。公开 Runtime 只提供 Context、Buffer、Stream、
+Module、Kernel 和 Event，不展示 Cluster/Core 或物理地址，动态库只导出 `npu_`
+前缀的应用 ABI。Server 打开具体 HAL backend 后把 opaque HAL handle 注入 Service；
+Runtime 只依赖无拓扑语义的 data-plane provider ABI，因此后续可以增加 ioctl backend。
+
+任务配置使用 `NPUTaskDim3 {x,y,z}` 与 `NPUTaskMode`。mode 1 以单 Core 为调度粒度，
+将 `x*y*z` 个 task 分发到可用 Core；mode 4 以包含四个 Core 的 Cluster 为调度粒度，
+要求 `task_dim.x == 4`，每个 `(y,z)` group 的四个 x lane 同时占用同一 Cluster。
+Device 算子通过 `dayan_task_id/dim/mode()` 获取逻辑坐标，不感知物理放置。
+
+Runtime 与 Server 使用 Unix socket 控制协议。H2D/D2H payload 不进入 socket：Runtime
+先在 data socket 申请受范围和方向约束的 token，再用 HELLO 时经 `SCM_RIGHTS` 导入的
+HAL data-plane FD 直接搬运，最后回报同一 token；Server 在完成回报前不会回收对应
+allocation。详细架构、生命周期、API 和 cmodel 命令见
+[`host/driver/README.md`](host/driver/README.md)。

@@ -1,0 +1,145 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{工具链与构建环境}\label{sec:kernel-020}
+
+固件和算子使用 LLVM 的 RISC-V bare-metal target；dycc 本身在 Host 上运行，并链接
+Clang tooling 库。构建机需要 clang/clang++、lld、LLVM binutils、
+\code{llvm-config} 和 \code{libclang-cpp}。运行回归测试还需要
+\code{qemu-system-riscv64}。
+
+\subsection{构建仓库}
+
+\begin{dayancode}
+make
+\end{dayancode}
+
+顶层构建同时生成固件、Host Runtime 和 dycc。常用的单独目标为：
+
+\begin{dayancode}
+make dycc
+make host-runtime
+make docs
+\end{dayancode}
+
+产物位于 \code{build}：固件文件直接放在该目录，Host Driver 位于
+\code{build/host/driver}，dycc 可执行文件位于 \code{build/host/dycc/dycc-bin}。
+源码树中的 \code{host/dycc/dycc} 是调用该二进制的 launcher。
+
+\subsection{Device 编译约定}\label{sec:kernel-026}
+
+\begin{dayantable}{Device 固定编译参数}{tab:kernel-020}{X[34,l] X[66,l]}
+  项目 & 当前值 \\
+  target & \code{riscv64-unknown-elf} \\
+  ISA & \code{rv64imaf_zicsr_zifencei} \\
+  ABI & \code{lp64} \\
+  code model & \code{medany} \\
+  relocation & \code{-mno-relax -msmall-data-limit=0} \\
+  runtime model & freestanding、static、non-PIC、无系统 libc \\
+  C++ & C++17，关闭 exception、RTTI、thread-safe static 与全局析构 \\
+\end{dayantable}
+
+\code{gp} 和 \code{tp} 分别由 \code{shared} 与当前 thread 占用，因此 Device 对象
+不能包含 GP-relative、TP-relative 或 TLS relocation。dycc 固定这些参数，不接受
+\code{--target}、\code{-march} 或 \code{-mabi} 覆盖。
+
+手工构建纯 Device 对象时使用相同约定，并且只加入公开头文件目录：
+
+\begin{dayancode}
+clang --target=riscv64-unknown-elf \
+  -march=rv64imaf_zicsr_zifencei -mabi=lp64 \
+  -mcmodel=medany -mno-relax -msmall-data-limit=0 \
+  -ffreestanding -fno-builtin -fno-common -fno-pic \
+  -fno-stack-protector -fno-unwind-tables \
+  -Iinclude/api -O2 -c kernel.c -o kernel.o
+\end{dayancode}
+
+\subsection{安装 SDK}
+
+\begin{dayancode}
+make install
+make install PREFIX=/opt/dayan
+make install PREFIX=/usr DESTDIR="$PWD/package-root"
+\end{dayancode}
+
+\code{PREFIX} 默认为 \code{/usr/local}。\code{DESTDIR} 只增加打包用的暂存根，不改变
+安装后记录的前缀。
+
+\begin{dayantable}{安装目录}{tab:kernel-021}{X[44,l] X[56,l]}
+  路径 & 内容 \\
+  \code{PREFIX/bin/dycc} & Host compiler driver。 \\
+  \code{PREFIX/include} & Host Runtime 与 kernel launch 头文件。 \\
+  \code{PREFIX/lib} & \code{libDayanRuntime.a/.so}、兼容归档和 pkg-config 文件。 \\
+  \code{PREFIX/lib/dayan/include/api} & Device 公共头文件。 \\
+  \code{PREFIX/lib/dayan/host} & dycc 使用的 Host 头文件和编译器属性头。 \\
+  \code{PREFIX/lib/dayan/firmware} & 固件 ELF、API ELF 和 binary。 \\
+  \code{PREFIX/share/doc/dayan} & 随 SDK 安装的说明文档。 \\
+\end{dayantable}
+
+Device 的 \code{stdio.h}、\code{stdlib.h} 等头文件位于私有 SDK，不会覆盖 Host
+系统头文件。安装后的 dycc 从自身路径查找 \code{lib/dayan}；非标准布局可用
+\code{--dayan-root} 或 \code{DAYAN_ROOT} 指定。
+
+\subsection{使用 dycc}\label{sec:kernel-021}
+
+\begin{dayancode}
+# 生成 Host object，Device object 已嵌入其中
+dycc -O2 -c operator.cpp -o operator.o
+
+# 直接生成 Host 可执行程序
+dycc operator.cpp main.cpp -o app
+
+# 加入已有 Host object、archive 和链接参数
+dycc operator.cpp main.o support.a -L/path/to/lib -lfoo -o app
+\end{dayancode}
+
+不带 \code{-c} 时默认输出 \code{a.out}，并自动链接 \code{libDayanRuntime.a} 和
+\code{-pthread}。多个源码与 \code{-c} 一起使用时，每个输入生成同名 \code{.o}，
+不能再指定单个 \code{-o}。需要动态链接 Runtime 时，先用 dycc 生成对象，再由 Host
+clang++ 链接 \code{-lDayanRuntime}。
+
+dycc 对每个翻译单元执行四个阶段：
+
+\begin{enumerate}
+  \item 用 Clang AST 生成 Host 和 Device 源码；
+  \item 用固定 RISC-V 参数编译 Device \code{ET_REL}；
+  \item 把 Device 对象转成 Host 只读数组；
+  \item 编译 Host 源码并与数组合并为 Host \code{.o}。
+\end{enumerate}
+
+\begin{dayantable}{dycc 选项分组}{tab:kernel-022}{X[36,l] X[64,l]}
+  选项 & 用途 \\
+  \code{-Xdevice arg} & 只传给切分语法分析和 Device Clang。 \\
+  \code{-Xhost arg} & 只传给 Host 编译及最终链接。 \\
+  \code{-Xlinker arg}、\code{-Wl,...} & 只传给最终 Host 链接。 \\
+  \code{--host-cxx}、\code{--device-cxx} & 选择两侧 clang++；也可用对应的 \code{DYCC_*_CXX} 环境变量。 \\
+  \code{--save-temps[=dir]} & 保留切分源码、中间对象和嵌入数组。 \\
+  \code{--emit-host}、\code{--emit-device} & 写出单输入的切分结果。 \\
+  \code{--split-only} & 完成切分后停止。 \\
+  \code{--dry-run}、\code{-v} & 打印计划命令或实际命令。 \\
+\end{dayantable}
+
+默认 Runtime 归档可由
+\code{DYCC_RUNTIME_LIBRARY=/absolute/path/libDayanRuntime.a} 覆盖。完整参数以
+\code{dycc --help} 为准。
+
+\subsection{检查与编辑器配置}
+
+\begin{dayancode}
+make dycc-check
+make check
+
+# QEMU 不在 PATH 时
+make check QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64
+\end{dayancode}
+
+\code{make check} 运行固件静态检查、Host Runtime/dycc 测试，并在 QEMU \code{virt}
+上执行 Device 基础组件回归。XDMA、mailbox 和完整 kernel launch 由
+\code{host/driver/run_cmodel_smoke.sh} 验证。
+
+仓库的 \code{.vscode/settings.json} 为 IntelliSense 提供空的
+\code{__host__}/\code{__device__}/\code{__kernel__} 宏和两侧 include path；这些
+设置不参与实际编译。
+
+\end{document}

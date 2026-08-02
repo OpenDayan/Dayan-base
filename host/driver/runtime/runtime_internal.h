@@ -1,0 +1,114 @@
+#ifndef DAYAN_RUNTIME_INTERNAL_H
+#define DAYAN_RUNTIME_INTERNAL_H
+
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
+#include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "hal/dataplane.h"
+#include "npu_runtime.h"
+#include "protocol.h"
+
+struct runtime_transfer_job;
+
+struct npu_runtime {
+    int control_fd;
+    int data_fd;
+    npu_hal_data_client_t *data_client;
+    uint64_t session_id;
+    uint64_t next_request_id;
+    uint32_t default_timeout_ms;
+    uint32_t closing;
+    pthread_mutex_t control_mutex;
+    pthread_mutex_t data_mutex;
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    pthread_t data_worker;
+    uint32_t data_worker_started;
+    uint32_t data_worker_stop;
+    struct runtime_transfer_job *job_head;
+    struct runtime_transfer_job *job_tail;
+    struct npu_context *contexts;
+};
+
+struct npu_context {
+    npu_runtime_t *runtime;
+    uint64_t id;
+    uint64_t memory_quota;
+    uint32_t max_pending_commands;
+    uint32_t closing;
+    uint32_t transfer_jobs;
+    struct npu_buffer *buffers;
+    struct npu_stream *streams;
+    struct npu_module *modules;
+    struct npu_event *events;
+    struct npu_context *next;
+};
+
+struct npu_buffer {
+    struct npu_context *context;
+    uint64_t id;
+    uint64_t size;
+    uint32_t flags;
+    struct npu_buffer *next;
+};
+
+struct npu_stream {
+    struct npu_context *context;
+    uint64_t id;
+    int32_t priority;
+    struct npu_stream *next;
+};
+
+struct npu_module {
+    struct npu_context *context;
+    uint64_t id;
+    struct npu_kernel *kernels;
+    struct npu_module *next;
+};
+
+struct npu_kernel {
+    struct npu_module *module;
+    uint64_t id;
+    struct npu_kernel *next;
+};
+
+struct npu_event {
+    struct npu_context *context;
+    uint64_t id;
+    npu_event_info_t cached;
+    struct npu_event *next;
+};
+
+struct runtime_transfer_job {
+    struct npu_context *context;
+    struct npu_event *event;
+    void *host_buffer;
+    size_t size;
+    struct runtime_transfer_job *next;
+};
+
+int runtime_control_call(npu_runtime_t *runtime, uint16_t opcode,
+                         uint64_t object_id, const void *request,
+                         size_t request_size, void *response,
+                         size_t expected_response_size,
+                         uint64_t *response_object_id);
+int runtime_data_call(npu_runtime_t *runtime, uint16_t opcode,
+                      uint64_t object_id, const void *request,
+                      size_t request_size, void *response,
+                      size_t expected_response_size);
+int runtime_event_adopt(struct npu_context *context, uint64_t id,
+                        struct npu_event *event,
+                        struct npu_event **event_out);
+void runtime_event_remove(struct npu_event *event);
+int runtime_transfer_enqueue(struct runtime_transfer_job *job);
+void *runtime_data_worker(void *argument);
+int runtime_context_valid(const struct npu_context *context);
+int runtime_stream_valid(const struct npu_stream *stream);
+void runtime_kernel_descriptors_forget_context(struct npu_context *context);
+
+#endif

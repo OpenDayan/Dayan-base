@@ -1,0 +1,80 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{RISC-V 与对象 ABI}\label{sec:kernel-080}
+
+\subsection{数据与调用约定}
+
+Device ABI 为 RV64 \code{lp64}。\code{char}/\code{short}/\code{int} 分别为
+8/16/32 bit；\code{long}、指针、\code{size_t} 和 \code{uintptr_t} 为 64 bit。公开
+函数边界和上下文帧保持 16-byte 栈对齐。
+
+\code{lp64} 使用整数参数寄存器。ISA 含 F 扩展，函数内部可以执行单精度指令，但函数
+参数和返回值仍按整数 ABI 传递。dycc wrapper 把 \code{float}/\code{double} 位模式
+放入 64-bit 参数槽；直接使用低层 launch API 时由调用者完成同样的编码。
+
+\begin{dayantable}{保留寄存器}{tab:kernel-080}{X[18,l] X[22,l] X[60,l]}
+  寄存器 & 名称 & 用途 \\
+  \code{x2/sp} & stack pointer & 每 proc 独立，边界保持 16-byte 对齐。 \\
+  \code{x3/gp} & \code{shared} & 当前 proc 的 Host coherent allocation 基址。 \\
+  \code{x4/tp} & \code{current} & 当前 \code{struct thread}；不能用于 ELF TLS。 \\
+  \code{x10--x17} & \code{a0--a7} & 新 proc 的 0--8 个机器字参数。 \\
+\end{dayantable}
+
+固件不定义 \code{__global_pointer\$}，\code{gp} 不作为 small-data pointer。固件和
+算子均使用 \code{-mno-relax} 与 \code{-msmall-data-limit=0}，不得产生 GP-relative、
+TP-relative 或 TLS relocation。
+
+\subsection{proc 与切换帧}
+
+新 proc 使用 96-byte 启动帧：
+
+\begin{dayantable}{proc 启动帧}{tab:kernel-081}{X[20,l] X[22,l] X[58,l]}
+  offset & 字段 & 含义 \\
+  0 & \code{entry} & kernel entry。 \\
+  8 & \code{ra} & \code{proc_exit}。 \\
+  16--72 & \code{a0--a7} & 8 个参数槽。 \\
+  80 & \code{shared} & 写入 \code{gp} 的基址。 \\
+  88 & reserved & 0。 \\
+\end{dayantable}
+
+bootstrap 入口为 \code{proc_bootstrap + (8 - argc) * 4}，只执行所需的参数加载指令。
+上下文切换帧为 128 bytes，依次保存 \code{ra}、\code{s0--s11}、\code{gp}、
+\code{fcsr} 和 reserved word。
+
+\code{struct thread} 的固定前缀为 40 bytes：ID/state 位于 offset 0/4，CPU 指针位于
+8，sp/pc 位于 16/24，type 位于 32。派生对象把 thread 放在 offset 0。
+
+\subsection{公开结构体}
+
+\begin{dayantable}{Device 公开结构体布局}{tab:kernel-082}{X[31,l] X[17,l] X[52,l]}
+  类型 & 大小/对齐 & 字段 offset \\
+  \code{struct list_head} & 16/8 & \code{next=0}、\code{prev=8}。 \\
+  \code{dayan_resource_t} & 64/8 & state/producer/consumer/lock 为 0/4/8/12，三条 list 为 16/32/48。 \\
+  \code{dayan_shared_resource_t} & 16/4 & state/producer/consumer/lock 为 0/4/8/12。 \\
+\end{dayantable}
+
+字段布局属于 ABI；resource 状态只能通过 DAPI 修改。
+
+\subsection{目标文件与符号解析}
+
+嵌入的 Device object 必须是 64-bit little-endian RISC-V \code{ET_REL}。加载器支持
+当前 dycc 代码模型产生的绝对、PC-relative、CALL/JAL/BRANCH 和 ADD/SUB/SET
+relocation；拒绝 TLS、GP-relative、动态链接、构造器 section 和其它 relocation。
+
+\begin{dayancode}
+dycc --save-temps=build/dycc -c operator.cpp -o operator.o
+llvm-readelf --file-header --relocations \
+  build/dycc/operator.cpp.dycc.device.o
+llvm-nm --undefined-only build/dycc/operator.cpp.dycc.device.o
+\end{dayancode}
+
+未定义符号必须全部存在于 \code{npu-os-api.elf}。\code{dayan-api.symbols} 是精确
+白名单；完整固件中的 \code{proc_*}、\code{rpc_*} 和 platform 内部符号不构成算子
+ABI。
+
+公开 DAPI 与 libc 分别放入 \code{.text.api.dapi} 和 \code{.text.api.libc}。新增公开
+符号时，应同时更新声明、实现、section attribute、白名单、测试和本手册。
+
+\end{document}

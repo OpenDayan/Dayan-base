@@ -2,8 +2,8 @@
 
 int main(void)
 {
-    dayan_kernel_launch_attrs_t attrs;
+    npu_kernel_launch_attrs_t attrs;
 
-    dayan_kernel_launch_attrs_init(&attrs, nullptr);
-    return attrs.version == DAYAN_KERNEL_LAUNCH_ATTRS_VERSION ? 0 : 1;
+    npu_kernel_launch_attrs_init(&attrs, nullptr, nullptr);
+    return attrs.version == NPU_KERNEL_LAUNCH_ATTRS_VERSION ? 0 : 1;
 }

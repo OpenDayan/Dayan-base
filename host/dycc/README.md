@@ -35,7 +35,7 @@ dycc operator.cpp main.o support.a -L/path/to/lib -lfoo -o app
 ```
 
 链接模式会自动加入 `libDayanRuntime.a` 和 `-pthread`。源码树中从
-`build/host/runtime` 查找 runtime，安装后从 SDK 相邻的 `lib`/`lib64` 查找；特殊部署
+`build/host/driver` 查找 Runtime，安装后从 SDK 相邻的 `lib`/`lib64` 查找；特殊部署
 可用 `DYCC_RUNTIME_LIBRARY=/absolute/path/libDayanRuntime.a` 覆盖。`-Xlinker <arg>`、
 `-Wl,...`、`-L` 和 `-l` 等参数只传给最终 Host 链接，`-Xhost` 参数传给 Host 编译与
 链接阶段。
@@ -63,7 +63,7 @@ host/dycc/dycc --save-temps=build/dycc-demo \
 ## 源码规则
 
 - 每个算子源文件必须显式 `#include <dayan_kernel.h>`。该头文件声明 Host wrapper 使用
-  的 `dayan_kernel_launch_attrs_t`、descriptor 和 launch API；dycc 不再为输入源码
+  的 `npu_kernel_launch_attrs_t`、descriptor 和 launch API；dycc 不再为输入源码
   隐式强制包含它。
 - `__kernel__`：只在 Device 保留定义；Host 原位置生成同名 wrapper。kernel 必须返回
   `void`、具有外部链接、不是模板或可变参数函数，并且最多接收 8 个机器字参数。
@@ -73,14 +73,16 @@ host/dycc/dycc --save-temps=build/dycc-demo \
 - 所有命名空间/文件作用域变量必须显式标注 `__host__` 或 `__device__`，否则 dycc
   直接报源码位置诊断。一个逗号声明组中的变量必须属于同一侧。
 
-kernel 参数支持整数、枚举、指针、引用、`float` 和 `double`。wrapper 将它们按 RV64
-`lp64` ABI 打包为至多 8 个 64-bit 机器字；浮点参数传递位模式。聚合体参数当前会被
-拒绝，调用者应改传指针。
+kernel 参数支持整数、枚举、指针、引用、`float` 和 `double`。Host wrapper 把 Device
+指针或引用参数改写为 `npu_buffer_t *`，再根据 const 属性生成 Buffer read/write
+metadata；它不会接收或传递 Host raw pointer。其它参数按 RV64 `lp64` ABI 打包为至多
+8 个机器字，浮点参数传递位模式。聚合体参数当前会被拒绝，调用者应改用 Device
+Buffer。
 
 Host wrapper 的追加参数为：
 
 ```cpp
-const dayan_kernel_launch_attrs_t *launch_attrs
+const npu_kernel_launch_attrs_t *launch_attrs
 ```
 
 wrapper 返回 `int` 状态。它包含每个 kernel 独立的 static descriptor、原子快路径和
@@ -93,41 +95,52 @@ entry 名创建描述符；后续调用直接复用。实际 Device module 按 r
 
 ## Runtime 对接
 
-应用先加载固件，并将只含公开白名单符号的 API ELF 注册到同一 runtime：
+BL1 与 API ELF 由独立的 `dayan_server` 加载。应用连接 Server，创建 Context、Stream
+和 Buffer，再把这些逻辑对象交给 wrapper；应用不选择物理 Cluster/Core：
 
 ```cpp
 #include <dayan_runtime.h>
 
-int demo_kernel(uint64_t count,
-                const dayan_kernel_launch_attrs_t *launch_attrs);
+int demo_kernel(npu_buffer_t *output, uint64_t count,
+                const npu_kernel_launch_attrs_t *launch_attrs);
 
-dayan_runtime_set_api_elf_file(runtime, "build/npu-os-api.elf");
+npu_runtime_t *runtime;
+npu_context_t *context;
+npu_stream_t *stream;
+npu_buffer_t *output;
 
-dayan_kernel_launch_attrs_t attrs;
-dayan_kernel_launch_attrs_init(&attrs, runtime);
-attrs.first_hart = 0;
-attrs.launch_count = 1;
+npu_runtime_open(&runtime, nullptr);
+npu_context_create(runtime, nullptr, &context);
+npu_stream_create(context, nullptr, &stream);
 
-int status = demo_kernel(count, &attrs);
+npu_buffer_desc_t buffer_desc;
+npu_buffer_desc_init(&buffer_desc, 4096);
+npu_buffer_create(context, &buffer_desc, &output);
+
+npu_kernel_launch_attrs_t attrs;
+npu_kernel_launch_attrs_init(&attrs, context, stream);
+attrs.config.task_dim = {8, 1, 1};
+attrs.config.task_mode = NPUTaskMode::kSingleCore;
+
+int status = demo_kernel(output, 8, &attrs);
 ```
 
-`DAYAN_KERNEL_LAUNCH_ASYNC` 会把 `npu_launch_t*` 写入调用者提供的
-`async_launches` 数组；同步模式会等待并释放 launch。`launch_count` 是启动规模，
-从 `first_hart` 起连续分配 hart。
+同步 wrapper 等待并销毁执行 Event，返回 kernel status。异步模式通过一个 Event 表示
+整个 logical grid：
 
 ```cpp
-npu_launch_t *handles[4];
-size_t submitted = 0;
-attrs.flags = DAYAN_KERNEL_LAUNCH_ASYNC;
-attrs.launch_count = 4;
-attrs.async_launches = handles;
-attrs.async_launch_capacity = 4;
-attrs.async_launch_count = &submitted;
-status = demo_kernel(count, &attrs);
-/* wait/query/release handles[0..submitted) with the low-level runtime API */
+npu_event_t *event = nullptr;
+attrs.flags = NPU_KERNEL_LAUNCH_ASYNC;
+attrs.event_out = &event;
+status = demo_kernel(output, 8, &attrs);
+/* npu_event_wait(event, ...); npu_event_destroy(event); */
 ```
 
-`host/runtime` 同时产出 `libDayanRuntime.a`、`libDayanRuntime.so` 和兼容名称
-`libnpu_runtime.a`。加载器只用注册的 API ELF 解析 Device 未定义符号，支持 dycc 默认
-代码模型产生的 RISC-V 绝对、PC-relative、CALL/JAL/BRANCH 与 ADD/SUB/SET relocation；
-TLS、GP-relative、动态链接和构造器 section 会被拒绝。
+Cluster 调度使用 `NPUTaskMode::kFourCore`，并要求 `attrs.config.task_dim.x == 4`；此时
+同一 `(y,z)` group 的 x=0..3 会映射到一个 Cluster 的四个 Core。Device 侧可通过
+`dayan_task_id()`、`dayan_task_dim()` 和 `dayan_task_mode()` 获取逻辑坐标。
+
+`host/driver` 同时产出 `libDayanRuntime.a`、`libDayanRuntime.so` 和兼容名称
+`libnpu_runtime.a`。Server 的加载器只用启动时注册的 API ELF 解析 Device 未定义符号，
+支持 dycc 默认代码模型产生的 RISC-V 绝对、PC-relative、CALL/JAL/BRANCH 与
+ADD/SUB/SET relocation；TLS、GP-relative、动态链接和构造器 section 会被拒绝。

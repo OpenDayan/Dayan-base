@@ -1,0 +1,1055 @@
+#include "server_internal.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define SERVER_DEFAULT_STACK_SIZE   UINT64_C(0x10000)
+#define SERVER_DEFAULT_PRINTF_SIZE  UINT64_C(0x1000)
+#define SERVER_SHARED_ALIGNMENT     UINT64_C(64)
+#define SERVER_SHARED_RESOURCE_SIZE UINT64_C(16)
+
+static int event_terminal(const struct server_event *event)
+{
+    return event->state == NPU_EVENT_COMPLETE ||
+           event->state == NPU_EVENT_FAILED ||
+           event->state == NPU_EVENT_CANCELLED;
+}
+
+static void remove_event_locked(struct server_context *context,
+                                struct server_event *event)
+{
+    struct server_event **link = &context->events;
+
+    while (*link && *link != event)
+        link = &(*link)->next;
+    if (*link)
+        *link = event->next;
+}
+
+int server_enqueue_locked(dayan_server_t *server,
+                          struct server_context *context,
+                          struct server_stream *stream,
+                          struct server_command *command,
+                          uint32_t visible_event,
+                          struct server_event **event_out)
+{
+    struct server_event *event;
+
+    if (!server || !context || !stream || !command || !event_out ||
+        context->closing || stream->context != context)
+        return -EINVAL;
+    if (context->max_pending_commands &&
+        context->pending_commands >= context->max_pending_commands)
+        return -EAGAIN;
+    event = calloc(1, sizeof(*event));
+    if (!event)
+        return -ENOMEM;
+    if (server->next_id == UINT64_MAX ||
+        server->next_sequence == UINT64_MAX) {
+        free(event);
+        return -EOVERFLOW;
+    }
+    event->id = ++server->next_id;
+    event->sequence = ++server->next_sequence;
+    event->state = NPU_EVENT_QUEUED;
+    event->command_type = command->kind;
+    event->status = -EINPROGRESS;
+    event->visible = visible_event;
+    event->command = command;
+    event->context = context;
+    event->next = context->events;
+    context->events = event;
+    command->context = context;
+    command->stream = stream;
+    command->event = event;
+    command->next = 0;
+    if (stream->tail)
+        stream->tail->next = command;
+    else
+        stream->head = command;
+    stream->tail = command;
+    ++context->pending_commands;
+    *event_out = event;
+    pthread_cond_broadcast(&server->condition);
+    return 0;
+}
+
+static void free_launch_groups(dayan_server_t *server,
+                               struct server_launch_group *group)
+{
+    while (group) {
+        struct server_launch_group *next = group->next;
+
+        if (group->shared_allocation)
+            (void)npu_hal_memory_free(server->hal,
+                                      group->shared_allocation);
+        free(group);
+        group = next;
+    }
+}
+
+void server_complete_command_locked(dayan_server_t *server,
+                                    struct server_command *command,
+                                    int64_t status)
+{
+    struct server_context *context = command->context;
+    struct server_stream *stream = command->stream;
+    struct server_event *event = command->event;
+    size_t index;
+
+    if (stream->head != command || command->dispatching)
+        return;
+    stream->head = command->next;
+    if (!stream->head)
+        stream->tail = 0;
+    if (context->pending_commands)
+        --context->pending_commands;
+    stream->last_status = status;
+    event->status = status;
+    event->command = 0;
+    if (status == -ECANCELED)
+        event->state = NPU_EVENT_CANCELLED;
+    else if (status < 0)
+        event->state = NPU_EVENT_FAILED;
+    else
+        event->state = NPU_EVENT_COMPLETE;
+
+    switch (command->kind) {
+    case SERVER_COMMAND_WAIT:
+        if (command->data.wait.dependency->references)
+            --command->data.wait.dependency->references;
+        break;
+    case SERVER_COMMAND_H2D:
+    case SERVER_COMMAND_D2H:
+    case SERVER_COMMAND_D2D:
+        if (command->data.transfer.destination &&
+            command->data.transfer.destination->references)
+            --command->data.transfer.destination->references;
+        if (command->data.transfer.source &&
+            command->data.transfer.source->references)
+            --command->data.transfer.source->references;
+        break;
+    case SERVER_COMMAND_LAUNCH:
+        for (index = 0; index < command->data.launch.argument_count; ++index) {
+            if (command->data.launch.buffers[index] &&
+                command->data.launch.buffers[index]->references)
+                --command->data.launch.buffers[index]->references;
+        }
+        if (command->data.launch.kernel->references)
+            --command->data.launch.kernel->references;
+        if (command->data.launch.kernel->module->active_commands)
+            --command->data.launch.kernel->module->active_commands;
+        free_launch_groups(server, command->data.launch.groups);
+        break;
+    default:
+        break;
+    }
+    free(command);
+    if (!event->visible && !event->references) {
+        remove_event_locked(context, event);
+        free(event);
+    }
+    pthread_cond_broadcast(&server->condition);
+}
+
+void server_cancel_context_locked(dayan_server_t *server,
+                                  struct server_context *context)
+{
+    struct server_stream *stream;
+
+    if (!context || context->closing)
+        return;
+    context->closing = 1;
+    for (stream = context->streams; stream; stream = stream->next) {
+        struct server_command *command;
+
+        for (command = stream->head; command; command = command->next) {
+            command->cancelled = 1;
+        }
+    }
+    pthread_cond_broadcast(&server->condition);
+}
+
+static uint64_t launch_resident_size(const npu_package_kernel_t *metadata)
+{
+    uint64_t stack = metadata->stack_size ? metadata->stack_size :
+                                             SERVER_DEFAULT_STACK_SIZE;
+
+    if (metadata->resident_memory > UINT64_MAX - stack)
+        return UINT64_MAX;
+    return metadata->resident_memory + stack;
+}
+
+static int slot_accepts(const dayan_server_t *server,
+                        const struct server_command *command,
+                        size_t slot_index)
+{
+    const struct server_core_slot *slot = &server->slots[slot_index];
+    const struct server_kernel *kernel = command->data.launch.kernel;
+    const npu_package_kernel_t *metadata = kernel->metadata;
+    uint64_t resident = launch_resident_size(metadata);
+    size_t index;
+
+    if (!slot->enabled || resident == UINT64_MAX ||
+        kernel->active_per_core[slot_index] >=
+            metadata->max_tasks_per_core)
+        return 0;
+    if (server->options.resident_limit_per_core &&
+        (slot->resident_memory > server->options.resident_limit_per_core ||
+         resident > server->options.resident_limit_per_core -
+                        slot->resident_memory))
+        return 0;
+    for (index = 0; index < command->data.launch.argument_count; ++index) {
+        const struct server_buffer *buffer =
+            command->data.launch.buffers[index];
+
+        if (buffer && !npu_hal_memory_visible(
+                          server->hal,
+                          buffer->allocation, slot->target))
+            return 0;
+    }
+    return 1;
+}
+
+static int choose_single_slot_locked(dayan_server_t *server,
+                                     struct server_command *command,
+                                     size_t *slot_out)
+{
+    size_t offset;
+
+    for (offset = 0; offset < server->slot_count; ++offset) {
+        size_t slot = (server->next_slot + offset) % server->slot_count;
+
+        if (!slot_accepts(server, command, slot))
+            continue;
+        server->next_slot = (slot + 1U) % server->slot_count;
+        *slot_out = slot;
+        return 1;
+    }
+    return 0;
+}
+
+static size_t slot_index(const dayan_server_t *server, uint32_t cluster,
+                         uint32_t core)
+{
+    return (size_t)cluster * server->hal_info.cores_per_cluster + core;
+}
+
+static int choose_cluster_locked(dayan_server_t *server,
+                                 struct server_command *command,
+                                 size_t selected[4])
+{
+    uint32_t offset;
+    uint32_t first_cluster = server->slot_count ?
+        (uint32_t)(server->next_slot /
+                   server->hal_info.cores_per_cluster) : 0;
+
+    if (server->hal_info.cores_per_cluster != 4U)
+        return 0;
+    for (offset = 0; offset < server->hal_info.cluster_count; ++offset) {
+        uint32_t cluster = (first_cluster + offset) %
+                           server->hal_info.cluster_count;
+        uint32_t core;
+        int accepted = 1;
+
+        for (core = 0; core < 4U; ++core) {
+            selected[core] = slot_index(server, cluster, core);
+            if (!slot_accepts(server, command, selected[core])) {
+                accepted = 0;
+                break;
+            }
+        }
+        if (accepted) {
+            server->next_slot = slot_index(
+                server, (cluster + 1U) % server->hal_info.cluster_count, 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void reserve_slots_locked(dayan_server_t *server,
+                                 struct server_command *command,
+                                 const size_t *slots, size_t count)
+{
+    uint64_t resident = launch_resident_size(
+        command->data.launch.kernel->metadata);
+    size_t index;
+
+    for (index = 0; index < count; ++index) {
+        ++server->slots[slots[index]].active_tasks;
+        server->slots[slots[index]].resident_memory += resident;
+        ++command->data.launch.kernel->active_per_core[slots[index]];
+    }
+}
+
+static void release_slot_locked(dayan_server_t *server,
+                                struct server_command *command,
+                                size_t slot_index_value)
+{
+    uint64_t resident = launch_resident_size(
+        command->data.launch.kernel->metadata);
+    struct server_core_slot *slot = &server->slots[slot_index_value];
+
+    if (slot->active_tasks)
+        --slot->active_tasks;
+    if (slot->resident_memory >= resident)
+        slot->resident_memory -= resident;
+    else
+        slot->resident_memory = 0;
+    if (command->data.launch.kernel->active_per_core[slot_index_value])
+        --command->data.launch.kernel->active_per_core[slot_index_value];
+}
+
+static int calculate_shared_size(const struct server_command *command,
+                                 uint64_t *size_out)
+{
+    const struct server_kernel *kernel = command->data.launch.kernel;
+    const npu_package_kernel_t *metadata = kernel->metadata;
+    const struct npu_package_view *view = &kernel->module->package->view;
+    uint64_t resource_count = 0;
+    uint64_t resource_size;
+    uint64_t size = metadata->shared_size;
+    uint32_t index;
+
+    for (index = 0; index < metadata->sync_count; ++index) {
+        const npu_package_sync_t *sync =
+            &view->sync_resources[metadata->first_sync + index];
+
+        if (sync->count > UINT64_MAX - resource_count)
+            return -EOVERFLOW;
+        resource_count += sync->count;
+    }
+    if (resource_count > UINT64_MAX / SERVER_SHARED_RESOURCE_SIZE)
+        return -EOVERFLOW;
+    resource_size = resource_count * SERVER_SHARED_RESOURCE_SIZE;
+    if (size < resource_size)
+        size = resource_size;
+    if (size > UINT64_MAX - (SERVER_SHARED_ALIGNMENT - 1U))
+        return -EOVERFLOW;
+    *size_out = (size + SERVER_SHARED_ALIGNMENT - 1U) &
+                ~(SERVER_SHARED_ALIGNMENT - 1U);
+    return 0;
+}
+
+static int allocation_request_for_group(
+    dayan_server_t *server, struct server_command *command,
+    const size_t *slots, size_t count, uint64_t size,
+    npu_hal_allocation_t **allocation_out)
+{
+    npu_hal_memory_request_t request;
+    npu_hal_memory_scope_t scopes[3];
+    size_t scope_count;
+    size_t index;
+    int status = -ENOMEM;
+
+    if (!size) {
+        *allocation_out = 0;
+        return 0;
+    }
+    npu_hal_memory_request_init(&request);
+    request.memory_class = NPU_HAL_MEMORY_COHERENT;
+    request.usage = NPU_HAL_MEMORY_SHARED;
+    request.owner = command->context->owner;
+    request.size = size;
+    request.alignment = SERVER_SHARED_ALIGNMENT;
+    if (count == 4) {
+        scopes[0] = NPU_HAL_MEMORY_CLUSTER;
+        scopes[1] = NPU_HAL_MEMORY_DEVICE;
+        scope_count = 2;
+    } else {
+        scopes[0] = NPU_HAL_MEMORY_CORE;
+        scopes[1] = NPU_HAL_MEMORY_CLUSTER;
+        scopes[2] = NPU_HAL_MEMORY_DEVICE;
+        scope_count = 3;
+    }
+    for (index = 0; index < scope_count; ++index) {
+        size_t viewer_index;
+
+        request.scope = scopes[index];
+        request.location.cluster = scopes[index] == NPU_HAL_MEMORY_DEVICE ?
+            NPU_HAL_ANY_CLUSTER : server->slots[slots[0]].target.cluster;
+        request.location.core = scopes[index] == NPU_HAL_MEMORY_CORE ?
+            server->slots[slots[0]].target.core : NPU_HAL_ANY_CORE;
+        status = npu_hal_memory_alloc(server->hal,
+                                      &request, allocation_out);
+        if (status < 0) {
+            if (status != -ENOMEM)
+                return status;
+            continue;
+        }
+        for (viewer_index = 0; viewer_index < count; ++viewer_index) {
+            if (!npu_hal_memory_visible(
+                    server->hal, *allocation_out,
+                    server->slots[slots[viewer_index]].target))
+                break;
+        }
+        if (viewer_index == count)
+            return 0;
+        (void)npu_hal_memory_free(server->hal,
+                                  *allocation_out);
+        *allocation_out = 0;
+    }
+    return status;
+}
+
+static int initialize_shared(dayan_server_t *server,
+                             struct server_command *command,
+                             const size_t *slots, size_t count,
+                             npu_hal_allocation_t **allocation_out,
+                             uint64_t *size_out)
+{
+    const struct server_kernel *kernel = command->data.launch.kernel;
+    const npu_package_kernel_t *metadata = kernel->metadata;
+    const struct npu_package_view *view = &kernel->module->package->view;
+    unsigned char *image;
+    uint64_t shared_size;
+    size_t resource_offset = 0;
+    uint32_t index;
+    int status;
+
+    *allocation_out = 0;
+    *size_out = 0;
+    status = calculate_shared_size(command, &shared_size);
+    if (status < 0 || !shared_size)
+        return status;
+    if (shared_size > SIZE_MAX)
+        return -EOVERFLOW;
+    status = allocation_request_for_group(server, command, slots, count,
+                                          shared_size, allocation_out);
+    if (status < 0)
+        return status;
+    image = calloc(1, (size_t)shared_size);
+    if (!image) {
+        status = -ENOMEM;
+        goto fail;
+    }
+    for (index = 0; index < metadata->sync_count; ++index) {
+        const npu_package_sync_t *sync =
+            &view->sync_resources[metadata->first_sync + index];
+        uint32_t instance;
+
+        for (instance = 0; instance < sync->count; ++instance) {
+            uint32_t state = sync->producer_count ? 1U : 2U;
+
+            memcpy(image + resource_offset, &state, sizeof(state));
+            memcpy(image + resource_offset + 4U, &sync->producer_count,
+                   sizeof(sync->producer_count));
+            memcpy(image + resource_offset + 8U, &sync->consumer_count,
+                   sizeof(sync->consumer_count));
+            resource_offset += SERVER_SHARED_RESOURCE_SIZE;
+        }
+    }
+    status = npu_hal_memory_write(
+        server->hal, *allocation_out,
+        server->slots[slots[0]].target, 0, image, (size_t)shared_size);
+    free(image);
+    if (status < 0)
+        goto fail;
+    *size_out = shared_size;
+    return 0;
+
+fail:
+    if (*allocation_out) {
+        (void)npu_hal_memory_free(server->hal,
+                                  *allocation_out);
+        *allocation_out = 0;
+    }
+    return status;
+}
+
+static void unit_task_ids(const struct server_command *command, uint64_t unit,
+                          uint32_t lane, uint32_t task_id[3])
+{
+    const NPULaunchConfig *config = &command->data.launch.config;
+
+    if ((uint32_t)config->task_mode == 4U) {
+        task_id[0] = lane;
+        task_id[1] = (uint32_t)(unit % config->task_dim.y);
+        task_id[2] = (uint32_t)(unit / config->task_dim.y);
+    } else {
+        task_id[0] = (uint32_t)(unit % config->task_dim.x);
+        unit /= config->task_dim.x;
+        task_id[1] = (uint32_t)(unit % config->task_dim.y);
+        task_id[2] = (uint32_t)(unit / config->task_dim.y);
+    }
+}
+
+static int fill_launch_arguments(dayan_server_t *server,
+                                 struct server_command *command,
+                                 npu_hal_core_t target,
+                                 npu_service_launch_desc_t *desc)
+{
+    size_t index;
+
+    for (index = 0; index < command->data.launch.argument_count; ++index) {
+        const npu_ipc_launch_argument_t *argument =
+            &command->data.launch.arguments[index];
+
+        if (argument->kind == NPU_KERNEL_ARG_VALUE) {
+            desc->args[index] = argument->value_or_buffer;
+        } else {
+            struct server_buffer *buffer =
+                command->data.launch.buffers[index];
+            uint64_t address;
+            int status = npu_hal_memory_address(
+                server->hal, buffer->allocation, target,
+                &address);
+
+            if (status < 0 || address > UINT64_MAX - argument->offset)
+                return status < 0 ? status : -EOVERFLOW;
+            desc->args[index] = address + argument->offset;
+        }
+    }
+    return 0;
+}
+
+struct dispatch_result {
+    struct server_launch_group *group;
+    struct server_invocation *invocations;
+    size_t launched;
+    int status;
+};
+
+static struct dispatch_result dispatch_group(
+    dayan_server_t *server, struct server_command *command,
+    const size_t *slots, size_t count, uint64_t unit)
+{
+    const struct npu_package_kernel *metadata =
+        command->data.launch.kernel->metadata;
+    const struct npu_package_view *view =
+        &command->data.launch.kernel->module->package->view;
+    const char *entry_symbol = npu_package_string(view,
+                                                   metadata->entry_offset);
+    struct dispatch_result result = { 0, 0, 0, 0 };
+    struct server_launch_group *group;
+    uint64_t shared_size = 0;
+    size_t lane;
+
+    group = calloc(1, sizeof(*group));
+    if (!group) {
+        result.status = -ENOMEM;
+        return result;
+    }
+    result.group = group;
+    result.status = initialize_shared(server, command, slots, count,
+                                      &group->shared_allocation,
+                                      &shared_size);
+    if (result.status < 0)
+        return result;
+    for (lane = 0; lane < count; ++lane) {
+        struct server_invocation *invocation;
+        npu_service_launch_desc_t desc;
+        npu_hal_core_t target = server->slots[slots[lane]].target;
+        uint64_t entry;
+        int status;
+
+        invocation = calloc(1, sizeof(*invocation));
+        if (!invocation) {
+            result.status = -ENOMEM;
+            break;
+        }
+        status = npu_service_kernel_resolve(
+            server->device, target, view->object,
+            (size_t)view->header->object_size, entry_symbol, &entry);
+        if (status < 0) {
+            free(invocation);
+            result.status = status;
+            break;
+        }
+        npu_service_launch_desc_init(&desc);
+        desc.target = target;
+        desc.entry = entry;
+        desc.argc = command->data.launch.argument_count;
+        desc.stack_size = metadata->stack_size ? metadata->stack_size :
+                                                 SERVER_DEFAULT_STACK_SIZE;
+        desc.printf_buffer_size = metadata->printf_buffer_size ?
+            metadata->printf_buffer_size : SERVER_DEFAULT_PRINTF_SIZE;
+        desc.shared_allocation = group->shared_allocation;
+        desc.shared_size = shared_size;
+        desc.task_dim[0] = command->data.launch.config.task_dim.x;
+        desc.task_dim[1] = command->data.launch.config.task_dim.y;
+        desc.task_dim[2] = command->data.launch.config.task_dim.z;
+        desc.task_mode = (uint32_t)command->data.launch.config.task_mode;
+        unit_task_ids(command, unit, (uint32_t)lane, desc.task_id);
+        desc.cookie = command->data.launch.cookie + unit * count + lane;
+        status = fill_launch_arguments(server, command, target, &desc);
+        if (status == 0)
+            status = npu_service_launch(server->device, &desc,
+                                        &invocation->launch);
+        if (status < 0) {
+            free(invocation);
+            result.status = status;
+            break;
+        }
+        invocation->slot_index = slots[lane];
+        invocation->resident = launch_resident_size(metadata);
+        memcpy(invocation->task_id, desc.task_id,
+               sizeof(invocation->task_id));
+        invocation->group = group;
+        invocation->next = result.invocations;
+        result.invocations = invocation;
+        ++result.launched;
+        ++group->active;
+        ++group->expected;
+    }
+    return result;
+}
+
+static int find_transfer_viewer(dayan_server_t *server,
+                                struct server_command *command,
+                                npu_hal_core_t *viewer_out)
+{
+    size_t index;
+
+    for (index = 0; index < server->slot_count; ++index) {
+        npu_hal_core_t viewer = server->slots[index].target;
+
+        if (!server->slots[index].enabled)
+            continue;
+        if (command->data.transfer.destination &&
+            !npu_hal_memory_visible(server->hal,
+                                    command->data.transfer.destination->allocation,
+                                    viewer))
+            continue;
+        if (command->data.transfer.source &&
+            !npu_hal_memory_visible(server->hal,
+                                    command->data.transfer.source->allocation,
+                                    viewer))
+            continue;
+        *viewer_out = viewer;
+        return 0;
+    }
+    return -EXDEV;
+}
+
+static struct server_command *find_simple_action_locked(dayan_server_t *server)
+{
+    struct server_session *session;
+
+    for (session = server->sessions; session; session = session->next) {
+        struct server_context *context;
+
+        for (context = session->contexts; context; context = context->next) {
+            struct server_stream *stream;
+
+            for (stream = context->streams; stream; stream = stream->next) {
+                struct server_command *command = stream->head;
+
+                if (!command || command->dispatching)
+                    continue;
+                if (command->cancelled) {
+                    if (command->kind == SERVER_COMMAND_LAUNCH &&
+                        command->data.launch.invocations)
+                        continue;
+                    if ((command->kind == SERVER_COMMAND_H2D ||
+                         command->kind == SERVER_COMMAND_D2H) &&
+                        command->data.transfer.granted &&
+                        !command->data.transfer.completed)
+                        continue;
+                    return command;
+                }
+                switch (command->kind) {
+                case SERVER_COMMAND_EVENT:
+                    return command;
+                case SERVER_COMMAND_WAIT:
+                    if (event_terminal(command->data.wait.dependency))
+                        return command;
+                    break;
+                case SERVER_COMMAND_H2D:
+                case SERVER_COMMAND_D2H:
+                    if (!command->data.transfer.token_ready ||
+                        command->data.transfer.completed)
+                        return command;
+                    break;
+                case SERVER_COMMAND_D2D:
+                    if (!command->running)
+                        return command;
+                    break;
+                case SERVER_COMMAND_LAUNCH:
+                    break;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int handle_simple_action(dayan_server_t *server,
+                                struct server_command *command)
+{
+    int status = 0;
+
+    if (command->cancelled) {
+        server_complete_command_locked(server, command, -ECANCELED);
+        return 1;
+    }
+    switch (command->kind) {
+    case SERVER_COMMAND_EVENT:
+    case SERVER_COMMAND_WAIT:
+        server_complete_command_locked(server, command, 0);
+        return 1;
+    case SERVER_COMMAND_H2D:
+    case SERVER_COMMAND_D2H:
+        if (command->data.transfer.completed) {
+            server_complete_command_locked(
+                server, command, command->data.transfer.transfer_status);
+            return 1;
+        }
+        if (!command->data.transfer.token_ready) {
+            struct server_buffer *buffer =
+                command->kind == SERVER_COMMAND_H2D ?
+                    command->data.transfer.destination :
+                    command->data.transfer.source;
+            uint64_t offset = command->kind == SERVER_COMMAND_H2D ?
+                command->data.transfer.destination_offset :
+                command->data.transfer.source_offset;
+            npu_hal_data_direction_t direction =
+                command->kind == SERVER_COMMAND_H2D ?
+                    NPU_HAL_DATA_HOST_TO_DEVICE :
+                    NPU_HAL_DATA_DEVICE_TO_HOST;
+
+            status = find_transfer_viewer(server, command,
+                                           &command->data.transfer.viewer);
+            if (status == 0)
+                status = npu_hal_prepare_transfer(
+                    server->hal, buffer->allocation,
+                    command->data.transfer.viewer, offset,
+                    (size_t)command->data.transfer.size, direction,
+                    &command->data.transfer.token);
+            if (status < 0) {
+                server_complete_command_locked(server, command, status);
+            } else {
+                command->data.transfer.token_ready = 1;
+                command->running = 1;
+                command->event->state = NPU_EVENT_RUNNING;
+                pthread_cond_broadcast(&server->condition);
+            }
+            return 1;
+        }
+        return 0;
+    case SERVER_COMMAND_D2D: {
+        uint64_t destination;
+        uint64_t source;
+
+        status = find_transfer_viewer(server, command,
+                                       &command->data.transfer.viewer);
+        if (status == 0)
+            status = npu_hal_memory_address(
+                server->hal,
+                command->data.transfer.destination->allocation,
+                command->data.transfer.viewer, &destination);
+        if (status == 0)
+            status = npu_hal_memory_address(
+                server->hal,
+                command->data.transfer.source->allocation,
+                command->data.transfer.viewer, &source);
+        if (status < 0) {
+            server_complete_command_locked(server, command, status);
+            return 1;
+        }
+        destination += command->data.transfer.destination_offset;
+        source += command->data.transfer.source_offset;
+        command->running = 1;
+        command->dispatching = 1;
+        command->event->state = NPU_EVENT_RUNNING;
+        pthread_mutex_unlock(&server->mutex);
+        status = npu_hal_copy_address(
+            server->hal,
+            command->data.transfer.viewer.cluster, destination, source,
+            (size_t)command->data.transfer.size);
+        pthread_mutex_lock(&server->mutex);
+        command->dispatching = 0;
+        server_complete_command_locked(server, command,
+                                       command->cancelled ? -ECANCELED :
+                                                            status);
+        return 1;
+    }
+    case SERVER_COMMAND_LAUNCH:
+        return 0;
+    }
+    return 0;
+}
+
+static struct server_command *find_launch_to_dispatch_locked(
+    dayan_server_t *server, size_t selected[4], size_t *count_out,
+    uint64_t *unit_out)
+{
+    struct server_session *session;
+
+    for (session = server->sessions; session; session = session->next) {
+        struct server_context *context;
+
+        for (context = session->contexts; context; context = context->next) {
+            struct server_stream *stream;
+
+            for (stream = context->streams; stream; stream = stream->next) {
+                struct server_command *command = stream->head;
+                uint32_t mode;
+
+                if (!command || command->kind != SERVER_COMMAND_LAUNCH ||
+                    command->dispatching || command->cancelled ||
+                    command->data.launch.aggregate_status < 0 ||
+                    command->data.launch.next_unit >=
+                        command->data.launch.total_units)
+                    continue;
+                mode = (uint32_t)command->data.launch.config.task_mode;
+                if (mode == 1U) {
+                    if (!choose_single_slot_locked(server, command,
+                                                   &selected[0]))
+                        continue;
+                    *count_out = 1;
+                } else {
+                    if (!choose_cluster_locked(server, command, selected))
+                        continue;
+                    *count_out = 4;
+                }
+                *unit_out = command->data.launch.next_unit++;
+                reserve_slots_locked(server, command, selected, *count_out);
+                command->dispatching = 1;
+                command->running = 1;
+                command->event->state = NPU_EVENT_RUNNING;
+                return command;
+            }
+        }
+    }
+    return 0;
+}
+
+static void merge_dispatch_result_locked(
+    dayan_server_t *server, struct server_command *command,
+    const size_t *selected, size_t count, struct dispatch_result result)
+{
+    struct server_invocation *invocation;
+    size_t launched_by_slot[4] = { 0, 0, 0, 0 };
+    size_t index;
+
+    for (invocation = result.invocations; invocation;
+         invocation = invocation->next) {
+        for (index = 0; index < count; ++index) {
+            if (invocation->slot_index == selected[index])
+                launched_by_slot[index] = 1;
+        }
+    }
+    for (index = 0; index < count; ++index) {
+        if (!launched_by_slot[index])
+            release_slot_locked(server, command, selected[index]);
+    }
+    if (result.launched) {
+        struct server_invocation *tail = result.invocations;
+
+        while (tail->next)
+            tail = tail->next;
+        tail->next = command->data.launch.invocations;
+        command->data.launch.invocations = result.invocations;
+        result.group->next = command->data.launch.groups;
+        command->data.launch.groups = result.group;
+    } else {
+        if (result.group && result.group->shared_allocation)
+            (void)npu_hal_memory_free(server->hal,
+                                      result.group->shared_allocation);
+        free(result.group);
+        ++command->data.launch.completed_units;
+    }
+    if (result.status < 0 && !command->data.launch.aggregate_status) {
+        command->data.launch.aggregate_status = result.status;
+        command->data.launch.next_unit = command->data.launch.total_units;
+    }
+    command->dispatching = 0;
+    if (!command->data.launch.invocations &&
+        command->data.launch.next_unit == command->data.launch.total_units)
+        server_complete_command_locked(
+            server, command,
+            command->cancelled ? -ECANCELED :
+                command->data.launch.aggregate_status);
+    pthread_cond_broadcast(&server->condition);
+}
+
+static struct server_command *find_invocation_to_poll_locked(
+    dayan_server_t *server, struct server_invocation **invocation_out)
+{
+    struct server_session *session;
+
+    for (session = server->sessions; session; session = session->next) {
+        struct server_context *context;
+
+        for (context = session->contexts; context; context = context->next) {
+            struct server_stream *stream;
+
+            for (stream = context->streams; stream; stream = stream->next) {
+                struct server_command *command = stream->head;
+                struct server_invocation *invocation;
+
+                if (!command || command->kind != SERVER_COMMAND_LAUNCH ||
+                    command->dispatching)
+                    continue;
+                for (invocation = command->data.launch.invocations;
+                     invocation; invocation = invocation->next) {
+                    if (!invocation->polling) {
+                        invocation->polling = 1;
+                        command->dispatching = 1;
+                        *invocation_out = invocation;
+                        return command;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static void remove_group_locked(dayan_server_t *server,
+                                struct server_command *command,
+                                struct server_launch_group *group)
+{
+    struct server_launch_group **link = &command->data.launch.groups;
+
+    while (*link && *link != group)
+        link = &(*link)->next;
+    if (*link)
+        *link = group->next;
+    if (group->shared_allocation)
+        (void)npu_hal_memory_free(server->hal,
+                                  group->shared_allocation);
+    free(group);
+    ++command->data.launch.completed_units;
+}
+
+static int poll_invocation(dayan_server_t *server,
+                           struct server_command *command,
+                           struct server_invocation *invocation)
+{
+    npu_service_launch_info_t info;
+    int terminal = 0;
+    int completion = 0;
+    int status;
+
+    memset(&info, 0, sizeof(info));
+    pthread_mutex_unlock(&server->mutex);
+    status = npu_service_launch_query(invocation->launch, &info);
+    if (status == 0 &&
+        (info.state == NPU_SERVICE_LAUNCH_EXITED ||
+         info.state == NPU_SERVICE_LAUNCH_FAILED)) {
+        terminal = 1;
+        completion = info.status < INT32_MIN || info.status > INT32_MAX ?
+            -EIO : (int)info.status;
+        status = npu_service_launch_release(invocation->launch);
+        if (status < 0)
+            completion = status;
+    }
+    pthread_mutex_lock(&server->mutex);
+    command->dispatching = 0;
+    invocation->polling = 0;
+    if (!terminal) {
+        if (status < 0 && !command->data.launch.aggregate_status) {
+            command->data.launch.aggregate_status = status;
+            command->data.launch.next_unit =
+                command->data.launch.total_units;
+        }
+        return 0;
+    }
+    {
+        struct server_invocation **link =
+            &command->data.launch.invocations;
+        struct server_launch_group *group = invocation->group;
+
+        while (*link && *link != invocation)
+            link = &(*link)->next;
+        if (*link)
+            *link = invocation->next;
+        release_slot_locked(server, command, invocation->slot_index);
+        if (group->active)
+            --group->active;
+        ++group->completed;
+        free(invocation);
+        if (completion < 0 && !command->data.launch.aggregate_status) {
+            command->data.launch.aggregate_status = completion;
+            command->data.launch.next_unit =
+                command->data.launch.total_units;
+        }
+        if (!group->active)
+            remove_group_locked(server, command, group);
+    }
+    if (!command->data.launch.invocations &&
+        (command->cancelled ||
+         command->data.launch.next_unit == command->data.launch.total_units))
+        server_complete_command_locked(
+            server, command,
+            command->cancelled ? -ECANCELED :
+                command->data.launch.aggregate_status);
+    return 1;
+}
+
+static int server_has_pending_locked(const dayan_server_t *server)
+{
+    const struct server_session *session;
+
+    for (session = server->sessions; session; session = session->next) {
+        const struct server_context *context;
+
+        for (context = session->contexts; context; context = context->next) {
+            if (context->pending_commands)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+void *dayan_scheduler_main(void *argument)
+{
+    dayan_server_t *server = argument;
+
+    pthread_mutex_lock(&server->mutex);
+    for (;;) {
+        struct server_command *command;
+        struct server_invocation *invocation;
+        size_t selected[4];
+        size_t count;
+        uint64_t unit;
+        int progressed = 0;
+
+        while ((command = find_simple_action_locked(server)) != 0) {
+            if (!handle_simple_action(server, command))
+                break;
+            progressed = 1;
+            if (server->stop && !server_has_pending_locked(server))
+                break;
+        }
+        if (server->stop && !server_has_pending_locked(server))
+            break;
+        command = server->stop ? 0 : find_launch_to_dispatch_locked(
+            server, selected, &count, &unit);
+        if (command) {
+            struct dispatch_result result;
+
+            pthread_mutex_unlock(&server->mutex);
+            result = dispatch_group(server, command, selected, count, unit);
+            pthread_mutex_lock(&server->mutex);
+            merge_dispatch_result_locked(server, command, selected, count,
+                                         result);
+            progressed = 1;
+        }
+        invocation = 0;
+        command = find_invocation_to_poll_locked(server, &invocation);
+        if (command)
+            progressed |= poll_invocation(server, command, invocation);
+        server_collect_contexts_locked(server);
+        if (!progressed) {
+            struct timespec deadline;
+
+            clock_gettime(CLOCK_REALTIME, &deadline);
+            deadline.tv_nsec += 1000000L;
+            if (deadline.tv_nsec >= 1000000000L) {
+                ++deadline.tv_sec;
+                deadline.tv_nsec -= 1000000000L;
+            }
+            (void)pthread_cond_timedwait(&server->condition, &server->mutex,
+                                         &deadline);
+        }
+    }
+    pthread_mutex_unlock(&server->mutex);
+    return 0;
+}

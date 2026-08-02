@@ -16,7 +16,9 @@ trap 'rm -rf -- "$work_dir"' EXIT HUP INT TERM
     -c "$test_dir/basic.cpp" -o "$work_dir/basic.o"
 
 rg -q 'int vector_add\(' "$work_dir/basic.host.cpp"
-rg -q 'dayan_kernel_descriptor_create' "$work_dir/basic.host.cpp"
+rg -q 'npu_kernel_descriptor_create' "$work_dir/basic.host.cpp"
+rg -q 'npu_kernel_arg_buffer' "$work_dir/basic.host.cpp"
+rg -q 'npu_buffer_t \*output' "$work_dir/basic.host.cpp"
 rg -q '__atomic_test_and_set' "$work_dir/basic.host.cpp"
 rg -q '_ZN6sample10vector_addEPmmf' "$work_dir/basic.host.cpp"
 rg -Fq 'return sample::vector_add(output, value, scale, attrs);' \
@@ -65,7 +67,7 @@ test -x "$work_dir/dycc-program"
 llvm-readelf --file-header "$work_dir/dycc-program" | \
     rg -q 'Machine:.*X86-64'
 llvm-nm --defined-only "$work_dir/dycc-program" | \
-    rg -q 'dayan_kernel_descriptor_create'
+    rg -q 'npu_kernel_descriptor_create'
 
 mkdir "$work_dir/default-output"
 (

@@ -48,6 +48,10 @@ if $readelf --relocations "${relocation_objects[@]}" | \
         grep -Eq 'R_RISCV_(TPREL|TLS_)'; then
     fail "target objects must not use tp-relative TLS"
 fi
+icache_fence_calls=$($readelf --relocations --wide "$build/rpc/proc.o" | \
+    grep -c 'platform_instruction_fence' || true)
+[ "$icache_fence_calls" -eq 1 ] ||
+    fail "icache fence must exist only in the explicit flush RPC"
 if $nm "$elf" | grep -Fq '__global_pointer$'; then
     fail 'firmware must not define __global_pointer$'
 fi

@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${pcfiledir}/..
+includedir=${prefix}/include
+
+Name: DayanRuntime
+Description: Dayan NPU socket Runtime with direct HAL token transfers
+Version: 0.3.0
+Libs: -L${libdir} -lDayanRuntime
+Libs.private: -pthread
+Cflags: -I${includedir}

@@ -3,14 +3,14 @@
 \InputIfFileExists{build/version.tex}{}{\providecommand{\DocVersion}{unknown}}
 
 \title{Dayan Kernel 编程与 ABI 手册}
-\subtitle{协作式 NPU Runtime 接口规范}
+\subtitle{软件栈、工具链与 Host--Device 接口}
 \author{中国科学院计算技术研究所}
 \version{\DocVersion}
 \date{2026-08-02}
 
 \hypersetup{
   pdftitle={Dayan Kernel编程与ABI手册},
-  pdfsubject={Dayan协作式NPU Runtime接口规范},
+  pdfsubject={Dayan软件栈工具链与Host--Device接口},
   pdfauthor={中国科学院计算技术研究所}
 }
 
@@ -25,20 +25,20 @@
 \clearpage
 \pagenumbering{arabic}
 
-\subfile{chapters/01_overview}
-\clearpage
-\subfile{chapters/02_programming_model}
-\clearpage
-\subfile{chapters/03_build_and_load}
+\subfile{chapters/01_architecture}
+\subfile{chapters/02_toolchain}
+\subfile{chapters/03_programming_model}
 \clearpage
 \subfile{chapters/04_dayan_api}
-\clearpage
 \subfile{chapters/05_libc}
+\subfile{chapters/06_os_internals}
+\subfile{chapters/07_host_rpc}
+\subfile{chapters/08_rpc_transport}
 \clearpage
-\subfile{chapters/06_abi}
+
+\appendix
+\subfile{chapters/09_abi}
 \clearpage
-\subfile{chapters/07_rpc_and_trap}
-\clearpage
-\subfile{chapters/08_checklist}
+\subfile{chapters/10_checklist}
 
 \end{document}

@@ -1,31 +1,33 @@
 # Dayan Kernel 编程与 ABI 手册
 
-本目录使用 LaTeX 维护 Dayan Runtime 面向算子 kernel 作者、Runtime 开发者和
-Host 加载器开发者的系统手册。正文入口为 `dayan_kernel_manual.tex`，章节位于
-`chapters/`，版式参考 `~/release/docs` 中的 Dayan NPU 集成手册。
+正文入口为 `dayan_kernel_manual.tex`，章节按以下顺序组织：
+
+1. 软件栈架构；
+2. 工具链与构建环境；
+3. 算子编程模型；
+4. Dayan API 与标准库；
+5. Dayan OS 内部机制；
+6. Host RPC 服务与传输实现；
+7. RISC-V ABI 和交付检查附录。
 
 ## 构建
 
-需要 XeLaTeX、latexmk、`pdfinfo`、`pdffonts` 和 `pdftotext`。系统应安装
-`Noto Sans CJK SC` 与 `DejaVu Sans Mono`；常见 Linux 发行版的 Noto CJK 字体包
-即可提供前者。
+需要 XeLaTeX、latexmk、`pdfinfo`、`pdffonts` 和 `pdftotext`：
 
 ```sh
 make
 make check
 ```
 
-稳定输出为 `build/dayan_kernel_manual.pdf`，同时保留带 Git 版本号的 PDF。
-`make check` 会检查 PDF、字体嵌入、关键 ABI 文本，并确认 `../dayan-api.symbols`
-中的每个公开符号都在 API 章节中出现。
+稳定输出为 `build/dayan_kernel_manual.pdf`。`make check` 还会检查字体嵌入、章节关键
+文本，并确认 `../dayan-api.symbols` 中的每个公开符号都在 API 或标准库章节出现。
 
-## 内容维护约定
+## 内容来源
 
-- `include/api/*.h` 是算子源码接口的权威定义。
-- `dayan-api.symbols` 是运行时加载器允许解析的权威符号白名单。
-- `include/context.h`、`include/rpc.h`、`include/trap.h`、`linker.ld` 和顶层
-  `Makefile` 是 ABI 与镜像布局的权威定义。
-- `~/release/docs/chapters/07_register_list.tex` 是硬件寄存器地址的权威定义。
+- `include/api/*.h` 和 `dayan-api.symbols` 定义 Device 公开接口；
+- `host/dycc/`、`host/include/dayan_kernel.h` 定义源码切分和 Host wrapper；
+- `host/driver/` 定义 Host HAL、Service、Runtime、加载、内存和 RPC 行为；
+- `include/{context,rpc,thread,trap}.h` 中的静态断言约束内部 ABI；
+- `linker.ld`、顶层 `Makefile` 和硬件寄存器文档约束地址与镜像布局。
 
-接口或布局变化时，应先修改代码中的静态断言和测试，再同步修改本手册并执行
-`make check`。
+接口或布局变化后，先更新实现和测试，再修改对应章节并运行 `make check`。

@@ -36,13 +36,21 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
 
     if (request->version != RPC_PROC_CREATE_VERSION ||
         request->size != sizeof(*request) || request->flags ||
-        request->reserved || request->state != RPC_PROC_SUBMITTED ||
+        request->reserved || request->task_reserved ||
+        request->state != RPC_PROC_SUBMITTED ||
         request->argc > RPC_PROC_MAX_ARGS ||
         request->stack_size < RPC_PROC_MIN_STACK_SIZE ||
         request->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         request->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
         (request->entry & 1U) ||
-        !range_inside(request->entry, 2, CONFIG_RAM_BASE, CONFIG_RAM_SIZE))
+        !range_inside(request->entry, 2, CONFIG_RAM_BASE, CONFIG_RAM_SIZE) ||
+        !request->task_dim[0] || !request->task_dim[1] ||
+        !request->task_dim[2] ||
+        request->task_id[0] >= request->task_dim[0] ||
+        request->task_id[1] >= request->task_dim[1] ||
+        request->task_id[2] >= request->task_dim[2] ||
+        (request->task_mode != 1U && request->task_mode != 4U) ||
+        (request->task_mode == 4U && request->task_dim[0] != 4U))
         return 0;
     if (!request->shared_base && !request->shared_size)
         return 1;
@@ -69,7 +77,6 @@ static void managed_proc_cleanup(struct proc *proc, void *arg)
 
 static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
 {
-    struct rpc_proc_create_request input;
     struct rpc_proc_create_request *request;
     struct rpc_managed_proc *managed = 0;
     int status = -EINVAL;
@@ -80,8 +87,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
 
     request = (struct rpc_proc_create_request *)(uintptr_t)arg;
     platform_cache_invalidate(request, sizeof(*request));
-    input = *request;
-    if (!proc_request_valid(&input))
+    if (!proc_request_valid(request))
         goto complete;
 
     managed = malloc(sizeof(*managed));
@@ -90,26 +96,29 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
         goto complete;
     }
     managed->request = request;
-    managed->stack = malloc((size_t)input.stack_size);
-    managed->printf_buffer = input.printf_buffer_size ?
-        malloc((size_t)input.printf_buffer_size) : 0;
+    managed->stack = malloc((size_t)request->stack_size);
+    managed->printf_buffer = request->printf_buffer_size ?
+        malloc((size_t)request->printf_buffer_size) : 0;
     if (!managed->stack ||
-        (input.printf_buffer_size && !managed->printf_buffer)) {
+        (request->printf_buffer_size && !managed->printf_buffer)) {
         status = -ENOMEM;
         goto complete;
     }
 
-    platform_instruction_fence();
     status = proc_init_args(&managed->proc,
-                            (proc_fn)(uintptr_t)input.entry,
-                            managed->stack, (size_t)input.stack_size,
-                            (void *)(uintptr_t)input.shared_base,
+                            (proc_fn)(uintptr_t)request->entry,
+                            managed->stack, (size_t)request->stack_size,
+                            (void *)(uintptr_t)request->shared_base,
                             managed->printf_buffer,
-                            (size_t)input.printf_buffer_size,
-                            input.argc, input.args);
+                            (size_t)request->printf_buffer_size,
+                            request->argc, request->args);
     if (status < 0)
         goto complete;
     status = proc_set_cleanup(&managed->proc, managed_proc_cleanup, managed);
+    if (status < 0)
+        platform_halt();
+    status = proc_set_task(&managed->proc, request->task_id,
+                           request->task_dim, request->task_mode);
     if (status < 0)
         platform_halt();
 
@@ -134,11 +143,20 @@ complete:
     return 1;
 }
 
+static int rpc_icache_flush(uint64_t token, uint64_t *response_command)
+{
+    platform_instruction_fence();
+    *response_command = rpc_command_pack(RPC_ICACHE_FLUSH_RESPONSE, token);
+    return 1;
+}
+
 int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
 {
     if (!response_command)
         return -EINVAL;
     if (opcode == RPC_PROC_CREATE)
         return rpc_proc_create(arg, response_command);
+    if (opcode == RPC_ICACHE_FLUSH)
+        return rpc_icache_flush(arg, response_command);
     return -ENOSYS;
 }

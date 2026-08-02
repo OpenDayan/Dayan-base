@@ -13,6 +13,9 @@ dayan_shared_resource_init
 dayan_shared_resource_produce
 dayan_shared_resource_wait_free
 dayan_shared_resource_wait_ready
+dayan_task_dim
+dayan_task_id
+dayan_task_mode
 dayan_wait_dma
 dayan_wait_lsu
 dayan_wait_macro

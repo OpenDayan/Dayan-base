@@ -16,10 +16,16 @@ int main(void)
     assert(sizeof(struct rpc_heap_request) == 8);
     assert(sizeof(struct rpc_heap_response) == 16);
     assert(sizeof(struct rpc_heap_release) == 16);
-    assert(sizeof(struct rpc_proc_create_request) == 152);
+    assert(sizeof(struct rpc_proc_create_request) == 184);
     assert(offsetof(struct rpc_proc_create_request, args) == 64);
     assert(offsetof(struct rpc_proc_create_request, status) == 128);
+    assert(offsetof(struct rpc_proc_create_request, task_id) == 152);
+    assert(offsetof(struct rpc_proc_create_request, task_dim) == 164);
+    assert(offsetof(struct rpc_proc_create_request, task_mode) == 176);
+    assert(RPC_PROC_CREATE == 0x0100);
     assert(RPC_PROC_CREATE_RESPONSE == (RPC_PROC_CREATE | 0x8000));
+    assert(RPC_ICACHE_FLUSH == 0x0101);
+    assert(RPC_ICACHE_FLUSH_RESPONSE == (RPC_ICACHE_FLUSH | 0x8000));
     assert(sizeof(struct trap_record) == 320);
     assert(DAYAN_DEVICE_MAILBOX(3) == 0x1018U);
     assert(DAYAN_IRQ_MAILBOX(3) == 0x2038U);

@@ -15,6 +15,12 @@ enum dayan_resource_state {
     DAYAN_RESOURCE_READY = 2,
 };
 
+enum dayan_task_axis {
+    DAYAN_TASK_X = 0,
+    DAYAN_TASK_Y = 1,
+    DAYAN_TASK_Z = 2,
+};
+
 /* Per-hart resource. Treat every field as private. */
 typedef struct dayan_resource {
     uint32_t state;
@@ -39,6 +45,10 @@ extern "C" {
 #endif
 
 DAYAN_API void dayan_yield(void);
+/* Logical launch coordinates. Physical Cluster/Core placement stays hidden. */
+DAYAN_API uint32_t dayan_task_id(uint32_t axis);
+DAYAN_API uint32_t dayan_task_dim(uint32_t axis);
+DAYAN_API uint32_t dayan_task_mode(void);
 /* Called from a proc; each function waits for earlier work on that unit. */
 DAYAN_API void dayan_wait_lsu(void);
 DAYAN_API void dayan_wait_mat(void);

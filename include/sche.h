@@ -25,6 +25,9 @@ struct proc {
     proc_cleanup_fn cleanup;
     void *cleanup_arg;
     int exit_status;
+    uint32_t task_id[3];
+    uint32_t task_dim[3];
+    uint32_t task_mode;
 };
 
 _Static_assert(offsetof(struct proc, thread) == 0,
@@ -46,6 +49,8 @@ int proc_init_args(struct proc *proc, proc_fn entry,
                    void *printf_buffer, size_t printf_capacity,
                    size_t argc, const uintptr_t *args);
 int proc_set_cleanup(struct proc *proc, proc_cleanup_fn cleanup, void *arg);
+int proc_set_task(struct proc *proc, const uint32_t task_id[3],
+                  const uint32_t task_dim[3], uint32_t task_mode);
 struct proc *proc_self(void);
 /* Moves an event waiter back to this CPU's ready queue. */
 int proc_wake(struct proc *proc);

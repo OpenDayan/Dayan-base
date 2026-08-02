@@ -18,8 +18,8 @@ __host__ int host_helper(int value)
     return value + host_bias;
 }
 
-__host__ int host_launch(uint64_t *output, uint64_t value, float scale,
-                         const dayan_kernel_launch_attrs_t *attrs)
+__host__ int host_launch(npu_buffer_t *output, uint64_t value, float scale,
+                         const npu_kernel_launch_attrs_t *attrs)
 {
     return sample::vector_add(output, value, scale, attrs);
 }

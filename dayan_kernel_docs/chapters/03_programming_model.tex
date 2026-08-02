@@ -1,0 +1,208 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{算子编程模型}\label{sec:kernel-010}
+
+dycc 源文件可以同时包含 Host 和 Device 代码。每个算子源文件显式包含
+\code{dayan_kernel.h}；Device API 头文件放在 \code{__DAYAN_DEVICE__} 分支内。
+
+\subsection{源码切分}\label{sec:kernel-022}
+
+\begin{dayantable}{源码属性}{tab:kernel-010}{X[20,l] X[26,l] X[26,l] X[28,l]}
+  属性 & Host & Device & 规则 \\
+  \code{__kernel__} & 生成同名 wrapper & 保留函数 & 仅用于 kernel 函数。 \\
+  \code{__host__} & 保留 & 删除 & 用于 Host 函数或全局变量。 \\
+  \code{__device__} & 删除 & 保留 & 用于 Device 函数或全局变量。 \\
+  无属性函数 & 保留 & 保留 & 声明和函数体必须能在两侧编译。 \\
+  无属性全局变量 & 报错 & 报错 & 全局变量必须指定所属侧。 \\
+\end{dayantable}
+
+\begin{dayancode}
+#include <dayan_kernel.h>
+
+#if defined(__DAYAN_DEVICE__)
+#include <dayan_sys.h>
+#include <stdio.h>
+#endif
+#include <stdint.h>
+
+__host__ uint64_t host_bias = 1;
+__device__ uint64_t device_calls = 0;
+
+uint64_t clamp_count(uint64_t n)
+{
+    return n > 1024 ? 1024 : n;
+}
+
+__device__ uint64_t next_call(void)
+{
+    return ++device_calls;
+}
+
+__kernel__ void demo_kernel(uint64_t count)
+{
+    printf("count=%lu call=%lu\n", (unsigned long)clamp_count(count),
+           (unsigned long)next_call());
+    fflush(stdout);
+    dayan_yield();
+}
+\end{dayancode}
+
+\code{main} 和只使用 Host 库的辅助函数应标为 \code{__host__}。同一条逗号声明中的
+全局变量不能分属两侧。需要切除的函数或变量定义不能来自宏展开，因为 dycc 必须按
+源码范围改写声明。
+
+\subsection{kernel 接口}
+
+\code{__kernel__} 函数应满足：
+
+\begin{itemize}
+  \item 返回 \code{void}，具有外部链接，并在当前翻译单元中恰有一个定义；
+  \item 不是函数模板或可变参数函数；
+  \item 参数不超过 8 个，类型为整数、枚举、指针、引用、\code{float} 或
+        \code{double}。
+\end{itemize}
+
+聚合体不能按值传入；把数据放入 Runtime Buffer。Device 侧的指针或引用在 Host
+wrapper 中改写为 \code{npu_buffer_t *}，应用不会取得或传入 Device 物理地址。
+
+Host 侧的同名 wrapper 返回状态，并在参数末尾追加启动属性。例如：
+
+\begin{dayancode}
+/* Device entry: void demo_kernel(uint64_t *, uint64_t); */
+int demo_kernel(npu_buffer_t *output, uint64_t count,
+                const npu_kernel_launch_attrs_t *attrs);
+\end{dayancode}
+
+整数、枚举和地址直接占用一个 64-bit 参数槽；\code{float} 和 \code{double} 传递
+位模式。wrapper 使用线程安全的 static descriptor 保存嵌入对象和 C++ mangled entry，
+Device module 则按 Context 缓存。首次调用通过
+\code{npu_kernel_descriptor_create} 完成描述符创建，后续调用走原子快路径。
+
+\subsection{启动 kernel}\label{sec:kernel-023}
+
+BL1 与 API ELF 由独立的 \code{dayan_server} 初始化。应用只连接 Service 并创建逻辑
+对象：
+
+\begin{dayancode}
+npu_runtime_t *runtime;
+npu_context_t *context;
+npu_stream_t *stream;
+npu_buffer_t *output;
+
+npu_runtime_open(&runtime, nullptr);
+npu_context_create(runtime, nullptr, &context);
+npu_stream_create(context, nullptr, &stream);
+npu_buffer_desc_t buffer_desc;
+npu_buffer_desc_init(&buffer_desc, 4096);
+npu_buffer_create(context, &buffer_desc, &output);
+
+npu_kernel_launch_attrs_t attrs;
+npu_kernel_launch_attrs_init(&attrs, context, stream);
+attrs.config.task_dim = {8, 1, 1};
+attrs.config.task_mode = NPUTaskMode::kSingleCore;
+
+int status = demo_kernel(output, 64, &attrs);
+\end{dayancode}
+
+\begin{dayantable}{启动属性}{tab:kernel-011}{X[32,l] X[68,l]}
+  字段 & 含义 \\
+  \code{version}、\code{reserved} & 由初始化函数设置；reserved 保持 0。 \\
+  \code{context}、\code{stream} & 启动所属资源域和有序命令队列；二者必须属于同一 Context。 \\
+  \code{config.task_dim} & x、y、z 三维 logical task 数量，三个分量都必须非零。 \\
+  \code{config.task_mode} & \code{kSingleCore} 或 \code{kFourCore}；不含物理 Cluster/Core 编号。 \\
+  \code{flags} & 0 为同步；\code{NPU_KERNEL_LAUNCH_ASYNC} 为异步。 \\
+  \code{timeout_ms} & 同步等待超时；0 使用 Runtime 默认值。 \\
+  \code{cookie} & 原样记录到表示整个 grid 的 Event。 \\
+  \code{event_out} & 异步模式的 Event 输出；异步启动时不能为空。 \\
+\end{dayantable}
+
+同步 wrapper 等待并销毁 Event，返回整个 grid 的聚合状态。异步 wrapper 返回后，
+调用者使用 \code{npu_event_query}、\code{npu_event_wait} 和
+\code{npu_event_destroy} 管理 \code{event_out}。
+
+\subsection{logical grid 与调度模式}
+
+\code{NPUTaskDim3} 与 Triton launch grid 类似，只描述 x、y、z 三个方向上的 logical
+task 数量。\code{kSingleCore} 以单 Core task 为调度单元，Service 展平并调度
+\code{x*y*z} 个 task。\code{kFourCore} 以一个四 Core Cluster 为调度单元，要求
+\code{task_dim.x == 4}；每个 $(y,z)$ group 原子占用同一 Cluster 的 Core 0--3，
+x 坐标分别为 0--3。
+
+Runtime、Service 和 BL1 都校验 mode 与维度。kernel 用
+\code{dayan_task_id}、\code{dayan_task_dim} 和 \code{dayan_task_mode} 读取逻辑坐标，
+不会看到物理 Cluster/Core。
+
+\subsection{Runtime 对象}
+
+Context 是一个客户端在逻辑 Device 上的资源域，不等同于 OS 线程、进程或物理
+Cluster。Buffer、Stream、Module、Kernel 和 Event 都属于一个 Context；跨 Context
+组合对象会被拒绝。销毁 Context 会取消排队任务、等待已经授权的数据 token 收尾，并
+统一释放子对象和 Device allocation。
+
+Stream 是有序命令队列。同一 Stream 的传输、launch、wait 和 Event 按提交顺序推进；
+不同 Stream 可以并发，但不保证同时占用硬件。\code{npu_stream_wait_event} 建立显式的
+跨 Stream 依赖；Host 阻塞由 \code{npu_event_wait} 或
+\code{npu_stream_synchronize} 表达。
+
+Module 是已加载的 Kernel Package，Kernel 是其中一个可启动入口。Package 元信息包含
+目标 ISA、参数布局、支持的 task mode、每 Core 最大 task 数、resident memory 和同步
+资源声明。不可变代码和只读数据允许跨 Context 共享；可写数据、BSS 和 Context 相关
+重定位结果保持隔离。同步资源只描述类型、数量和初始参数，地址由 Service/HAL 分配。
+
+Buffer 是 Runtime 管理的逻辑 Device 内存对象。应用只使用 Buffer handle 和 offset；
+Service 根据可见性选择调度目标，HAL 决定具体 region、地址和传输 provider。
+
+\subsection{执行模型}
+
+每个 hart 运行独立的协作式 scheduler。kernel 对应一个 proc，只有在调用 yield、
+等待执行单元、等待 resource、执行阻塞 RPC 或退出时才切回 scheduler。Host mailbox
+使用轮询状态，不会抢占正在执行的 proc。
+
+\code{dayan_yield} 只把当前 proc 放回本 hart 的 ready queue。系统没有优先级、时间片
+或跨 hart 迁移；长时间不进入等待点的 kernel 会阻塞同一 hart 上的其它 proc。
+
+LSU、MAT、VEC 和 MACRO 可以异步执行。\code{dayan_wait_*} 等待调用前已发射到对应
+单元的工作。硬件 Produce 队列同时保证全局 32 项、每单元 2 项；软件不能超过这一
+无阻塞容量。
+
+\subsection{内存模型}
+
+Device RAM 中的普通数据、栈和私有堆属于单个 hart 的非一致性访问域。跨 hart 数据
+放在 Host coherent window 中；当前 proc 的 allocation 基址由 \code{shared} 读取：
+
+\begin{dayancode}
+#include <dayan_sys.h>
+
+struct layout *data = (struct layout *)shared;
+\end{dayancode}
+
+\code{shared == NULL} 表示没有 coherent allocation。Device ABI 不携带 allocation
+长度，Host 和算子必须使用同一布局。\code{shared} 绑定 \code{gp}，只读其值，不要
+给该变量赋值。
+
+每 hart 私有堆供 \code{malloc} 使用。初始 region 不足时，Dayan OS 通过 Host RPC
+扩展；私有堆地址不能跨 hart 释放，也不能用于跨核共享。
+
+\subsection{resource 模型}
+
+两类 resource 都遵循 \code{FREE -> BUSY -> READY -> FREE}。\code{alloc} 设置
+producer/consumer 数量；最后一个 producer 发布 READY，最后一个 consumer 释放为
+FREE。
+
+\begin{dayantable}{resource 类型}{tab:kernel-012}{X[29,l] X[31,l] X[40,l]}
+  类型 & 存储位置 & 使用范围 \\
+  \code{dayan_resource_t} & 当前 hart 的栈或私有堆 & 同一 hart 内；事件链表等待，不使用原子指令。 \\
+  \code{dayan_shared_resource_t} & \code{shared} allocation & 跨 hart；使用原子状态、锁和 scheduler poll。 \\
+\end{dayantable}
+
+resource 的函数和所有权规则见第~\ref{sec:kernel-030}~节。
+
+\subsection{C++ 范围}
+
+Device 代码可以使用不依赖 Runtime 支持的类、模板和内联泛型。当前没有 C++ exception、
+RTTI、标准 C++ 库、全局构造器或析构器。Dayan OS 不执行 \code{.init_array}；含非平凡
+静态初始化的对象不能使用。
+
+\end{document}

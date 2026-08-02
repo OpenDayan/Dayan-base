@@ -1,0 +1,97 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{RPC 传输与处理}\label{sec:kernel-061}
+
+RPC command 是一个 64-bit word：高 16 位为 opcode，低 48 位为参数。参数通常是
+Device 地址；发送前必须确认高 16 位为 0。
+
+\begin{center}
+\code{command = (opcode << 48) | argument}
+\end{center}
+
+\subsection{mailbox 与 doorbell}
+
+下列地址是相对 \code{CONFIG_CONTROL_BASE} 的 offset：
+
+\begin{dayantable}{RPC 寄存器}{tab:kernel-065}{X[28,l] X[28,l] X[44,l]}
+  寄存器 & offset & 用途 \\
+  Host--Device mailbox & \code{0x1000 + hart*8} & Host 写入 command。 \\
+  CLINT \code{msip} & \code{0x20000 + hart*4} & Host 写 1 提交；Device 写 0 确认。 \\
+  Device--Host mailbox & \code{0x2020 + hart*8} & Device 写入 command。 \\
+  \code{IRQ_STATUS} & \code{0x2000} & Device/Host 查询 outbound pending bit。 \\
+  \code{IRQ_STATUS_SET} & \code{0x2008} & Device 置位本 hart outbound bit。 \\
+  \code{IRQ_STATUS_CLR} & \code{0x200c} & 清除遗留 outbound 状态。 \\
+  \code{IRQ_ENABLE_SET} & \code{0x2010} & 使能对应 Host IRQ。 \\
+\end{dayantable}
+
+两个方向使用相同的握手规则：发送方先写 mailbox，再置 doorbell；接收方处理完 command
+后清除 doorbell。前一笔未确认时，发送方不能复用 mailbox。MMIO 两侧使用
+\code{fence iorw,iorw} 保证 mailbox 与 doorbell 的顺序。
+
+\subsection{Device 侧处理}
+
+每个 hart 有 receive 和 send 两个内部 proc，各使用独立的 4 KiB 栈。
+
+receive proc 轮询 \code{msip}，读取 Host command，调用
+\code{rpc_receive(opcode,arg,response)}。handler 返回值的含义为：正数表示发送
+response，0 表示无响应，负数表示请求已消费但处理失败。receive proc 随后清除
+\code{msip}；有 response 时，它等待 send transaction 完成后再接收下一条 Host
+command。
+
+send proc 独占本 hart 的发送队列。队列为空时等待事件；取到 transaction 后，先等待
+outbound bit 清零，写 mailbox 并置位，再等待 Host 清零。最后执行 cleanup，标记事务
+完成并唤醒调用者。
+
+\code{rpc_call} 在调用 proc 的栈上保存 packet 和 transaction。调用者等待 send proc
+完成，期间 scheduler 可以运行其它 proc。send proc 本身不能调用 \code{rpc_call}，
+否则会等待自己处理的队列。
+
+\subsection{Host 侧处理}
+
+Service 启动独立后台 worker，通过 HAL 轮询或等待每个 Cluster 的 outbound IRQ。
+每个置位 Core 的处理顺序为：
+
+\begin{enumerate}
+  \item 读取 Device--Host mailbox；
+  \item 若 opcode 和 argument 匹配该 hart 的待响应调用，记录 response；否则按
+        第~\ref{sec:kernel-060}~节分派 Host 服务；
+  \item 确认数据与状态已写回后，清除 IRQ bit；
+  \item 唤醒等待 Host--Device response 的线程。
+\end{enumerate}
+
+Service 发出 \code{RPC_PROC_CREATE} 后仍要继续处理反向 RPC。创建 proc 时的 Device
+allocator 可能通过 \code{RPC_HEAP_ACQUIRE} 扩堆；若等待 response 的线程同时停止
+RPC worker，会形成循环等待。仓库的 Service 使用独立 worker，允许这类嵌套。
+
+Host 发布算子模块的顺序是：完成 text 搬运，向每个已启动 hart 发送
+\code{RPC_ICACHE_FLUSH} 并等待响应，最后才把模块 entry 交给 launch 路径。I-cache
+同步是代码发布操作，不属于 proc 创建操作；重复创建同一模块的 proc 不会重复执行
+\code{fence.i}。
+
+\subsection{cache ownership}
+
+普通 Device RAM 不与 Host 硬件一致。RPC 用显式 clean/invalidate 交接数据：
+
+\begin{dayantable}{RPC cache 顺序}{tab:kernel-066}{X[25,l] X[35,l] X[40,l]}
+  对象 & 发布方 & 完成方 \\
+  Device request/packet & Device clean 后置 outbound bit & Host 读取；写 response/status 后清 bit。 \\
+  Device response & Device 在提交前清理旧 line & Host 写入；Device 收到确认后 invalidate。 \\
+  trap record & Device 复制到稳定槽并 clean & Host 读取并清 bit；确认前槽不可复用。 \\
+  proc create 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate 后读取，更新并 clean；Host 查询时重新读取。 \\
+\end{dayantable}
+
+一致性窗口不需要上述普通 RAM 交接；resource 同步仍遵守 acquire/release 语义。
+
+\subsection{并发与失败边界}
+
+每个方向、每个 hart 只有一个硬件 mailbox，因此同一方向的事务由软件串行化；不同
+hart 可以并行。Host 清除 doorbell 后，发送方可立即复用 mailbox 和相关缓冲，接收方
+不得继续访问旧事务数据。
+
+trap report 使用每 hart 单一稳定槽。前一报告未确认时再次异常、send proc 异常或
+嵌套 trap 都会停机。Host 应把未知 opcode 和无效 packet 作为协议错误处理，并仍完成
+必要的 doorbell 确认，避免通道永久阻塞。
+
+\end{document}

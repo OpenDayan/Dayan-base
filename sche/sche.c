@@ -112,6 +112,13 @@ int proc_init_args(struct proc *proc, proc_fn entry,
     proc->cleanup = 0;
     proc->cleanup_arg = 0;
     proc->exit_status = 0;
+    proc->task_id[0] = 0;
+    proc->task_id[1] = 0;
+    proc->task_id[2] = 0;
+    proc->task_dim[0] = 1;
+    proc->task_dim[1] = 1;
+    proc->task_dim[2] = 1;
+    proc->task_mode = 1;
     proc->thread.state = THREAD_READY;
     list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
     return 0;
@@ -159,6 +166,32 @@ int proc_set_cleanup(struct proc *proc, proc_cleanup_fn cleanup, void *arg)
         return -EBUSY;
     proc->cleanup = cleanup;
     proc->cleanup_arg = arg;
+    return 0;
+}
+
+int proc_set_task(struct proc *proc, const uint32_t task_id[3],
+                  const uint32_t task_dim[3], uint32_t task_mode)
+{
+    size_t axis;
+
+    if (!proc || !task_id || !task_dim ||
+        (task_mode != 1U && task_mode != 4U) ||
+        (task_mode == 4U && task_dim[0] != 4U))
+        return -EINVAL;
+    if (proc->thread.cpu != cpu_self())
+        return -EPERM;
+    if (proc->thread.type != THREAD_TYPE_PROC ||
+        proc->thread.state != THREAD_READY)
+        return -EBUSY;
+    for (axis = 0; axis < 3; ++axis) {
+        if (!task_dim[axis] || task_id[axis] >= task_dim[axis])
+            return -EINVAL;
+    }
+    for (axis = 0; axis < 3; ++axis) {
+        proc->task_id[axis] = task_id[axis];
+        proc->task_dim[axis] = task_dim[axis];
+    }
+    proc->task_mode = task_mode;
     return 0;
 }
 

@@ -11,7 +11,9 @@ enum rpc_service {
     RPC_HEAP_RELEASE,
     RPC_TRAP_REPORT,
     RPC_PROC_CREATE = 0x0100,
+    RPC_ICACHE_FLUSH = 0x0101,
     RPC_PROC_CREATE_RESPONSE = 0x8100,
+    RPC_ICACHE_FLUSH_RESPONSE = 0x8101,
 };
 
 #define RPC_COMMAND_ARG_MASK 0x0000ffffffffffffULL
@@ -70,7 +72,7 @@ struct rpc_heap_release {
     uint64_t size;
 };
 
-#define RPC_PROC_CREATE_VERSION       1U
+#define RPC_PROC_CREATE_VERSION       2U
 #define RPC_PROC_MAX_ARGS             8U
 #define RPC_PROC_MIN_STACK_SIZE       1024U
 #define RPC_PROC_MAX_STACK_SIZE       (16U * 1024U * 1024U)
@@ -84,9 +86,10 @@ enum rpc_proc_state {
 };
 
 /*
- * Host-owned create descriptor. Host keeps this storage valid until state is
- * EXITED or FAILED. BL1 updates status/state and cleans the corresponding
- * cache lines before replying or completing the proc.
+ * Host-owned create descriptor. Host keeps this storage valid and leaves all
+ * request fields unchanged until state is EXITED or FAILED. BL1 updates only
+ * result fields and state, then cleans the corresponding cache lines before
+ * replying or completing the proc.
  */
 struct rpc_proc_create_request {
     uint32_t version;
@@ -105,6 +108,10 @@ struct rpc_proc_create_request {
     uint32_t proc_id;
     uint32_t hart_id;
     uint64_t cookie;
+    uint32_t task_id[3];
+    uint32_t task_dim[3];
+    uint32_t task_mode;
+    uint32_t task_reserved;
 };
 
 _Static_assert(sizeof(struct rpc_print_request) == 24,
@@ -129,7 +136,13 @@ _Static_assert(offsetof(struct rpc_proc_create_request, args) == 64,
                "Host proc argument offset");
 _Static_assert(offsetof(struct rpc_proc_create_request, status) == 128,
                "Host proc status offset");
-_Static_assert(sizeof(struct rpc_proc_create_request) == 152,
+_Static_assert(offsetof(struct rpc_proc_create_request, task_id) == 152,
+               "Host proc task ID offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, task_dim) == 164,
+               "Host proc task dimension offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, task_mode) == 176,
+               "Host proc task mode offset");
+_Static_assert(sizeof(struct rpc_proc_create_request) == 184,
                "Host proc create ABI must stay fixed");
 
 int rpc_init(void);

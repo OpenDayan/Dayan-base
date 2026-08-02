@@ -1,0 +1,49 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{交付检查}\label{sec:kernel-070}
+
+\subsection{算子与 Host 应用}
+
+\begin{dayantable}{算子检查项}{tab:kernel-070}{X[14,l] X[86,l]}
+  状态 & 检查项 \\
+  \code{[ ]} & 混合源码包含 \code{dayan_kernel.h}，单侧头文件位于对应条件分支。 \\
+  \code{[ ]} & 全局变量标明 Host/Device；kernel 签名、参数类型和参数数量符合限制。 \\
+  \code{[ ]} & Device 指针指向可访问且生命周期足够长的 Device/coherent 内存。 \\
+  \code{[ ]} & 对象没有 GP-relative、TP-relative、TLS、动态链接或内部 OS 符号依赖。 \\
+  \code{[ ]} & Host 加载匹配的固件，并在调用 wrapper 前注册 \code{npu-os-api.elf}。 \\
+  \code{[ ]} & 启动属性经过初始化，hart 范围和内存大小有效。 \\
+  \code{[ ]} & 异步路径释放全部已返回 handle，包括部分提交失败的情况。 \\
+  \code{[ ]} & 跨 hart 数据位于 coherent allocation，并用 shared resource 或明确的原子协议同步。 \\
+\end{dayantable}
+
+\subsection{Host 与 RPC}
+
+\begin{dayantable}{Host 实现检查项}{tab:kernel-071}{X[14,l] X[86,l]}
+  状态 & 检查项 \\
+  \code{[ ]} & 实现 WRITE、CLEAR、HEAP ACQUIRE/RELEASE 和 TRAP REPORT。 \\
+  \code{[ ]} & 按固定宽度解码 packet、print request、proc create 描述符和 trap record。 \\
+  \code{[ ]} & 每 hart、每方向至多一笔未确认 mailbox transaction。 \\
+  \code{[ ]} & 遵守 mailbox-before-doorbell、data/status-before-clear 和 cache ownership 顺序。 \\
+  \code{[ ]} & text 更新后、entry 发布前，对每个可能执行它的 hart 完成 ICACHE FLUSH RPC。 \\
+  \code{[ ]} & 等待 Host--Device response 时，后台 worker 仍处理 Device--Host 服务。 \\
+  \code{[ ]} & 堆 region 的地址、大小、类型和 hart owner 在申请与归还时一致。 \\
+  \code{[ ]} & proc create 描述符保持到 EXITED/FAILED；shared allocation 保持到所有使用者结束。 \\
+\end{dayantable}
+
+\subsection{验证命令}
+
+\begin{dayancode}
+make check
+make docs-check
+
+# 对 --save-temps 保留的 Device object 执行
+llvm-readelf --file-header --relocations operator.cpp.dycc.device.o
+llvm-nm --undefined-only operator.cpp.dycc.device.o
+\end{dayancode}
+
+\code{make check} 验证固件 ABI、公开符号、Host Runtime、dycc 和 QEMU Device 回归；
+\code{make docs-check} 构建本手册并核对公开符号是否有对应条目。
+
+\end{document}

@@ -667,7 +667,12 @@ private:
         std::string name = parameter->getNameAsString();
         if (name.empty())
             name = "__dayan_arg_" + std::to_string(index);
+        QualType canonical = parameter->getType().getCanonicalType();
         std::string rendered;
+        if (canonical->isReferenceType() || canonical->isPointerType()) {
+            rendered = "::npu_buffer_t *" + name;
+            return rendered;
+        }
         llvm::raw_string_ostream stream(rendered);
         parameter->getOriginalType().print(stream, policy_, name);
         stream.flush();
@@ -688,17 +693,50 @@ private:
             name = "__dayan_arg_" + std::to_string(index);
         QualType type = parameter->getType();
         QualType canonical = type.getCanonicalType();
-        if (canonical->isReferenceType())
-            return "static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&" + name + "))";
-        if (canonical->isPointerType() || canonical->isNullPtrType())
-            return "static_cast<uint64_t>(reinterpret_cast<uintptr_t>(" + name + "))";
+        if (canonical->isReferenceType() || canonical->isPointerType())
+            return name;
+        if (canonical->isNullPtrType())
+            return "UINT64_C(0)";
         if (canonical->isIntegralOrEnumerationType())
             return "static_cast<uint64_t>(" + name + ")";
         if (canonical->isSpecificBuiltinType(clang::BuiltinType::Float))
-            return "::dayan_kernel_pack_f32(" + name + ")";
+            return "::npu_kernel_pack_f32(" + name + ")";
         if (canonical->isSpecificBuiltinType(clang::BuiltinType::Double))
-            return "::dayan_kernel_pack_f64(" + name + ")";
+            return "::npu_kernel_pack_f64(" + name + ")";
         return {};
+    }
+
+    bool buffer_parameter(const ParmVarDecl *parameter) const
+    {
+        QualType canonical = parameter->getType().getCanonicalType();
+        return canonical->isReferenceType() || canonical->isPointerType();
+    }
+
+    uint64_t argument_size(const ParmVarDecl *parameter) const
+    {
+        QualType canonical = parameter->getType().getCanonicalType();
+        if (buffer_parameter(parameter) || canonical->isNullPtrType())
+            return 8;
+        return static_cast<uint64_t>(
+            context_.getTypeSizeInChars(canonical).getQuantity());
+    }
+
+    uint64_t buffer_alignment(const ParmVarDecl *parameter) const
+    {
+        QualType canonical = parameter->getType().getCanonicalType();
+        QualType pointee = canonical->getPointeeType();
+        if (pointee.isNull() || pointee->isVoidType() ||
+            pointee->isFunctionType() || pointee->isIncompleteType())
+            return 1;
+        return static_cast<uint64_t>(
+            context_.getTypeAlignInChars(pointee).getQuantity());
+    }
+
+    uint32_t buffer_access(const ParmVarDecl *parameter) const
+    {
+        QualType pointee =
+            parameter->getType().getCanonicalType()->getPointeeType();
+        return pointee.isConstQualified() ? 1U : 3U;
     }
 
     std::string mangled_name(const FunctionDecl *decl)
@@ -733,7 +771,7 @@ private:
         }
         if (decl->getNumParams())
             out << ", ";
-        out << "const ::dayan_kernel_launch_attrs_t *__dayan_launch_attrs)";
+        out << "const ::npu_kernel_launch_attrs_t *__dayan_launch_attrs)";
         if (!definition) {
             out << ";\n#line " << after_line << " \""
                 << escape_string(input_name_) << "\"\n";
@@ -741,9 +779,26 @@ private:
         }
 
         out << "\n{\n"
-            << "    static ::dayan_kernel_descriptor_t *__dayan_descriptor = nullptr;\n"
-            << "    static unsigned char __dayan_init_lock = 0;\n"
-            << "    ::dayan_kernel_descriptor_t *__dayan_local =\n"
+            << "    static ::npu_kernel_descriptor_t *__dayan_descriptor = nullptr;\n"
+            << "    static unsigned char __dayan_init_lock = 0;\n";
+        if (decl->getNumParams()) {
+            out << "    static const ::npu_package_argument_t __dayan_metadata[] = {\n";
+            for (unsigned i = 0; i < decl->getNumParams(); ++i) {
+                const ParmVarDecl *parameter = decl->getParamDecl(i);
+                if (buffer_parameter(parameter)) {
+                    out << "        { ::NPU_PACKAGE_ARG_BUFFER, 8U, "
+                        << buffer_alignment(parameter) << "U, "
+                        << buffer_access(parameter) << "U }";
+                } else {
+                    out << "        { ::NPU_PACKAGE_ARG_VALUE, "
+                        << argument_size(parameter) << "U, 0U, 0U }";
+                }
+                out << (i + 1 == decl->getNumParams() ? "\n" : ",\n");
+            }
+            out << "    };\n";
+        }
+        out
+            << "    ::npu_kernel_descriptor_t *__dayan_local =\n"
             << "        __atomic_load_n(&__dayan_descriptor, __ATOMIC_ACQUIRE);\n"
             << "    if (!__dayan_local) {\n"
             << "        while (__atomic_test_and_set(&__dayan_init_lock, "
@@ -752,9 +807,14 @@ private:
             << "        __dayan_local = __atomic_load_n(&__dayan_descriptor, "
                "__ATOMIC_RELAXED);\n"
             << "        if (!__dayan_local) {\n"
-            << "            int __dayan_status = ::dayan_kernel_descriptor_create(\n"
+            << "            int __dayan_status = ::npu_kernel_descriptor_create(\n"
             << "                ::__kernel_obj__, ::__kernel_obj_size__, \""
-            << escape_string(mangled_name(decl)) << "\", &__dayan_local);\n"
+            << escape_string(mangled_name(decl)) << "\", ";
+        if (decl->getNumParams())
+            out << "__dayan_metadata, " << decl->getNumParams();
+        else
+            out << "nullptr, 0";
+        out << ", &__dayan_local);\n"
             << "            if (__dayan_status < 0) {\n"
             << "                __atomic_clear(&__dayan_init_lock, __ATOMIC_RELEASE);\n"
             << "                return __dayan_status;\n"
@@ -765,16 +825,24 @@ private:
             << "        __atomic_clear(&__dayan_init_lock, __ATOMIC_RELEASE);\n"
             << "    }\n";
         if (decl->getNumParams()) {
-            out << "    const uint64_t __dayan_args[] = {\n";
+            out << "    ::npu_kernel_arg_t __dayan_args["
+                << decl->getNumParams() << "] = {};\n";
             for (unsigned i = 0; i < decl->getNumParams(); ++i) {
-                out << "        " << argument_expression(decl->getParamDecl(i), i)
-                    << (i + 1 == decl->getNumParams() ? "\n" : ",\n");
+                const ParmVarDecl *parameter = decl->getParamDecl(i);
+                if (buffer_parameter(parameter)) {
+                    out << "    ::npu_kernel_arg_buffer(&__dayan_args[" << i
+                        << "], " << argument_expression(parameter, i)
+                        << ", 0, " << buffer_access(parameter) << "U);\n";
+                } else {
+                    out << "    ::npu_kernel_arg_value(&__dayan_args[" << i
+                        << "], " << argument_expression(parameter, i)
+                        << ", " << argument_size(parameter) << "U);\n";
+                }
             }
-            out << "    };\n"
-                << "    return ::dayan_kernel_launch(__dayan_local, __dayan_args, "
+            out << "    return ::npu_kernel_descriptor_launch(__dayan_local, __dayan_args, "
                 << decl->getNumParams() << ", __dayan_launch_attrs);\n";
         } else {
-            out << "    return ::dayan_kernel_launch(__dayan_local, nullptr, 0, "
+            out << "    return ::npu_kernel_descriptor_launch(__dayan_local, nullptr, 0, "
                    "__dayan_launch_attrs);\n";
         }
         out << "}\n#line " << after_line << " \""
@@ -1380,7 +1448,7 @@ static std::optional<fs::path> find_runtime_archive(const Options &options)
 
     fs::path prefix = options.root.parent_path().parent_path();
     const fs::path candidates[] = {
-        options.root / "build/host/runtime/libDayanRuntime.a",
+        options.root / "build/host/driver/libDayanRuntime.a",
         options.root.parent_path() / "libDayanRuntime.a",
         prefix / "lib/libDayanRuntime.a",
         prefix / "lib64/libDayanRuntime.a",

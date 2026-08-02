@@ -21,7 +21,7 @@ $(TARGET): $(SOURCE) include/dayan_compiler.h
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDLIBS)
 
 check: $(TARGET)
-	$(MAKE) -C ../runtime all
+	$(MAKE) -C ../driver all
 	DYCC_BIN=$(abspath $(TARGET)) ./tests/test_dycc.sh
 
 clean:

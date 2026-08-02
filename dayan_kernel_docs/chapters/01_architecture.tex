@@ -1,0 +1,82 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{软件栈架构}\label{sec:kernel-001}
+
+Dayan 的 Host 驱动明确分为 HAL、Service 和 Runtime 三层。三层不是目录上的别名，
+而是三个不同的依赖边界：应用只链接 \code{libDayanRuntime}；
+\code{dayan_server} 由 Service 与一个 HAL backend 组成；Dayan OS 则独立运行在
+Device。dycc 在构建期生成 Host wrapper 和 Device 模块。
+
+\subsection{系统软件组件}
+
+\begin{dayantable}{Dayan 系统软件组件}{tab:kernel-001}{X[20,l] X[23,l] X[57,l]}
+  组件 & 阶段与位置 & 职责 \\
+  编译器：\code{dycc}、Host/Device Clang & 构建期，Host & 切分混合源码，生成 Host wrapper、RV64 \code{ET_REL} 和 Kernel Package。 \\
+  Runtime：\code{libDayanRuntime} & 运行期，应用进程 & 提供 Context、Buffer、Stream、Module、Kernel 和 Event；通过 Unix socket 提交逻辑请求。 \\
+  Service：\code{dayan_server} & 运行期，独立 Host 进程 & 加载 BL1 和 API ELF，处理全部 Host--Device RPC，重定位模块并调度 logical task。 \\
+  HAL：\code{dayan_server} 内部 & 运行期，Host & 抽象寄存器、IRQ、doorbell、内存分配和数据传输；当前 backend 连接 cmodel FUSE/XDMA。 \\
+  Dayan OS：\code{npu-os.elf} & 运行期，Device & 初始化各 hart，创建和调度 proc，向 kernel 提供 DAPI/libc，并发起反向 RPC。 \\
+\end{dayantable}
+
+HAL 的控制接口只供 Service 使用。Service 取得由 HAL 创建的 opaque allocation，
+不会依赖 FUSE 文件名或 \code{pread}/\code{pwrite} 细节。Runtime 只编译独立的
+data-plane provider ABI；该 ABI 不含物理地址、Cluster 或 Core。增加 ioctl backend
+时，可以分别实现控制侧 HAL ops 和客户端 data-plane provider，而不改变应用 API、
+对象协议或调度器。
+
+\subsection{组件边界}
+
+\begin{dayantable}{组件边界}{tab:kernel-002}{X[24,l] X[28,l] X[48,l]}
+  边界 & 两端 & 契约 \\
+  Host 调用接口 & wrapper/应用与 Runtime & 所有 Runtime 符号使用 \code{npu_} 前缀；对象以 opaque handle 表示。 \\
+  socket 控制面 & Runtime 与 Service & 只传 session/object ID、Package、logical grid、Buffer offset 和 Event 状态，不传物理拓扑。 \\
+  token 数据面 & Runtime 与 HAL provider & Service 授权 opaque token；Runtime 直接使用随 HELLO 导入的 data-plane handle 搬运 Host payload。 \\
+  HAL 控制面 & Service 与 HAL backend & 使用设备无关的 topology、allocation、register、IRQ、boot 和 RPC command 接口。 \\
+  Host--Device 接口 & Service 与 Dayan OS & 通过 Device RAM、mailbox、doorbell 和 RPC 交换启动请求、完成状态及 Host 服务请求。 \\
+  Device ABI & Device kernel 与 Dayan OS & kernel 遵守固定 RV64 ABI；未定义符号只能来自公开 API ELF。 \\
+\end{dayantable}
+
+\code{npu-os-api.elf} 与实际 BL1 地址一致，但只保留公开符号。Service 用它解析
+Device 对象中的未定义符号；完整的 \code{npu-os.elf} 由 Service 交给 HAL，按
+Cluster 加载并通知 BL0 启动。
+
+\subsection{构建期：生成 Host 程序和 Device 模块}
+
+dycc 对一个混合源码翻译单元生成两侧代码。Host 侧保留 Host 函数，并为每个 kernel
+生成 wrapper；Device 侧保留 Device 函数和 kernel。Device Clang 将 Device 侧编译为
+可重定位对象，dycc 再把该对象作为只读数据嵌入 Host 目标文件。
+
+\begin{dayancode}
+operator.cpp
+    |
+    +-- Host source ----> Host Clang --------------------+
+    |                                                    +--> operator.o
+    +-- Device source --> Device Clang --> RV64 ET_REL --+
+
+operator.o + Host objects + libDayanRuntime --> Host executable
+\end{dayancode}
+
+Device 对象尚未绑定物理地址。wrapper 首次调用时用 \code{npu_kernel_descriptor_create}
+生成 Package；Runtime 把 Package 交给 Service。Service 根据目标 Cluster 做隔离的
+重定位、上传和 I-cache 发布。不可变代码/只读数据可以跨 Context 共享；含可写 section、
+BSS 或 Context 相关重定位的模块必须保持独立。
+
+\subsection{运行期：控制面与数据面}
+
+部署时先启动 \code{dayan_server}。它打开 HAL，按 Cluster 加载 BL1、启动选定 Core，
+注册 API ELF，并持续运行 RPC worker 和 logical-grid scheduler。应用随后建立 Runtime
+socket session 和 Context；Runtime 本身不加载固件、不轮询 IRQ，也不处理 BL1 RPC。
+
+控制请求沿
+\code{application -> libDayanRuntime -> socket -> Service -> BL1} 前进。Service 将
+\code{NPUTaskDim3} 映射到内部的 \code{(cluster,core)}，完成状态以 Event 返回；物理
+位置不进入 Runtime 公共接口。
+
+H2D/D2H payload 不经过 socket。命令到达 Stream 队首后，Service 校验 Buffer、范围和
+调度可见性，再让 HAL 生成一次性 opaque token。Runtime 的 data worker 使用 token
+直接调用匹配的 HAL data-plane provider，完成后原样回传 token 和状态。Service 收到
+完成消息或 data socket 断开前不会回收对应 allocation。
+
+\end{document}

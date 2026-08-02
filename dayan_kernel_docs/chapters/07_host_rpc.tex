@@ -1,0 +1,111 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{Host RPC 服务}\label{sec:kernel-060}
+
+Dayan OS 主动请求的 opcode 1--5 必须由 Host 实现。Host 使用反方向的 RPC 发布新代码
+并启动 kernel；响应仍走 Device--Host mailbox。
+
+\subsection{服务列表}
+
+\begin{dayantable}{RPC opcode}{tab:kernel-060}{X[13,l] X[30,l] X[23,l] X[34,l]}
+  opcode & 名称 & 方向 & 用途 \\
+  1 & \code{RPC_WRITE} & Device $\rightarrow$ Host & 输出一段 proc 数据。 \\
+  2 & \code{RPC_CLEAR} & Device $\rightarrow$ Host & 清空指定 proc 的 Host 输出缓冲。 \\
+  3 & \code{RPC_HEAP_ACQUIRE} & Device $\rightarrow$ Host & 为一个 hart 分配私有堆 region。 \\
+  4 & \code{RPC_HEAP_RELEASE} & Device $\rightarrow$ Host & 归还此前分配的私有堆 region。 \\
+  5 & \code{RPC_TRAP_REPORT} & Device $\rightarrow$ Host & 上报同步异常现场。 \\
+  \code{0x0100} & \code{RPC_PROC_CREATE} & Host $\rightarrow$ Device & 在目标 hart 创建 kernel proc。 \\
+  \code{0x0101} & \code{RPC_ICACHE_FLUSH} & Host $\rightarrow$ Device & 在目标 hart 执行一次 \code{fence.i}。 \\
+  \code{0x8100} & \code{RPC_PROC_CREATE_RESPONSE} & Device $\rightarrow$ Host & 确认 create 请求已处理。 \\
+  \code{0x8101} & \code{RPC_ICACHE_FLUSH_RESPONSE} & Device $\rightarrow$ Host & 确认本 hart 的 I-cache 刷新完成。 \\
+\end{dayantable}
+
+Service 的 output 与 trap callback 分别接收 WRITE/CLEAR 和 TRAP REPORT。堆服务
+使用 HAL 的普通 Device RAM allocation，并按 Cluster、Core 和 hart owner 记录所有权。
+
+\subsection{通用 packet}
+
+WRITE、CLEAR、HEAP ACQUIRE 和 HEAP RELEASE 的 command argument 指向 40-byte
+\code{rpc_packet}：
+
+\begin{dayantable}{\code{rpc_packet}}{tab:kernel-061}{X[17,l] X[29,l] X[18,l] X[36,l]}
+  offset & 字段 & 类型 & 含义 \\
+  0 & \code{request_addr} & \code{uint64_t} & 请求数据的 Device 地址。 \\
+  8 & \code{request_size} & \code{uint64_t} & 请求长度。 \\
+  16 & \code{response_addr} & \code{uint64_t} & 响应区的 Device 地址。 \\
+  24 & \code{response_size} & \code{uint64_t} & 响应区长度。 \\
+  32 & \code{status} & \code{int64_t} & Host 写回的结果，负值表示失败。 \\
+\end{dayantable}
+
+Host 先校验 packet 地址、对齐、固定长度和其中的 Device 地址范围。处理完成后先写响应，
+最后写 \code{status}；清除 outbound doorbell 后不得再修改这些区域。
+
+\subsection{输出服务}
+
+WRITE 和 CLEAR 的 request 都是 24-byte \code{rpc_print_request}：
+
+\begin{dayantable}{\code{rpc_print_request}}{tab:kernel-062}{X[18,l] X[28,l] X[18,l] X[36,l]}
+  offset & 字段 & 类型 & 含义 \\
+  0 & \code{hart_id} & \code{uint32_t} & 来源 hart，必须与 mailbox 一致。 \\
+  4 & \code{proc_id} & \code{uint32_t} & 输出所属 proc。 \\
+  8 & \code{data_addr} & \code{uint64_t} & WRITE 数据地址；CLEAR 为 0。 \\
+  16 & \code{data_size} & \code{uint64_t} & WRITE 数据长度；CLEAR 为 0。 \\
+\end{dayantable}
+
+Host 按 Cluster/Core/proc 区分输出流。当前 Service 将单次 WRITE 限制为 16 MiB，并在读取前
+检查整个数据范围位于 Device RAM。
+
+\subsection{堆服务}
+
+\begin{dayantable}{堆 RPC 数据}{tab:kernel-063}{X[29,l] X[18,l] X[53,l]}
+  类型 & 大小 & 字段 \\
+  \code{rpc_heap_request} & 8 & 请求的最小字节数。 \\
+  \code{rpc_heap_response} & 16 & Host 返回的地址和实际大小。 \\
+  \code{rpc_heap_release} & 16 & 待归还的地址和大小。 \\
+\end{dayantable}
+
+Host 把 ACQUIRE 大小向 64-byte 对齐，并返回不小于请求值的普通 RAM region。RELEASE
+只有在地址、大小、类型和 hart owner 都匹配现有 allocation 时成功。
+
+\subsection{异常报告}
+
+TRAP REPORT 不使用 \code{rpc_packet}；command argument 直接指向 320-byte
+\code{trap_record}。记录包含版本、大小、hart/thread 标识、thread 状态、五个 machine/F
+CSR 和 32 个整数寄存器。Host 校验版本、大小与来源 hart 后调用 trap callback。
+
+\subsection{创建 proc}
+
+Host 把 184-byte \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
+\code{EXITED} 或 \code{FAILED}：
+
+\begin{dayantable}{proc create 描述符}{tab:kernel-064}{X[26,l] X[18,l] X[56,l]}
+  字段组 & offset & 含义 \\
+  header/state & 0--15 & version、size、state、flags。 \\
+  launch memory & 16--55 & entry、stack size、shared base/size、printf buffer size。 \\
+  arguments & 56--127 & argc、reserved 和 8 个 64-bit 参数槽。 \\
+  result & 128--151 & status、proc ID、hart ID、cookie。 \\
+  logical task & 152--183 & 三维 task ID、三维 task dim、task mode 和 reserved。 \\
+\end{dayantable}
+
+Dayan OS 校验描述符和地址范围，分配托管 proc/栈/输出缓冲，把状态改为
+\code{RUNNING}，并返回 opcode \code{0x8100} 与同一描述符地址。该响应表示创建完成，
+不表示 kernel 已退出。scheduler cleanup 最后写入 \code{EXITED} 或 \code{FAILED}。
+
+stack size 范围为 1 KiB--16 MiB，printf buffer 不超过 1 MiB，参数数量不超过 8。
+shared 区域为空时 base/size 同时为 0；非空时必须位于 coherent window 且 16-byte 对齐。
+
+\subsection{发布新代码}
+
+\code{fence.i} 只同步执行它的 hart。Host 每次向 Device RAM 写入或改写 text 后，必须
+对所有可能执行该 text 的已启动 hart 分别发送 \code{RPC_ICACHE_FLUSH}，等待对应的
+\code{0x8101} 响应后，才能发布 entry 或发送 \code{RPC_PROC_CREATE}。command argument
+是由 Host 选择并由 Device 原样返回的 48-bit token；无需额外描述符。当前模块加载器
+以模块基址作为 token，并在模块进入可查找表前刷新全部已启动 hart。
+
+\code{RPC_PROC_CREATE} 本身不再执行 \code{fence.i}。create 描述符的请求字段由 Host
+保持不变，因此 Device invalidate 后直接通过 \code{request->field} 校验和初始化；只有
+result 字段与 state 由 Device 更新。
+
+\end{document}

@@ -81,10 +81,10 @@ CONFIG_STAMP := $(BUILD)/.config
 API_COMPILE_TEST := $(BUILD)/tests/api_compile.o
 API_CXX_COMPILE_TEST := $(BUILD)/tests/api_compile.cxx.o
 
-.PHONY: all clean check install docs docs-check host-runtime host-runtime-check \
+.PHONY: all clean check install docs docs-check host-driver host-driver-check \
 	dycc dycc-check FORCE
 
-all: $(ELF) $(API_ELF) $(BIN) $(DUMP) host-runtime dycc
+all: $(ELF) $(API_ELF) $(BIN) $(DUMP) host-driver dycc
 
 docs:
 	$(MAKE) -C dayan_kernel_docs
@@ -92,11 +92,11 @@ docs:
 docs-check:
 	$(MAKE) -C dayan_kernel_docs check
 
-host-runtime:
-	$(MAKE) -C host/runtime all
+host-driver:
+	$(MAKE) -C host/driver all
 
-host-runtime-check:
-	$(MAKE) -C host/runtime check
+host-driver-check:
+	$(MAKE) -C host/driver check
 
 dycc:
 	$(MAKE) -C host/dycc all
@@ -127,7 +127,7 @@ $(BUILD)/%.o: %.S $(CONFIG_STAMP)
 	$(CLANG) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 check: $(ELF) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST) \
-       host-runtime-check dycc-check
+       host-driver-check dycc-check
 	NM="$(NM)" OBJDUMP="$(OBJDUMP)" READELF="$(READELF)" \
 		HARTS="$(HARTS)" STACK_SIZE="$(STACK_SIZE)" \
 		RPC_STACK_SIZE="$(RPC_STACK_SIZE)" TRAP_STACK_SIZE="$(TRAP_STACK_SIZE)" \

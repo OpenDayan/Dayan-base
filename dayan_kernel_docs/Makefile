@@ -63,6 +63,12 @@ check: $(PDF) check-api
 	grep -Fq '0x00400000' $(TEXT)
 	grep -Fq 'rv64imaf_zicsr_zifencei' $(TEXT)
 	grep -Fq 'npu-os-api.elf' $(TEXT)
+	grep -Fq 'dycc' $(TEXT)
+	grep -Fq 'npu_kernel_launch_attrs_t' $(TEXT)
+	grep -Fq '软件栈架构' $(TEXT)
+	grep -Fq 'Dayan OS 内部机制' $(TEXT)
+	grep -Fq 'Host RPC 服务' $(TEXT)
+	grep -Fq 'RPC 传输与处理' $(TEXT)
 
 clean:
 	rm -rf $(BUILD_DIR)

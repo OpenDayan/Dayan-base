@@ -1,0 +1,102 @@
+\documentclass[../dayan_kernel_manual.tex]{subfiles}
+
+\begin{document}
+
+\section{Dayan OS 内部机制}\label{sec:kernel-050}
+
+本章描述 Device 固件内部实现。\code{thread}、\code{proc}、scheduler、allocator 和
+\code{rpc_call} 不在算子符号白名单中。
+
+\subsection{启动}
+
+每个 hart 独立完成以下流程：
+
+\begin{enumerate}
+  \item BL0 从 Host--Device mailbox 读取 BL1 entry，并把 hart ID 放入 \code{a0}；
+  \item BL1 选择本 hart 的 init 栈和 CPU-local 区，设置 \code{tp/current}、
+        \code{gp=0}、trap 栈与 \code{mtvec}；
+  \item \code{init()} 初始化 platform、scheduler、私有堆和两个 RPC proc；
+  \item 进入 \code{scheduler()}，不再返回。
+\end{enumerate}
+
+BL1 清空 \code{mie} 和 \code{mstatus.MIE}。mailbox doorbell 只作为可轮询状态；同步
+异常仍进入 \code{mtvec}。
+
+\subsection{每 hart 状态}
+
+\begin{dayantable}{默认每 hart 预留}{tab:kernel-050}{X[27,l] X[24,l] X[49,l]}
+  区域 & 大小 & 用途 \\
+  CPU-local & 4 KiB & scheduler、allocator、RPC、trap 状态和 init thread。 \\
+  init 栈 & 64 KiB & BL1、初始化和 scheduler。 \\
+  RPC 栈 & 4 KiB $\times$ 2 & receive proc 与 send proc。 \\
+  trap 栈 & 4 KiB & 同步异常入口。 \\
+  初始堆 & 1 MiB & 当前 hart 私有 allocator 的首个 region。 \\
+\end{dayantable}
+
+可变状态集中在 \code{struct cpu}。链接器拒绝普通 \code{.data}/\code{.bss}，防止
+多个 hart 通过非一致性 cache 误共享状态。CPU-local、栈和初始堆均按 hart 切片。
+
+\subsection{thread 与 scheduler}
+
+\code{tp} 始终指向 \code{struct thread} 固定前缀。init thread 的 ID 和 type 为 0；
+proc 的 type 为 1，ID 由本 hart scheduler 从 1 开始分配。
+
+\begin{dayantable}{thread 状态}{tab:kernel-051}{X[23,l] X[15,l] X[62,l]}
+  状态 & 数值 & 含义 \\
+  \code{RUNNING} & 0 & 当前在本 hart 执行。 \\
+  \code{READY} & 1 & 位于 ready queue。 \\
+  \code{WAIT_POLL} & 2 & scheduler 每轮调用非阻塞 predicate。 \\
+  \code{WAIT_EVENT} & 3 & 挂在事件链表，由事件所有者唤醒。 \\
+  \code{WAIT_START} & 4 & thread 构造期间的内部状态。 \\
+  \code{WAIT_EXIT} & 5 & proc 已结束，不再调度。 \\
+\end{dayantable}
+
+scheduler 每轮先扫描张量单元完成 token，再检查 poll queue，最后从 ready queue 取一个
+proc。没有 ready proc、poll waiter 或 event waiter 时进入 platform idle。运行中的
+proc 通过 \code{proc_yield}、\code{proc_wait_poll}、\code{proc_wait_event} 或
+\code{proc_exit} 回到 scheduler。
+
+event wait 把 proc 的 intrusive node 挂到事件所有者链表，唤醒时移回 ready queue；
+poll wait 则由 scheduler 反复执行 predicate。RPC 队列和单核 resource 使用 event，
+mailbox 状态与跨核 resource 使用 poll。
+
+\subsection{上下文与 proc 生命周期}
+
+\code{switch_context} 保存 \code{ra}、\code{s0--s11}、\code{gp} 和 \code{fcsr}，
+并切换 \code{sp}、恢复 PC 与 \code{tp}。\code{gp} 随 proc 保存，因此每个 proc 可以
+绑定不同的 coherent allocation。
+
+新 proc 的启动帧保存 entry、返回地址、\code{a0--a7} 和 shared 基址。bootstrap
+只加载实际参数数量对应的寄存器；entry 正常返回后进入 \code{proc_exit}。详细帧布局见
+附录~\ref{sec:kernel-080}。
+
+普通 proc 的对象和栈由创建者管理。\code{RPC_PROC_CREATE} 创建的托管 proc 注册
+scheduler cleanup；cleanup 在 scheduler 栈上运行，此时可以安全释放 proc 自己的栈、
+输出缓冲和控制对象，并更新 Host 描述符的终态。
+
+\subsection{私有堆}
+
+allocator 为每 hart 独立实例。region 内的空闲块按大小和地址放入 RBTree，分配使用
+best-fit；块头中的前块大小用于合并相邻空闲块。返回地址至少 16-byte 对齐。
+
+初始 region 不归还。空间不足时，allocator 通过 \code{RPC_HEAP_ACQUIRE} 取得普通
+Device RAM region；动态 region 完全空闲后通过 \code{RPC_HEAP_RELEASE} 归还。接入
+前 invalidate，归还前 clean，Host 确认后再次 invalidate。无效或重叠 region 不会加入
+allocator，并立即请求 Host 回收。
+
+\subsection{执行单元完成事件}
+
+\code{dayan_wait_lsu/mat/vec/macro} 把当前 \code{tp} 写入对应 Produce 队列，然后
+进入事件等待。scheduler 的 \code{proc_scan_produce()} 从 BASE 全局完成队列取回
+token，并唤醒对应 proc。DMA 复用 LSU 路径。
+
+\subsection{异常处理}
+
+同步异常先切到每 hart trap 栈，保存整数寄存器、\code{mstatus}、\code{mepc}、
+\code{mcause}、\code{mtval} 和 \code{fcsr}。C handler 加入 hart 与 thread 信息，
+生成稳定的 \code{trap_record}，再通过 RPC 发送给 Host。
+
+普通 proc 异常后以失败状态退出。init/scheduler 异常、嵌套异常、RPC send proc 异常或
+报告无法入队时，Dayan OS 停机；这些场景无法安全恢复或保证诊断送达。
+
+\end{document}

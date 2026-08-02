@@ -33,9 +33,12 @@ done
 
 required=(
     "$root/build/host/dycc/dycc-bin"
-    "$root/build/host/runtime/libDayanRuntime.a"
-    "$root/build/host/runtime/libDayanRuntime.so"
-    "$root/build/host/runtime/libnpu_runtime.a"
+    "$root/build/host/driver/libDayanRuntime.a"
+    "$root/build/host/driver/libDayanRuntime.so"
+    "$root/build/host/driver/libnpu_runtime.a"
+    "$root/build/host/driver/libDayanHal.a"
+    "$root/build/host/driver/libDayanService.a"
+    "$root/build/host/driver/dayan_server"
     "$root/build/npu-os.elf"
     "$root/build/npu-os-api.elf"
     "$root/build/npu-os.bin"
@@ -57,15 +60,20 @@ documentation_target="$destdir$datadir/doc/dayan"
 "$install_tool" -d "$destdir$bindir" "$host_include_target" \
     "$library_target" "$sdk_target/include/api" \
     "$sdk_target/host/include" "$sdk_target/host/dycc/include" \
+    "$sdk_target/host/driver/hal" "$sdk_target/host/driver/server" \
     "$firmware_target" "$pkgconfig_target" "$documentation_target"
 
 "$install_tool" -m 0755 "$root/build/host/dycc/dycc-bin" \
     "$destdir$bindir/dycc"
-"$install_tool" -m 0644 "$root/build/host/runtime/libDayanRuntime.a" \
-    "$root/build/host/runtime/libnpu_runtime.a" "$library_target/"
-"$install_tool" -m 0755 "$root/build/host/runtime/libDayanRuntime.so" \
+"$install_tool" -m 0755 "$root/build/host/driver/dayan_server" \
+    "$destdir$bindir/"
+"$install_tool" -m 0644 "$root/build/host/driver/libDayanRuntime.a" \
+    "$root/build/host/driver/libnpu_runtime.a" \
+    "$root/build/host/driver/libDayanHal.a" \
+    "$root/build/host/driver/libDayanService.a" "$library_target/"
+"$install_tool" -m 0755 "$root/build/host/driver/libDayanRuntime.so" \
     "$library_target/"
-"$install_tool" -m 0644 "$root/host/runtime/dayan-runtime.pc" \
+"$install_tool" -m 0644 "$root/host/driver/dayan-runtime.pc" \
     "$pkgconfig_target/"
 "$install_tool" -m 0644 "$root/host/include/"*.h "$host_include_target/"
 
@@ -75,6 +83,14 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$sdk_target/host/include/"
 "$install_tool" -m 0644 "$root/host/dycc/include/dayan_compiler.h" \
     "$sdk_target/host/dycc/include/"
+"$install_tool" -m 0644 "$root/host/driver/hal/hal.h" \
+    "$root/host/driver/hal/dataplane.h" \
+    "$sdk_target/host/driver/hal/"
+"$install_tool" -m 0644 "$root/host/driver/server/server.h" \
+    "$root/host/driver/server/service.h" \
+    "$sdk_target/host/driver/server/"
+"$install_tool" -m 0644 "$root/host/driver/protocol.h" \
+    "$sdk_target/host/driver/"
 "$install_tool" -m 0644 "$root/dayan-api.symbols" "$sdk_target/"
 
 "$install_tool" -m 0644 "$root/build/npu-os.elf" \
@@ -84,10 +100,11 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$documentation_target/README.md"
 "$install_tool" -m 0644 "$root/host/dycc/README.md" \
     "$documentation_target/dycc.md"
-"$install_tool" -m 0644 "$root/host/runtime/README.md" \
-    "$documentation_target/runtime.md"
+"$install_tool" -m 0644 "$root/host/driver/README.md" \
+    "$documentation_target/driver.md"
 
 echo "install-dayan: dycc       -> $bindir/dycc"
+echo "install-dayan: server     -> $bindir/dayan_server"
 echo "install-dayan: Host SDK   -> $includedir, $libdir"
 echo "install-dayan: Device SDK -> $sdkdir"
 echo "install-dayan: firmware   -> $firmwaredir"

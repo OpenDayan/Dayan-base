@@ -106,6 +106,27 @@ void dayan_yield(void)
     proc_yield();
 }
 
+uint32_t dayan_task_id(uint32_t axis)
+{
+    struct proc *proc = proc_self();
+
+    return proc && axis < 3U ? proc->task_id[axis] : 0U;
+}
+
+uint32_t dayan_task_dim(uint32_t axis)
+{
+    struct proc *proc = proc_self();
+
+    return proc && axis < 3U ? proc->task_dim[axis] : 0U;
+}
+
+uint32_t dayan_task_mode(void)
+{
+    struct proc *proc = proc_self();
+
+    return proc ? proc->task_mode : 0U;
+}
+
 void dayan_wait_lsu(void)
 {
     __asm__ volatile(".insn 4, 0x0000220b" ::: "memory");
