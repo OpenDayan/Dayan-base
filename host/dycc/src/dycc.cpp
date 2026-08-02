@@ -138,9 +138,15 @@ static bool starts_with(const std::string &value, const std::string &prefix)
     return value.compare(0, prefix.size(), prefix) == 0;
 }
 
+static fs::path device_api_include(const fs::path &root)
+{
+    fs::path source_tree = root / "device/include/api";
+    return fs::is_directory(source_tree) ? source_tree : root / "include/api";
+}
+
 static bool is_dayan_root(const fs::path &root)
 {
-    return fs::is_directory(root / "include/api") &&
+    return fs::is_directory(device_api_include(root)) &&
            fs::is_directory(root / "host/include") &&
            fs::is_regular_file(
                root / "host/dycc/include/dayan_compiler.h");
@@ -1101,7 +1107,7 @@ static bool split_source(const Options &options, SplitOutput &output)
         "--target=riscv64-unknown-elf", "-march=rv64imaf_zicsr_zifencei",
         "-mabi=lp64", "-D__DAYAN_DEVICE__=1", "-include",
         (options.root / "host/dycc/include/dayan_compiler.h").string(),
-        "-isystem", (options.root / "include/api").string(),
+        "-isystem", device_api_include(options.root).string(),
         "-isystem", (options.root / "host/include").string(),
     };
     arguments.insert(arguments.end(), options.common_args.begin(),
@@ -1287,7 +1293,7 @@ static std::vector<std::string> device_compile_args(
         "-D__DAYAN_DEVICE__=1", "-D__host__=",
         "-D__device__=__attribute__((used))",
         "-D__kernel__=__attribute__((used,visibility(\"default\")))",
-        "-isystem", (options.root / "include/api").string(),
+        "-isystem", device_api_include(options.root).string(),
         "-isystem", (options.root / "host/include").string(),
     };
     args.insert(args.end(), options.common_args.begin(), options.common_args.end());

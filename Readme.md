@@ -5,15 +5,19 @@
 系统不使用抢占式调度：包括 CLINT 在内的功能中断始终屏蔽，mailbox 状态由专用
 proc 协作式轮询；同步异常仍通过 `mtvec` 进入 trap。
 
+源码按运行位置组织：`device/` 包含 BL0/BL1、Dayan OS、Device API 和 Device
+测试；`host/` 包含 dycc、Runtime、Service 与 HAL；`demo/` 保存同时使用 Host 和
+Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
+
 ## 启动流程
 
-1. `bl0/bootrom.S` 从当前 hart 的 mailbox 读取入口地址，并把 hart id 留在 `a0`。
-2. `bl1/bl1.S` 为该 hart 选择独立栈，令 `tp/current` 指向 CPU-local 中的 init
+1. `device/bl0/bootrom.S` 从当前 hart 的 mailbox 读取入口地址，并把 hart id 留在 `a0`。
+2. `device/bl1/bl1.S` 为该 hart 选择独立栈，令 `tp/current` 指向 CPU-local 中的 init
    thread，清零该区，将 `gp/shared` 置空，配置独立 trap 栈与 `mtvec`，屏蔽功能
    中断并初始化浮点状态。
-3. `boot/boot.c:init()` 初始化平台、调度器、该 hart 的链接期初始堆，以及 RPC
+3. `device/boot/boot.c:init()` 初始化平台、调度器、该 hart 的链接期初始堆，以及 RPC
    收发 proc。
-4. BL1 调用 `sche/sche.c:scheduler()`，此后不再返回。
+4. BL1 调用 `device/sche/sche.c:scheduler()`，此后不再返回。
 
 默认构建假设四个 hart 运行四份相互独立的 OS 状态：
 
@@ -27,7 +31,7 @@ proc 协作式轮询；同步异常仍通过 `mtvec` 进入 trap。
 | 初始堆 | 1 MiB / hart | 红黑树分配器的第一个 region |
 | Host coherent window | `0x00400000`, 4 MiB | Host 按 proc 动态切分，基址由 `gp/shared` 访问 |
 
-固件 RAM 地址集中在顶层 `Makefile` 中，接入真实硬件时应覆盖 `RAM_BASE` 和
+固件 RAM 地址集中在 `device/Makefile` 中，接入真实硬件时应覆盖 `RAM_BASE` 和
 `RAM_SIZE`。coherent memory 不属于固件链接布局：算子提交用量后由 Host 动态分配，
 创建 proc 时把分配基址交给内核。`COHERENT_BASE=0x00400000` 和 4 MiB 的
 `COHERENT_SIZE` 只描述硬件窗口并用于运行时地址校验，不会传给链接器或产生本地预留。
@@ -61,7 +65,7 @@ make
 make check
 ```
 
-`make check` 会先执行独立脚本中的 ELF/ABI 静态检查，再把 `tests/` 中的 list、
+`make check` 会先执行独立脚本中的 ELF/ABI 静态检查，再把 `device/tests/` 中的 list、
 RBTree、allocator、math、RPC ABI 和 printf 测试编译为 RV64 bare-metal ELF，并在
 QEMU `virt` 上逐一运行。QEMU 不在 `PATH` 时可显式指定：
 
@@ -74,7 +78,7 @@ Host↔Device 完整链路仍由 `host/driver/run_cmodel_smoke.sh` 在 RVTNG cmo
 
 默认目标为 `rv64imaf_zicsr_zifencei` / `lp64`，与 `npu-kernels` 的软浮点调用
 约定兼容，同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机
-启动所需的系统扩展。输出位于 `build/`：
+启动所需的系统扩展。固件输出位于 `build/device/`：
 
 `gp` 专用于全局寄存器变量 `shared`，表示当前 proc 的 Host coherent allocation
 基址；它不再承担 RISC-V small-data global pointer 的传统职责。BL1 为 scheduler/init
@@ -150,6 +154,17 @@ socket 提交 package 与 logical task，不接触固件符号表或物理拓扑
 - `host/driver/runtime/`：不暴露物理拓扑的应用对象接口；
 - `build/host/driver/`：`dayan_server`、Dayan Runtime/HAL/Service 库。
 
+### Kernel demos
+
+[`demo/`](demo/README.md) 提供可独立构建和运行的基础 kernel。当前
+`printf_grid` 示例在 Device 上打印每个 logical task 的三维 grid ID、grid 维度、
+task mode 和 Host 传入的 7 个参数：
+
+```sh
+make demo-check
+make -C demo run
+```
+
 配置示例：
 
 ```sh
@@ -160,14 +175,16 @@ make HARTS=4 STACK_SIZE=0x20000 HEAP_SIZE=0x200000 \
 
 ## 子系统约定
 
-`include/container_of.h`、`include/list.h` 和 `include/rbtree.h` 提供一组独立实现的
+`device/include/container_of.h`、`device/include/list.h` 和
+`device/include/rbtree.h` 提供一组独立实现的
 Linux 风格 intrusive 泛型。当前兼容常用的 `container_of/list_entry`、双向循环
 `list_head`，以及 `rb_root/rb_node/rb_link_node/rb_insert_color/rb_erase/rb_entry`
 接口；不引入 Linux 内核源码、RCU、锁、内存屏障、poison 或调试配置。类型相关操作
 由宏在编译期展开，基础指针操作使用 `static inline`，RBTree 平衡代码位于
-`lib/rbtree.c`。
+`device/lib/rbtree.c`。
 
-`sche/` 的调度队列和 `mem/` 的 region 集合都使用 `list_head`。`mem/` 的空闲块
+`device/sche/` 的调度队列和 `device/mem/` 的 region 集合都使用 `list_head`。
+`device/mem/` 的空闲块
 使用按块大小排序的 intrusive RBTree 做 best-fit 分配，并通过边界信息合并
 相邻空闲块。初始 region 永不归还；堆不足时通过 `RPC_HEAP_ACQUIRE` 请求 Host，
 Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。Host 返回的 region 必须不小于
@@ -235,7 +252,7 @@ hart ID 与当前 thread 的 ID/type/state，异步排入 RPC 发送队列，然
 `current` 时无法安全恢复，系统会停机；异常报告无法入队时也会停机，避免静默丢失
 故障信息。
 
-`sche/` 是有独立 proc 栈的非抢占式调度器。`switch_context()` 在当前栈保存
+`device/sche/` 是有独立 proc 栈的非抢占式调度器。`switch_context()` 在当前栈保存
 `ra`、`s0-s11`、`gp` 和 `fcsr`，把保存帧的 `sp` 及恢复入口 `pc` 写入当前 thread，
 再加载目标 thread 的 `sp/pc` 并同步更新 `tp/current`。恢复旧 proc 时从切换帧恢复
 `gp/shared`；首次执行新 proc 时由 bootstrap 从启动帧加载它。软浮点 `lp64` ABI 没有需要跨 C 函数调用
@@ -277,14 +294,15 @@ scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队
 
 ## 算子 API 与同步
 
-`include/api/` 是外部算子唯一受支持的头文件根目录。它包含当前的小型 libc 标准头，
+`device/include/api/` 是源码树中外部算子唯一受支持的头文件根目录。它包含当前的小型 libc 标准头，
 以及只声明 Dayan 系统接口的 `dayan_sys.h`；该头文件不会包含或暴露 `proc`、`thread`、
-`cpu` 和 scheduler 等内部类型。算子应使用 `-Iinclude/api` 编译，不能加入内部
-`include/`。旧的 `lib/include/` 仅保留为转发层，公开声明以 `include/api/` 为准。
+`cpu` 和 scheduler 等内部类型。算子应使用 `-Idevice/include/api` 编译，不能加入内部
+`device/include/`。旧的 `device/lib/include/` 仅保留为转发层，公开声明以
+`device/include/api/` 为准。
 
 所有公开 libc 函数和 DAPI 分别标注到 `.text.api.libc`、`.text.api.dapi`。完整的
 `npu-os.elf` 仍保留全部系统符号，供固件加载和调试；构建同时根据
-`dayan-api.symbols` 生成 `npu-os-api.elf`，其中调试信息及非白名单符号已经移除。
+`device/dayan-api.symbols` 生成 `npu-os-api.elf`，其中调试信息及非白名单符号已经移除。
 运行时算子重定位器应只读取这个 API ELF 的符号表，而不能用完整固件 ELF 解析算子
 未定义符号。`make check` 会检查白名单、两个 API section 和 API ELF 的全局符号集合
 完全一致，并分别用 C11 与 C++17 在只有公开 include 路径的环境下编译算子样例。
@@ -329,7 +347,7 @@ dayan_shared_resource_t *resource = (dayan_shared_resource_t *)shared;
 内部的精确上界和算子布局由 Host/加载器负责。不能用普通 `malloc()` 为跨核资源分配
 内存，也不能在算子 `.o` 中静态定义 `.coherent` section。
 
-`lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
+`device/lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度
 `fabsf/copysignf/fminf/fmaxf/sqrtf/rsqrtf/expf/logf`。浮点格式化暂未实现，
 `printf/puts/putchar` 共享当前 proc 在创建时配置的有限缓冲区；缓冲恰好填满时自动通过

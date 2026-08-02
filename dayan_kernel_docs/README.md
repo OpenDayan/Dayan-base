@@ -20,14 +20,14 @@ make check
 ```
 
 稳定输出为 `build/dayan_kernel_manual.pdf`。`make check` 还会检查字体嵌入、章节关键
-文本，并确认 `../dayan-api.symbols` 中的每个公开符号都在 API 或标准库章节出现。
+文本，并确认 `../device/dayan-api.symbols` 中的每个公开符号都在 API 或标准库章节出现。
 
 ## 内容来源
 
-- `include/api/*.h` 和 `dayan-api.symbols` 定义 Device 公开接口；
+- `device/include/api/*.h` 和 `device/dayan-api.symbols` 定义 Device 公开接口；
 - `host/dycc/`、`host/include/dayan_kernel.h` 定义源码切分和 Host wrapper；
 - `host/driver/` 定义 Host HAL、Service、Runtime、加载、内存和 RPC 行为；
-- `include/{context,rpc,thread,trap}.h` 中的静态断言约束内部 ABI；
-- `linker.ld`、顶层 `Makefile` 和硬件寄存器文档约束地址与镜像布局。
+- `device/include/{context,rpc,thread,trap}.h` 中的静态断言约束内部 ABI；
+- `device/linker.ld`、`device/Makefile` 和硬件寄存器文档约束地址与镜像布局。
 
 接口或布局变化后，先更新实现和测试，再修改对应章节并运行 `make check`。

@@ -39,9 +39,9 @@ required=(
     "$root/build/host/driver/libDayanHal.a"
     "$root/build/host/driver/libDayanService.a"
     "$root/build/host/driver/dayan_server"
-    "$root/build/npu-os.elf"
-    "$root/build/npu-os-api.elf"
-    "$root/build/npu-os.bin"
+    "$root/build/device/npu-os.elf"
+    "$root/build/device/npu-os-api.elf"
+    "$root/build/device/npu-os.bin"
 )
 for file in "${required[@]}"; do
     [[ -f "$file" ]] || {
@@ -77,7 +77,7 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$pkgconfig_target/"
 "$install_tool" -m 0644 "$root/host/include/"*.h "$host_include_target/"
 
-"$install_tool" -m 0644 "$root/include/api/"*.h \
+"$install_tool" -m 0644 "$root/device/include/api/"*.h \
     "$sdk_target/include/api/"
 "$install_tool" -m 0644 "$root/host/include/"*.h \
     "$sdk_target/host/include/"
@@ -91,10 +91,10 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$sdk_target/host/driver/server/"
 "$install_tool" -m 0644 "$root/host/driver/protocol.h" \
     "$sdk_target/host/driver/"
-"$install_tool" -m 0644 "$root/dayan-api.symbols" "$sdk_target/"
+"$install_tool" -m 0644 "$root/device/dayan-api.symbols" "$sdk_target/"
 
-"$install_tool" -m 0644 "$root/build/npu-os.elf" \
-    "$root/build/npu-os-api.elf" "$root/build/npu-os.bin" \
+"$install_tool" -m 0644 "$root/build/device/npu-os.elf" \
+    "$root/build/device/npu-os-api.elf" "$root/build/device/npu-os.bin" \
     "$firmware_target/"
 "$install_tool" -m 0644 "$root/Readme.md" \
     "$documentation_target/README.md"

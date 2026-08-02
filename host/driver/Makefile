@@ -10,7 +10,7 @@ BUILD := $(ROOT)/build/host/driver
 CFLAGS ?= -O2 -g -std=c11 -Wall -Wextra -Werror -fPIC
 CXXFLAGS ?= -O2 -g -std=c++17 -Wall -Wextra -Werror -fPIC
 CPPFLAGS += -I$(ROOT)/host/include -I. -Ihal -Iserver -Iruntime \
-	-idirafter $(ROOT)/include
+	-idirafter $(ROOT)/device/include
 
 PROTOCOL_SOURCE := protocol.c
 HAL_CONTROL_SOURCES := hal/hal.c hal/memory.c hal/fuse.c
@@ -128,7 +128,7 @@ $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 		-mno-relax -msmall-data-limit=0 -ffreestanding -fno-builtin \
 		-fno-common -fno-pic -fno-stack-protector -ffunction-sections \
 		-fdata-sections -O2 -Wall -Wextra -Werror \
-		-I$(ROOT)/include/api -c $< -o $@
+		-I$(ROOT)/device/include/api -c $< -o $@
 
 $(BUILD)/tests/cmodel_smoke: runtime/tests/cmodel_smoke.c \
 		$(PROTOCOL_OBJECT) $(HAL_CONTROL_OBJECTS) $(HAL_CLIENT_OBJECTS) \

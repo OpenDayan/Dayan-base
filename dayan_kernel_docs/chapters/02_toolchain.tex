@@ -19,11 +19,12 @@ make
 
 \begin{dayancode}
 make dycc
-make host-runtime
+make host-driver
+make device
 make docs
 \end{dayancode}
 
-产物位于 \code{build}：固件文件直接放在该目录，Host Driver 位于
+产物位于 \code{build}：固件位于 \code{build/device}，Host Driver 位于
 \code{build/host/driver}，dycc 可执行文件位于 \code{build/host/dycc/dycc-bin}。
 源码树中的 \code{host/dycc/dycc} 是调用该二进制的 launcher。
 
@@ -52,7 +53,7 @@ clang --target=riscv64-unknown-elf \
   -mcmodel=medany -mno-relax -msmall-data-limit=0 \
   -ffreestanding -fno-builtin -fno-common -fno-pic \
   -fno-stack-protector -fno-unwind-tables \
-  -Iinclude/api -O2 -c kernel.c -o kernel.o
+  -Idevice/include/api -O2 -c kernel.c -o kernel.o
 \end{dayancode}
 
 \subsection{安装 SDK}

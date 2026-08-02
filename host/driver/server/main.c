@@ -9,10 +9,10 @@
 #include <string.h>
 
 #ifndef DAYAN_DEFAULT_FIRMWARE
-#define DAYAN_DEFAULT_FIRMWARE "build/npu-os.elf"
+#define DAYAN_DEFAULT_FIRMWARE "build/device/npu-os.elf"
 #endif
 #ifndef DAYAN_DEFAULT_API_ELF
-#define DAYAN_DEFAULT_API_ELF "build/npu-os-api.elf"
+#define DAYAN_DEFAULT_API_ELF "build/device/npu-os-api.elf"
 #endif
 
 static volatile sig_atomic_t stop_requested;

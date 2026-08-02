@@ -39,5 +39,5 @@ __kernel__ void vector_add(uint64_t *output, uint64_t value, float scale)
 } // namespace sample
 
 __host__ int main() {
-    return 0l;
+    host_launch(nullptr, 42, 1.0f, nullptr);
 }

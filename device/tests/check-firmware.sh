@@ -2,13 +2,14 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-build=${BUILD_DIR:-"$root/build"}
+device_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+repo_root=$(CDPATH= cd -- "$device_root/.." && pwd)
+build=${BUILD_DIR:-"$repo_root/build/device"}
 elf="$build/npu-os.elf"
 api_elf="$build/npu-os-api.elf"
 api_compile="$build/tests/api_compile.o"
 api_cxx_compile="$build/tests/api_compile.cxx.o"
-api_symbols="$root/dayan-api.symbols"
+api_symbols="$device_root/dayan-api.symbols"
 
 nm=${NM:-llvm-nm}
 objdump=${OBJDUMP:-llvm-objdump}

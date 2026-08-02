@@ -155,8 +155,8 @@ make -C host/driver
 
 ```sh
 build/host/driver/dayan_server \
-  --firmware build/npu-os.elf \
-  --api-elf build/npu-os-api.elf \
+  --firmware build/device/npu-os.elf \
+  --api-elf build/device/npu-os-api.elf \
   --cluster-count 1 --core-mask 0xf
 ```
 

@@ -41,7 +41,7 @@ make -C "$repo_dir" -j4 all
 make -C "$runtime_dir" cmodel-smoke-bin
 
 "$cmodel_dir/bin/rvt_emulator" -c "$cmodel_harts" \
-    "$qemu" -monitor null -bios "$repo_dir/bl0/bootrom.elf" \
+    "$qemu" -monitor null -bios "$repo_dir/device/bl0/bootrom.elf" \
     -machine rvtng-v0 -nographic -serial none -m 4096 >"$log_file" 2>&1 &
 emulator_pid=$!
 
@@ -68,7 +68,7 @@ fi
 
 NPU_DEVICE_PREFIX="$mount_dir" \
     "$repo_dir/build/host/driver/tests/cmodel_smoke" \
-    "$repo_dir/build/npu-os.elf" \
-    "$repo_dir/build/npu-os-api.elf" \
+    "$repo_dir/build/device/npu-os.elf" \
+    "$repo_dir/build/device/npu-os-api.elf" \
     "$repo_dir/build/host/driver/tests/cmodel_kernel.o" \
     "$cmodel_harts"

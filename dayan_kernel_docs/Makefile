@@ -4,7 +4,7 @@ CLASS := dayan-manual.cls
 CHAPTERS := $(shell find chapters -type f -name '*.tex' -print | sort)
 BUILD_DIR := build
 REPO_ROOT := ..
-PUBLIC_SYMBOLS := $(REPO_ROOT)/dayan-api.symbols
+PUBLIC_SYMBOLS := $(REPO_ROOT)/device/dayan-api.symbols
 API_CHAPTERS := chapters/04_dayan_api.tex chapters/05_libc.tex
 
 GIT_TAG := $(shell git -C $(REPO_ROOT) describe --tags --exact-match HEAD 2>/dev/null)
