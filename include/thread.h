@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "context.h"
+
 struct cpu;
 
 enum thread_state {
@@ -30,17 +32,22 @@ struct thread {
     uint32_t state;
     struct cpu *cpu;
     uintptr_t sp;
+    uintptr_t pc;
     uint32_t type;
 };
 
 _Static_assert(offsetof(struct thread, id) == 0, "thread.id offset");
 _Static_assert(offsetof(struct thread, state) == 4, "thread.state offset");
 _Static_assert(offsetof(struct thread, cpu) == 8, "thread.cpu offset");
-_Static_assert(offsetof(struct thread, sp) == 16, "thread.sp offset");
-_Static_assert(offsetof(struct thread, type) == 24, "thread.type offset");
-_Static_assert(sizeof(struct thread) == 32, "thread layout must stay fixed");
+_Static_assert(offsetof(struct thread, sp) == THREAD_SP_OFFSET,
+               "thread.sp offset");
+_Static_assert(offsetof(struct thread, pc) == THREAD_PC_OFFSET,
+               "thread.pc offset");
+_Static_assert(offsetof(struct thread, type) == 32, "thread.type offset");
+_Static_assert(sizeof(struct thread) == 40, "thread layout must stay fixed");
 
 int thread_init(struct thread *thread, uint32_t type);
+void switch_context(struct thread *prev, struct thread *next);
 
 static inline struct thread *thread_self(void)
 {
@@ -48,11 +55,6 @@ static inline struct thread *thread_self(void)
 
     __asm__ volatile("mv %0, tp" : "=r"(thread));
     return thread;
-}
-
-static inline void thread_set(struct thread *thread)
-{
-    __asm__ volatile("mv tp, %0" : : "r"(thread) : "memory");
 }
 
 #endif

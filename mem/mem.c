@@ -16,8 +16,13 @@ struct block {
     size_t prev_size;
 };
 
+struct free_block {
+    struct block block;
+    struct rb_node node;
+};
+
 struct mem_region {
-    struct mem_region *next;
+    struct list_head node;
     uintptr_t raw;
     size_t raw_size;
     struct block *first;
@@ -27,7 +32,7 @@ struct mem_region {
 #define ALIGN_UP(value)   (((value) + ALIGNMENT - 1) & ~(ALIGNMENT - 1))
 #define ALIGN_DOWN(value) ((value) & ~(ALIGNMENT - 1))
 #define REGION_SIZE       ALIGN_UP(sizeof(struct mem_region))
-#define MIN_BLOCK         ALIGN_UP(sizeof(struct block) + sizeof(struct rb_node))
+#define MIN_BLOCK         ALIGN_UP(sizeof(struct free_block))
 
 static size_t block_size(const struct block *block)
 {
@@ -46,12 +51,12 @@ static struct block *next_block(struct block *block)
 
 static struct rb_node *block_node(struct block *block)
 {
-    return (struct rb_node *)(block + 1);
+    return &((struct free_block *)block)->node;
 }
 
 static struct block *node_block(struct rb_node *node)
 {
-    return ((struct block *)node) - 1;
+    return &rb_entry(node, struct free_block, node)->block;
 }
 
 static int block_before(const struct block *left, const struct block *right)
@@ -65,7 +70,7 @@ static int block_before(const struct block *left, const struct block *right)
 
 static void tree_add(struct mem_state *mem, struct block *block)
 {
-    struct rb_node **link = &mem->free;
+    struct rb_node **link = &mem->free.rb_node;
     struct rb_node *parent = 0;
     struct rb_node *node = block_node(block);
 
@@ -74,27 +79,23 @@ static void tree_add(struct mem_state *mem, struct block *block)
 
         parent = *link;
         if (block_before(block, other))
-            link = &parent->left;
+            link = &parent->rb_left;
         else
-            link = &parent->right;
+            link = &parent->rb_right;
     }
 
-    node->left = 0;
-    node->right = 0;
-    node->parent = parent;
-    node->red = 1;
-    *link = node;
-    rb_insert(&mem->free, node);
+    rb_link_node(node, parent, link);
+    rb_insert_color(node, &mem->free);
 }
 
 static void tree_remove(struct mem_state *mem, struct block *block)
 {
-    rb_remove(&mem->free, block_node(block));
+    rb_erase(block_node(block), &mem->free);
 }
 
 static struct block *tree_best(struct mem_state *mem, size_t size)
 {
-    struct rb_node *node = mem->free;
+    struct rb_node *node = mem->free.rb_node;
     struct block *best = 0;
 
     while (node) {
@@ -102,9 +103,9 @@ static struct block *tree_best(struct mem_state *mem, size_t size)
 
         if (block_size(block) >= size) {
             best = block;
-            node = node->left;
+            node = node->rb_left;
         } else {
-            node = node->right;
+            node = node->rb_right;
         }
     }
     return best;
@@ -138,7 +139,7 @@ static int region_add(struct mem_state *mem, uintptr_t raw, size_t raw_size,
     if (end <= start || end - start < REGION_SIZE + MIN_BLOCK + sizeof(*sentinel))
         return -EINVAL;
 
-    for (other = mem->regions; other; other = other->next) {
+    list_for_each_entry(other, &mem->regions, node) {
         if (overlaps(other, raw, raw_size))
             return -EINVAL;
     }
@@ -150,7 +151,6 @@ static int region_add(struct mem_state *mem, uintptr_t raw, size_t raw_size,
     if (size < MIN_BLOCK)
         return -EINVAL;
 
-    region->next = mem->regions;
     region->raw = raw;
     region->raw_size = raw_size;
     region->first = block;
@@ -161,7 +161,7 @@ static int region_add(struct mem_state *mem, uintptr_t raw, size_t raw_size,
     sentinel->size = USED;
     sentinel->prev_size = size;
 
-    mem->regions = region;
+    list_add(&region->node, &mem->regions);
     mem->capacity += size;
     mem->available += size;
     tree_add(mem, block);
@@ -189,29 +189,25 @@ static int region_grow(struct mem_state *mem, size_t need)
     return region_add(mem, response.addr, response.size, 1);
 }
 
-static struct mem_region **find_region(struct mem_state *mem,
-                                       const void *ptr)
+static struct mem_region *find_region(struct mem_state *mem, const void *ptr)
 {
-    struct mem_region **link = &mem->regions;
+    struct mem_region *region;
     uintptr_t addr = (uintptr_t)ptr;
 
-    while (*link) {
-        struct mem_region *region = *link;
-
+    list_for_each_entry(region, &mem->regions, node) {
         if (addr > (uintptr_t)region->first &&
             addr < region->raw + region->raw_size)
-            return link;
-        link = &region->next;
+            return region;
     }
     return 0;
 }
 
 static int release_region(struct mem_state *mem,
-                          struct mem_region **link, struct block *block)
+                          struct mem_region *region, struct block *block)
 {
-    struct mem_region *region = *link;
     struct rpc_heap_release release;
-    struct mem_region *next;
+    struct list_head *prev;
+    struct list_head *next;
     size_t size;
     long status;
 
@@ -221,7 +217,8 @@ static int release_region(struct mem_state *mem,
 
     release.addr = region->raw;
     release.size = region->raw_size;
-    next = region->next;
+    prev = region->node.prev;
+    next = region->node.next;
     size = block_size(block);
     status = rpc_call(RPC_HEAP_RELEASE,
                       &release, sizeof(release), 0, 0);
@@ -229,7 +226,7 @@ static int release_region(struct mem_state *mem,
         return 0;
 
     /* The host may reclaim region immediately after the successful call. */
-    *link = next;
+    __list_del(prev, next);
     mem->capacity -= size;
     mem->available -= size;
     return 1;
@@ -239,8 +236,8 @@ int mem_init(void *base, size_t size)
 {
     struct mem_state *mem = &cpu_self()->mem;
 
-    mem->free = 0;
-    mem->regions = 0;
+    mem->free = RB_ROOT;
+    INIT_LIST_HEAD(&mem->regions);
     mem->capacity = 0;
     mem->available = 0;
     return region_add(mem, (uintptr_t)base, size, 0);
@@ -292,15 +289,15 @@ void *mem_alloc(size_t size)
 void mem_free(void *ptr)
 {
     struct mem_state *mem = &cpu_self()->mem;
-    struct mem_region **link;
+    struct mem_region *region;
     struct block *block;
     struct block *next;
     size_t released;
 
     if (!ptr || ((uintptr_t)ptr & (ALIGNMENT - 1)))
         return;
-    link = find_region(mem, ptr);
-    if (!link)
+    region = find_region(mem, ptr);
+    if (!region)
         return;
 
     block = ((struct block *)ptr) - 1;
@@ -329,20 +326,20 @@ void mem_free(void *ptr)
     next->prev_size = block_size(block);
     mem->available += released;
 
-    if (!release_region(mem, link, block))
+    if (!release_region(mem, region, block))
         tree_add(mem, block);
 }
 
 size_t mem_size(const void *ptr)
 {
     struct mem_state *mem = &cpu_self()->mem;
-    struct mem_region **link;
+    struct mem_region *region;
     const struct block *block;
 
     if (!ptr || ((uintptr_t)ptr & (ALIGNMENT - 1)))
         return 0;
-    link = find_region(mem, ptr);
-    if (!link)
+    region = find_region(mem, ptr);
+    if (!region)
         return 0;
     block = ((const struct block *)ptr) - 1;
     if (!block_used(block) || block_size(block) < sizeof(*block))

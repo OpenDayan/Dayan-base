@@ -5,23 +5,20 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "list.h"
+#include "rbtree.h"
 #include "thread.h"
 
-struct mem_region;
-struct proc;
-struct rb_node;
-
 struct mem_state {
-    struct rb_node *free;
-    struct mem_region *regions;
+    struct rb_root free;
+    struct list_head regions;
     size_t capacity;
     size_t available;
 };
 
 struct sche_state {
     struct thread init;
-    struct proc *head;
-    struct proc *tail;
+    struct list_head ready;
     uint32_t next_id;
 };
 

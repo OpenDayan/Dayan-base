@@ -49,14 +49,14 @@ LDFLAGS := --target=riscv64-unknown-elf -march=$(ARCH) -mabi=$(ABI) \
            -Wl,--defsym=CONFIG_COHERENT_SIZE=$(COHERENT_SIZE)
 
 C_SOURCES := $(wildcard boot/*.c lib/*.c mem/*.c platform/*.c rpc/*.c sche/*.c)
-S_SOURCES := $(wildcard bl1/*.S)
+S_SOURCES := $(wildcard bl1/*.S sche/*.S)
 OBJECTS := $(patsubst %.c,$(BUILD)/%.o,$(C_SOURCES)) \
            $(patsubst %.S,$(BUILD)/%.o,$(S_SOURCES))
 DEPS := $(OBJECTS:.o=.d)
 CONFIG_STAMP := $(BUILD)/.config
 HOST_CFLAGS := -O2 -g -std=c11 -Wall -Wextra -Werror
-HOST_TESTS := $(BUILD)/tests/rbtree_test $(BUILD)/tests/mem_test \
-              $(BUILD)/tests/math_test
+HOST_TESTS := $(BUILD)/tests/list_test $(BUILD)/tests/rbtree_test \
+              $(BUILD)/tests/mem_test $(BUILD)/tests/math_test
 
 .PHONY: all clean check FORCE
 
@@ -94,15 +94,21 @@ check: $(ELF) $(HOST_TESTS)
 	fi
 	@$(foreach test,$(HOST_TESTS),$(test) && ) true
 
-$(BUILD)/tests/rbtree_test: tests/rbtree_test.c mem/rbtree.c mem/rbtree.h
+$(BUILD)/tests/list_test: tests/list_test.c include/list.h include/container_of.h
 	@mkdir -p $(dir $@)
-	$(HOST_CC) $(HOST_CFLAGS) -Imem tests/rbtree_test.c mem/rbtree.c -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -Iinclude tests/list_test.c -o $@
+
+$(BUILD)/tests/rbtree_test: tests/rbtree_test.c lib/rbtree.c \
+                             include/rbtree.h include/container_of.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -Iinclude tests/rbtree_test.c lib/rbtree.c -o $@
 
 $(BUILD)/tests/mem_test: tests/mem_test.c tests/include/cpu.h \
-                         mem/mem.c mem/rbtree.c mem/rbtree.h
+                         mem/mem.c lib/rbtree.c include/list.h \
+                         include/rbtree.h include/container_of.h
 	@mkdir -p $(dir $@)
-	$(HOST_CC) $(HOST_CFLAGS) -Itests/include -Iinclude -Imem \
-		tests/mem_test.c mem/mem.c mem/rbtree.c -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -Itests/include -Iinclude \
+		tests/mem_test.c mem/mem.c lib/rbtree.c -o $@
 
 $(BUILD)/tests/math_test: tests/math_test.c lib/math.c
 	@mkdir -p $(dir $@)

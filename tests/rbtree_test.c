@@ -12,7 +12,7 @@ struct item {
 };
 
 static struct item items[NODE_COUNT];
-static struct rb_node *root;
+static struct rb_root root = RB_ROOT;
 static unsigned random_state = 1;
 
 static unsigned next_random(void)
@@ -23,7 +23,7 @@ static unsigned next_random(void)
 
 static struct item *item_from_node(struct rb_node *node)
 {
-    return (struct item *)((char *)node - offsetof(struct item, node));
+    return rb_entry(node, struct item, node);
 }
 
 static int check_node(struct rb_node *node, unsigned min, unsigned max,
@@ -38,46 +38,63 @@ static int check_node(struct rb_node *node, unsigned min, unsigned max,
     item = item_from_node(node);
     assert(item->present);
     assert(item->key >= min && item->key < max);
-    assert(node->parent == parent);
-    if (node->red) {
-        assert(!node->left || !node->left->red);
-        assert(!node->right || !node->right->red);
+    assert(rb_parent(node) == parent);
+    if (rb_is_red(node)) {
+        assert(!node->rb_left || rb_is_black(node->rb_left));
+        assert(!node->rb_right || rb_is_black(node->rb_right));
     }
 
     ++*seen;
-    left_height = check_node(node->left, min, item->key, node, seen);
-    right_height = check_node(node->right, item->key + 1, max, node, seen);
+    left_height = check_node(node->rb_left, min, item->key, node, seen);
+    right_height = check_node(node->rb_right,
+                              item->key + 1, max, node, seen);
     assert(left_height == right_height);
-    return left_height + !node->red;
+    return left_height + rb_is_black(node);
 }
 
 static void check_tree(unsigned expected)
 {
+    struct rb_node *node;
+    unsigned key = 0;
+    unsigned ordered = 0;
+    unsigned reverse = NODE_COUNT + 1;
     unsigned seen = 0;
 
-    assert(!root || !root->red);
-    (void)check_node(root, 0, NODE_COUNT + 1, 0, &seen);
+    assert(RB_EMPTY_ROOT(&root) || rb_is_black(root.rb_node));
+    (void)check_node(root.rb_node, 0, NODE_COUNT + 1, 0, &seen);
     assert(seen == expected);
+
+    for (node = rb_first(&root); node; node = rb_next(node)) {
+        assert(item_from_node(node)->key > key);
+        key = item_from_node(node)->key;
+        ++ordered;
+    }
+    assert(ordered == expected);
+
+    ordered = 0;
+    for (node = rb_last(&root); node; node = rb_prev(node)) {
+        assert(item_from_node(node)->key < reverse);
+        reverse = item_from_node(node)->key;
+        ++ordered;
+    }
+    assert(ordered == expected);
 }
 
 static void insert(struct item *item)
 {
-    struct rb_node **link = &root;
+    struct rb_node **link = &root.rb_node;
     struct rb_node *parent = 0;
 
     while (*link) {
         parent = *link;
         if (item->key < item_from_node(parent)->key)
-            link = &parent->left;
+            link = &parent->rb_left;
         else
-            link = &parent->right;
+            link = &parent->rb_right;
     }
-    item->node.left = 0;
-    item->node.right = 0;
-    item->node.parent = parent;
     item->present = 1;
-    *link = &item->node;
-    rb_insert(&root, &item->node);
+    rb_link_node(&item->node, parent, link);
+    rb_insert_color(&item->node, &root);
 }
 
 static void shuffle(unsigned *order)
@@ -96,25 +113,31 @@ static void shuffle(unsigned *order)
 int main(void)
 {
     unsigned order[NODE_COUNT];
+    unsigned round;
     unsigned i;
 
-    for (i = 0; i < NODE_COUNT; ++i) {
-        items[i].key = i + 1;
-        order[i] = i;
-    }
-    shuffle(order);
-    for (i = 0; i < NODE_COUNT; ++i) {
-        insert(&items[order[i]]);
-        check_tree(i + 1);
-    }
+    for (round = 0; round < 32; ++round) {
+        for (i = 0; i < NODE_COUNT; ++i) {
+            items[i].key = i + 1;
+            items[i].present = 0;
+            order[i] = i;
+        }
+        shuffle(order);
+        for (i = 0; i < NODE_COUNT; ++i) {
+            insert(&items[order[i]]);
+            check_tree(i + 1);
+        }
 
-    shuffle(order);
-    for (i = 0; i < NODE_COUNT; ++i) {
-        struct item *item = &items[order[i]];
+        shuffle(order);
+        for (i = 0; i < NODE_COUNT; ++i) {
+            struct item *item = &items[order[i]];
 
-        rb_remove(&root, &item->node);
-        item->present = 0;
-        check_tree(NODE_COUNT - i - 1);
+            rb_erase(&item->node, &root);
+            item->present = 0;
+            assert(RB_EMPTY_NODE(&item->node));
+            check_tree(NODE_COUNT - i - 1);
+        }
+        assert(RB_EMPTY_ROOT(&root));
     }
     return 0;
 }

@@ -3,12 +3,12 @@
 
 #include <stddef.h>
 
-struct mem_region;
-struct rb_node;
+#include "list.h"
+#include "rbtree.h"
 
 struct mem_state {
-    struct rb_node *free;
-    struct mem_region *regions;
+    struct rb_root free;
+    struct list_head regions;
     size_t capacity;
     size_t available;
 };

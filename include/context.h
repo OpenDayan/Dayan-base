@@ -1,0 +1,96 @@
+#ifndef NPU_CONTEXT_H
+#define NPU_CONTEXT_H
+
+#define THREAD_SP_OFFSET       16
+#define THREAD_PC_OFFSET       24
+
+#define SWITCH_FRAME_RA         0
+#define SWITCH_FRAME_S0         8
+#define SWITCH_FRAME_S1        16
+#define SWITCH_FRAME_S2        24
+#define SWITCH_FRAME_S3        32
+#define SWITCH_FRAME_S4        40
+#define SWITCH_FRAME_S5        48
+#define SWITCH_FRAME_S6        56
+#define SWITCH_FRAME_S7        64
+#define SWITCH_FRAME_S8        72
+#define SWITCH_FRAME_S9        80
+#define SWITCH_FRAME_S10       88
+#define SWITCH_FRAME_S11       96
+#define SWITCH_FRAME_FCSR     104
+#define SWITCH_FRAME_SIZE     112
+
+#define PROC_FRAME_ENTRY        0
+#define PROC_FRAME_RA           8
+#define PROC_FRAME_A0          16
+#define PROC_FRAME_A1          24
+#define PROC_FRAME_A2          32
+#define PROC_FRAME_A3          40
+#define PROC_FRAME_A4          48
+#define PROC_FRAME_A5          56
+#define PROC_FRAME_A6          64
+#define PROC_FRAME_A7          72
+#define PROC_FRAME_SIZE        80
+
+#ifndef __ASSEMBLER__
+
+#include <stddef.h>
+#include <stdint.h>
+
+struct switch_frame {
+    uintptr_t ra;
+    uintptr_t s0;
+    uintptr_t s1;
+    uintptr_t s2;
+    uintptr_t s3;
+    uintptr_t s4;
+    uintptr_t s5;
+    uintptr_t s6;
+    uintptr_t s7;
+    uintptr_t s8;
+    uintptr_t s9;
+    uintptr_t s10;
+    uintptr_t s11;
+    uintptr_t fcsr;
+};
+
+struct proc_frame {
+    uintptr_t entry;
+    uintptr_t ra;
+    uintptr_t a0;
+    uintptr_t a1;
+    uintptr_t a2;
+    uintptr_t a3;
+    uintptr_t a4;
+    uintptr_t a5;
+    uintptr_t a6;
+    uintptr_t a7;
+};
+
+_Static_assert(offsetof(struct switch_frame, ra) == SWITCH_FRAME_RA,
+               "switch frame ra offset");
+_Static_assert(offsetof(struct switch_frame, s0) == SWITCH_FRAME_S0,
+               "switch frame s0 offset");
+_Static_assert(offsetof(struct switch_frame, s11) == SWITCH_FRAME_S11,
+               "switch frame s11 offset");
+_Static_assert(offsetof(struct switch_frame, fcsr) == SWITCH_FRAME_FCSR,
+               "switch frame fcsr offset");
+_Static_assert(sizeof(struct switch_frame) == SWITCH_FRAME_SIZE,
+               "switch frame size");
+_Static_assert((SWITCH_FRAME_SIZE & 15) == 0,
+               "switch frame must preserve stack alignment");
+_Static_assert(offsetof(struct proc_frame, entry) == PROC_FRAME_ENTRY,
+               "proc frame entry offset");
+_Static_assert(offsetof(struct proc_frame, ra) == PROC_FRAME_RA,
+               "proc frame ra offset");
+_Static_assert(offsetof(struct proc_frame, a0) == PROC_FRAME_A0,
+               "proc frame a0 offset");
+_Static_assert(offsetof(struct proc_frame, a7) == PROC_FRAME_A7,
+               "proc frame a7 offset");
+_Static_assert(sizeof(struct proc_frame) == PROC_FRAME_SIZE,
+               "proc frame size");
+_Static_assert((PROC_FRAME_SIZE & 15) == 0,
+               "proc frame must preserve stack alignment");
+
+#endif
+#endif
