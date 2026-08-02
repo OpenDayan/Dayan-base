@@ -31,6 +31,9 @@ _start:
     sd      tp, 8(tp)       /* init.cpu points back to the CPU-local block */
     sd      sp, 16(tp)      /* init.sp records the boot stack */
 
+    /* Scheduler/init owns no Host shared allocation. */
+    mv      gp, zero
+
     /* Enable and reset the single-precision floating-point context. */
     li      t0, 0x6000
     csrs    mstatus, t0

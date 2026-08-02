@@ -10,9 +10,10 @@
 #include <dayan_sys.h>
 
 int operator_api_compile(dayan_resource_t *resource,
-                         dayan_shared_resource_t *shared,
                          char *buffer, size_t size)
 {
+    dayan_shared_resource_t *shared_resource =
+        (dayan_shared_resource_t *)shared;
     void *memory = malloc(64);
     int status;
 
@@ -23,12 +24,12 @@ int operator_api_compile(dayan_resource_t *resource,
     status |= dayan_resource_wait_ready(resource);
     status |= dayan_resource_consume(resource);
     status |= dayan_resource_wait_free(resource);
-    status |= dayan_shared_resource_init(shared);
-    status |= dayan_shared_resource_alloc(shared, 1, 1);
-    status |= dayan_shared_resource_produce(shared);
-    status |= dayan_shared_resource_wait_ready(shared);
-    status |= dayan_shared_resource_consume(shared);
-    status |= dayan_shared_resource_wait_free(shared);
+    status |= dayan_shared_resource_init(shared_resource);
+    status |= dayan_shared_resource_alloc(shared_resource, 1, 1);
+    status |= dayan_shared_resource_produce(shared_resource);
+    status |= dayan_shared_resource_wait_ready(shared_resource);
+    status |= dayan_shared_resource_consume(shared_resource);
+    status |= dayan_shared_resource_wait_free(shared_resource);
     dayan_yield();
     dayan_wait_dma();
     dayan_wait_lsu();

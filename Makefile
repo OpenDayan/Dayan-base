@@ -23,7 +23,8 @@ STACK_SIZE      ?= 0x10000
 HEAP_SIZE       ?= 0x100000
 RAM_BASE        ?= 0x80000000
 RAM_SIZE        ?= 0x04000000
-COHERENT_BASE   ?= 0x90000000
+# Host-owned hardware window; these values are not passed to the linker.
+COHERENT_BASE   ?= 0x00400000
 COHERENT_SIZE   ?= 0x00400000
 
 ARCH := rv64imaf_zicsr_zifencei
@@ -33,7 +34,9 @@ CPPFLAGS := -Iinclude/api -Iinclude -Ilib/include \
             -DCONFIG_HART_COUNT=$(HARTS) \
             -DCONFIG_CPU_LOCAL_SIZE=$(CPU_LOCAL_SIZE) \
             -DCONFIG_STACK_SIZE=$(STACK_SIZE) \
-            -DCONFIG_HEAP_SIZE=$(HEAP_SIZE)
+            -DCONFIG_HEAP_SIZE=$(HEAP_SIZE) \
+            -DCONFIG_COHERENT_BASE=$(COHERENT_BASE) \
+            -DCONFIG_COHERENT_SIZE=$(COHERENT_SIZE)
 CFLAGS := --target=riscv64-unknown-elf -march=$(ARCH) -mabi=$(ABI) \
           -mcmodel=medany -mno-relax -msmall-data-limit=0 \
           -O2 -g -std=c11 \
@@ -49,9 +52,7 @@ LDFLAGS := --target=riscv64-unknown-elf -march=$(ARCH) -mabi=$(ABI) \
            -Wl,--defsym=CONFIG_STACK_SIZE=$(STACK_SIZE) \
            -Wl,--defsym=CONFIG_HEAP_SIZE=$(HEAP_SIZE) \
            -Wl,--defsym=CONFIG_RAM_BASE=$(RAM_BASE) \
-           -Wl,--defsym=CONFIG_RAM_SIZE=$(RAM_SIZE) \
-           -Wl,--defsym=CONFIG_COHERENT_BASE=$(COHERENT_BASE) \
-           -Wl,--defsym=CONFIG_COHERENT_SIZE=$(COHERENT_SIZE)
+           -Wl,--defsym=CONFIG_RAM_SIZE=$(RAM_SIZE)
 
 C_SOURCES := $(wildcard boot/*.c lib/*.c mem/*.c platform/*.c rpc/*.c sche/*.c)
 S_SOURCES := $(wildcard bl1/*.S sche/*.S)
@@ -94,22 +95,28 @@ $(BUILD)/%.o: %.S $(CONFIG_STAMP)
 check: $(ELF) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST) \
        $(HOST_TESTS)
 	@test -z "$$($(NM) --undefined-only $(ELF))"
-	@if $(OBJDUMP) --disassemble --no-show-raw-insn $(ELF) | \
-		grep -Eq '(^|[[:space:],(])gp([[:space:],)]|$$)'; then \
-		echo "error: firmware must not access gp"; exit 1; \
-	fi
-	@if $(OBJDUMP) --disassemble --no-show-raw-insn \
-		$(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST) | \
-		grep -Eq '(^|[[:space:],(])gp([[:space:],)]|$$)'; then \
-		echo "error: operator API sample must not access gp"; exit 1; \
-	fi
 	@if $(READELF) --relocations $(OBJECTS) $(API_COMPILE_TEST) \
 		$(API_CXX_COMPILE_TEST) | grep -q 'R_RISCV_GPREL'; then \
 		echo "error: target objects must not contain gp-relative relocations"; \
 		exit 1; \
 	fi
+	@if $(READELF) --relocations $(OBJECTS) $(API_COMPILE_TEST) \
+		$(API_CXX_COMPILE_TEST) | grep -Eq 'R_RISCV_(TPREL|TLS_)'; then \
+		echo "error: target objects must not use tp-relative TLS"; exit 1; \
+	fi
 	@if $(NM) $(ELF) | grep -Fq '__global_pointer$$'; then \
 		echo "error: firmware must not define __global_pointer$$"; exit 1; \
+	fi
+	@if [ "$$($(OBJDUMP) --disassemble --no-show-raw-insn \
+		$(BUILD)/sche/context.o | grep -Ec 'sd[[:space:]]+gp,')" -ne 1 ] || \
+	   [ "$$($(OBJDUMP) --disassemble --no-show-raw-insn \
+		$(BUILD)/sche/context.o | grep -Ec 'ld[[:space:]]+gp,')" -ne 2 ]; then \
+		echo "error: context switch must save and restore per-proc gp"; exit 1; \
+	fi
+	@if ! $(OBJDUMP) --disassemble --no-show-raw-insn \
+		$(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST) | \
+		grep -Eq '(^|[[:space:],(])gp([[:space:],)]|$$)'; then \
+		echo "error: operator shared pointer must read gp"; exit 1; \
 	fi
 	@for encoding in 0000220b 0000420b 0000620b 0000820b; do \
 		if ! $(OBJDUMP) --disassemble $(BUILD)/sche/dapi.o | \

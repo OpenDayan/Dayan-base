@@ -38,7 +38,7 @@ _Static_assert(sizeof(struct cpu) <= CONFIG_CPU_LOCAL_SIZE,
 
 static inline struct cpu *cpu_self(void)
 {
-    return thread_self()->cpu;
+    return current->cpu;
 }
 
 #endif

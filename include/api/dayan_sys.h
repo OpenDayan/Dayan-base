@@ -5,8 +5,8 @@
 
 #include "dayan_attrs.h"
 
-#define DAYAN_COHERENT \
-    __attribute__((section(".coherent"), aligned(64)))
+/* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
+register void *shared __asm__("gp");
 
 enum dayan_resource_state {
     DAYAN_RESOURCE_FREE = 0,
@@ -22,7 +22,7 @@ typedef struct dayan_resource {
     volatile uint32_t lock;
 } dayan_resource_t;
 
-/* Cross-hart resource. The object itself must reside in coherent memory. */
+/* Cross-hart resource. Place it within the allocation rooted at shared. */
 typedef struct dayan_shared_resource {
     uint32_t state;
     uint32_t producer_count;
@@ -55,7 +55,7 @@ DAYAN_API int dayan_resource_consume(dayan_resource_t *resource);
 DAYAN_API int dayan_resource_wait_ready(dayan_resource_t *resource);
 DAYAN_API int dayan_resource_wait_free(dayan_resource_t *resource);
 
-/* Shared resources must be coherent and initialized before publication. */
+/* Shared resources must come from shared and be initialized before publication. */
 DAYAN_API int dayan_shared_resource_init(dayan_shared_resource_t *resource);
 DAYAN_API int dayan_shared_resource_alloc(dayan_shared_resource_t *resource,
                                           uint32_t producer_count,

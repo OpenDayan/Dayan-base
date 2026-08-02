@@ -12,7 +12,7 @@ extern void proc_bootstrap(void);
 
 static struct proc *current_proc(void)
 {
-    struct thread *thread = thread_self();
+    struct thread *thread = current;
 
     if (thread->type != THREAD_TYPE_PROC)
         return 0;
@@ -29,7 +29,7 @@ static void switch_to_scheduler(struct thread *thread)
 
 void sche_init(void)
 {
-    struct thread *init = thread_self();
+    struct thread *init = current;
     struct sche_state *sche = &init->cpu->sche;
 
     init->id = 0;
@@ -63,7 +63,8 @@ int thread_init(struct thread *thread, uint32_t type)
 
 __attribute__((noinline))
 int proc_vinit(struct proc *proc, proc_fn entry,
-               void *stack, size_t stack_size, size_t argc, va_list args)
+               void *stack, size_t stack_size, void *shared_base,
+               size_t argc, va_list args)
 {
     struct proc_frame *frame;
     uintptr_t base;
@@ -90,6 +91,8 @@ int proc_vinit(struct proc *proc, proc_fn entry,
     frame->ra = (uintptr_t)proc_exit;
     for (i = 0; i < argc; ++i)
         frame->args[i] = va_arg(args, uintptr_t);
+    frame->shared = (uintptr_t)shared_base;
+    frame->reserved = 0;
 
     proc->thread.sp = (uintptr_t)frame;
     proc->thread.pc = (uintptr_t)proc_bootstrap +
@@ -103,13 +106,15 @@ int proc_vinit(struct proc *proc, proc_fn entry,
 }
 
 int proc_init(struct proc *proc, proc_fn entry,
-              void *stack, size_t stack_size, size_t argc, ...)
+              void *stack, size_t stack_size, void *shared_base,
+              size_t argc, ...)
 {
     va_list args;
     int status;
 
     va_start(args, argc);
-    status = proc_vinit(proc, entry, stack, stack_size, argc, args);
+    status = proc_vinit(proc, entry, stack, stack_size, shared_base,
+                        argc, args);
     va_end(args);
     return status;
 }
@@ -185,7 +190,7 @@ _Noreturn void proc_exit(void)
 
 _Noreturn void scheduler(void)
 {
-    struct thread *init = thread_self();
+    struct thread *init = current;
     struct sche_state *sche = &init->cpu->sche;
 
     for (;;) {

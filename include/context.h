@@ -17,8 +17,10 @@
 #define SWITCH_FRAME_S9        80
 #define SWITCH_FRAME_S10       88
 #define SWITCH_FRAME_S11       96
-#define SWITCH_FRAME_FCSR     104
-#define SWITCH_FRAME_SIZE     112
+#define SWITCH_FRAME_GP       104
+#define SWITCH_FRAME_FCSR     112
+#define SWITCH_FRAME_RESERVED 120
+#define SWITCH_FRAME_SIZE     128
 
 #define PROC_FRAME_ENTRY        0
 #define PROC_FRAME_RA           8
@@ -30,7 +32,9 @@
 #define PROC_FRAME_A5          56
 #define PROC_FRAME_A6          64
 #define PROC_FRAME_A7          72
-#define PROC_FRAME_SIZE        80
+#define PROC_FRAME_SHARED      80
+#define PROC_FRAME_RESERVED    88
+#define PROC_FRAME_SIZE        96
 
 #define PROC_MAX_ARGS                       8
 #define PROC_BOOTSTRAP_ARG_INSN_SIZE        4
@@ -56,13 +60,17 @@ struct switch_frame {
     uintptr_t s9;
     uintptr_t s10;
     uintptr_t s11;
+    uintptr_t gp;
     uintptr_t fcsr;
+    uintptr_t reserved;
 };
 
 struct proc_frame {
     uintptr_t entry;
     uintptr_t ra;
     uintptr_t args[PROC_MAX_ARGS];
+    uintptr_t shared;
+    uintptr_t reserved;
 };
 
 _Static_assert(offsetof(struct switch_frame, ra) == SWITCH_FRAME_RA,
@@ -71,6 +79,8 @@ _Static_assert(offsetof(struct switch_frame, s0) == SWITCH_FRAME_S0,
                "switch frame s0 offset");
 _Static_assert(offsetof(struct switch_frame, s11) == SWITCH_FRAME_S11,
                "switch frame s11 offset");
+_Static_assert(offsetof(struct switch_frame, gp) == SWITCH_FRAME_GP,
+               "switch frame gp offset");
 _Static_assert(offsetof(struct switch_frame, fcsr) == SWITCH_FRAME_FCSR,
                "switch frame fcsr offset");
 _Static_assert(sizeof(struct switch_frame) == SWITCH_FRAME_SIZE,
@@ -85,6 +95,8 @@ _Static_assert(offsetof(struct proc_frame, args[0]) == PROC_FRAME_A0,
                "proc frame a0 offset");
 _Static_assert(offsetof(struct proc_frame, args[7]) == PROC_FRAME_A7,
                "proc frame a7 offset");
+_Static_assert(offsetof(struct proc_frame, shared) == PROC_FRAME_SHARED,
+               "proc frame shared offset");
 _Static_assert(sizeof(struct proc_frame) == PROC_FRAME_SIZE,
                "proc frame size");
 _Static_assert((PROC_FRAME_SIZE & 15) == 0,

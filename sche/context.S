@@ -19,6 +19,7 @@ switch_context:
     sd      s9, SWITCH_FRAME_S9(sp)
     sd      s10, SWITCH_FRAME_S10(sp)
     sd      s11, SWITCH_FRAME_S11(sp)
+    sd      gp, SWITCH_FRAME_GP(sp)
     csrr    t0, fcsr
     sd      t0, SWITCH_FRAME_FCSR(sp)
 
@@ -49,6 +50,7 @@ switch_context_restore:
     ld      s9, SWITCH_FRAME_S9(sp)
     ld      s10, SWITCH_FRAME_S10(sp)
     ld      s11, SWITCH_FRAME_S11(sp)
+    ld      gp, SWITCH_FRAME_GP(sp)
     ld      t0, SWITCH_FRAME_FCSR(sp)
     csrw    fcsr, t0
     addi    sp, sp, SWITCH_FRAME_SIZE
@@ -75,6 +77,7 @@ proc_bootstrap:
         (PROC_MAX_ARGS * PROC_BOOTSTRAP_ARG_INSN_SIZE)
     .error "proc bootstrap argument loads must remain fixed-width"
     .endif
+    ld      gp, PROC_FRAME_SHARED(sp)
     csrw    fcsr, zero
     ld      t0, PROC_FRAME_ENTRY(sp)
     ld      ra, PROC_FRAME_RA(sp)

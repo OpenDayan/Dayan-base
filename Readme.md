@@ -7,8 +7,8 @@
 ## 启动流程
 
 1. `bl0/bootrom.S` 从当前 hart 的 mailbox 读取入口地址，并把 hart id 留在 `a0`。
-2. `bl1/bl1.S` 为该 hart 选择独立栈，令 `tp` 指向 CPU-local 中的 init thread，
-   清零该区并初始化浮点状态。
+2. `bl1/bl1.S` 为该 hart 选择独立栈，令 `tp/current` 指向 CPU-local 中的 init
+   thread，清零该区，将 `gp/shared` 置空并初始化浮点状态。
 3. `boot/boot.c:init()` 初始化平台、调度器，以及该 hart 的链接期初始堆。
 4. BL1 调用 `sche/sche.c:scheduler()`，此后不再返回。
 
@@ -20,17 +20,22 @@
 | CPU-local | 4 KiB / hart | 每核 scheduler、allocator 与 init thread |
 | init 栈 | 64 KiB / hart | BL1、初始化和 scheduler 的每核栈 |
 | 初始堆 | 1 MiB / hart | 红黑树分配器的第一个 region |
-| 一致性区 | `0x90000000`, 4 MiB | 显式跨核通信 |
+| Host coherent window | `0x00400000`, 4 MiB | Host 按 proc 动态切分，基址由 `gp/shared` 访问 |
 
-地址均集中在顶层 `Makefile` 中，接入真实硬件时应覆盖 `RAM_BASE`、
-`RAM_SIZE` 和 `COHERENT_BASE`。一致性区默认按 4 MiB 预留。
+固件 RAM 地址集中在顶层 `Makefile` 中，接入真实硬件时应覆盖 `RAM_BASE` 和
+`RAM_SIZE`。coherent memory 不属于固件链接布局：算子提交用量后由 Host 动态分配，
+创建 proc 时把分配基址交给内核。`COHERENT_BASE=0x00400000` 和 4 MiB 的
+`COHERENT_SIZE` 只描述硬件窗口并用于运行时地址校验，不会传给链接器或产生本地预留。
 
-`tp` 始终解释为布局固定的 `struct thread *`，而不是 `struct cpu *`。公共 thread
+`tp` 通过全局寄存器变量 `current` 始终解释为布局固定的 `struct thread *`，而不是
+`struct cpu *`。公共 thread
 依次保存 32-bit ID、32-bit state、当前 CPU 指针、`sp`、恢复 `pc` 和 32-bit type。
 init thread 的 ID 与 type 都是 0；其它类型把 `struct thread` 作为结构体首成员，并
 使用非零 type。每个独立 OS 实例的 scheduler 从 1 开始统一分配后续 ID。上下文切换
 同步切换 `tp`，thread 的 CPU 指针使内存分配器等每核服务能找到正确的私有状态；
 proc 一旦绑定到某个 hart，当前版本不允许迁移。
+由于 `tp` 已承担 `current` ABI，固件和算子都不能使用 ELF TLS；构建会拒绝
+TP-relative/TLS relocation，链接脚本也会拒绝 `.tdata` 和 `.tbss`。
 
 thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始，其余值
 表示不同等待原因。`thread_init()` 构造期间短暂使用 `THREAD_WAIT_START`；proc 初始化
@@ -39,8 +44,8 @@ thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始�
 allocator 状态；hart ID 由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
 
 普通 `.data`/`.bss` 会被链接脚本拒绝，以免不一致缓存下多个 hart 意外共享
-可变状态。每核状态应放入 `struct cpu`，跨核对象应显式使用 `OS_COHERENT`；
-一致性区是 `NOLOAD` 区域，初始化和跨核协议由平台代码负责。
+可变状态。每核状态应放入 `struct cpu`。固件侧同样拒绝 `.coherent` section；跨核
+对象只能放入 Host 给当前 proc 分配的 coherent allocation，并从 `shared` 基址寻址。
 
 ## 构建
 
@@ -55,10 +60,13 @@ make check
 约定兼容，同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机
 启动所需的系统扩展。输出位于 `build/`：
 
-固件 ABI 不使用 `gp`：BL1 不初始化它，链接脚本不定义 `__global_pointer$`，构建
-同时使用 `-mno-relax -msmall-data-limit=0`。运行时加载的算子 `.o` 也应
-使用 `-mno-relax -msmall-data-limit=0`，并且不得包含 GP-relative relocation；其
-内部数据以及对系统/lib 符号的引用统一由加载器处理 PC-relative relocation。
+`gp` 专用于全局寄存器变量 `shared`，表示当前 proc 的 Host coherent allocation
+基址；它不再承担 RISC-V small-data global pointer 的传统职责。BL1 为 scheduler/init
+设为 0，新 proc 从启动帧装入 Host 给定值，之后随上下文保存和恢复。链接脚本不定义
+`__global_pointer$`，固件和运行时加载的算子 `.o` 均须使用
+`-mno-relax -msmall-data-limit=0`，并且不得包含 GP-relative relocation；普通数据以及
+对系统/lib 符号的引用仍由加载器处理 PC-relative relocation。对 `shared` 的显式访问
+则由编译器直接生成 `gp` 寄存器读操作。
 固件链接不启用 section GC，确保未被固件自身调用的公共 API 仍保留在静态符号表中，
 可供运行时算子重定位使用。
 
@@ -71,7 +79,7 @@ make check
 
 ```sh
 make HARTS=4 STACK_SIZE=0x20000 HEAP_SIZE=0x200000 \
-     RAM_BASE=0x80000000 COHERENT_BASE=0x90000000
+     RAM_BASE=0x80000000 RAM_SIZE=0x08000000
 ```
 
 ## 子系统约定
@@ -95,12 +103,14 @@ Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。RPC 尚未�
 采用当前平台的 64-byte cache line 和 `cbo.flush`/`cbo.inval` 指令编码。
 
 `sche/` 是有独立 proc 栈的非抢占式调度器。`switch_context()` 在当前栈保存
-`ra`、`s0-s11` 和 `fcsr`，把保存帧的 `sp` 及恢复入口 `pc` 写入当前 thread，再加载
-目标 thread 的 `sp/pc` 并同步更新 `tp`。软浮点 `lp64` ABI 没有需要跨 C 函数调用
+`ra`、`s0-s11`、`gp` 和 `fcsr`，把保存帧的 `sp` 及恢复入口 `pc` 写入当前 thread，
+再加载目标 thread 的 `sp/pc` 并同步更新 `tp/current`。恢复旧 proc 时从切换帧恢复
+`gp/shared`；首次执行新 proc 时由 bootstrap 从启动帧加载它。软浮点 `lp64` ABI 没有需要跨 C 函数调用
 保留的 F 寄存器；有存活浮点值时，编译器会在调用 `proc_yield()` 等函数前自行溢出，
 而每个 thread 的浮点控制状态由 `fcsr` 保存。
 
-`proc_init(proc, entry, stack, stack_size, argc, ...)` 使用调用者提供的区间构造启动帧，
+`proc_init(proc, entry, stack, stack_size, shared_base, argc, ...)` 使用调用者提供的
+栈区间和 Host 分配的 shared 基址构造启动帧，
 栈顶按 16 字节向下对齐，支持 0 到 8 个寄存器参数。可变参数是底层 ABI 机器字，调用者
 必须逐个按 `uintptr_t` 传入；后续类型安全封装可负责指针转换、浮点位模式打包以及自动
 加入 proc 指针。实际实现位于接收 `va_list` 的 `proc_vinit()`；`proc_init()` 仅负责
@@ -113,7 +123,7 @@ Host region 完全空闲后通过 `RPC_HEAP_RELEASE` 立即归还。RPC 尚未�
 例如，底层接口创建一个具有两个机器字参数的 proc：
 
 ```c
-proc_init(&proc, (proc_fn)task_main, stack, stack_size, 2,
+proc_init(&proc, (proc_fn)task_main, stack, stack_size, shared_base, 2,
           (uintptr_t)&proc, (uintptr_t)arg);
 ```
 
@@ -158,15 +168,20 @@ Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项�
 非抢占调度保证资源操作不会与本核另一个 proc 同时执行。
 
 `dayan_shared_resource_t` 供多个 hart 共享，所有字段通过 `__atomic` 访问，临界区使用
-RV64A 原子锁。对象必须分配在 4 MiB 一致性窗口中，例如：
+RV64A 原子锁。`dayan_sys.h` 以全局寄存器变量的形式把 `shared` 直接绑定到 `gp`；它
+没有内存符号，也不是固件定义的普通全局变量，算子代码不得改写它。算子应在 Host
+分配区内定义自己的布局，
+例如把第一个对象放在基址处：
 
 ```c
-DAYAN_COHERENT dayan_shared_resource_t shared_resource;
+dayan_shared_resource_t *resource = (dayan_shared_resource_t *)shared;
 ```
 
-一个 hart 应在发布对象前调用一次 `dayan_shared_resource_init()`；该函数会拒绝一致性
-窗口之外的地址。运行时加载器必须把算子 `.o` 的 `.coherent` section 分配到该窗口，
-不能用普通 `malloc()` 为跨核资源分配内存。
+一个 hart 应在发布对象前调用一次 `dayan_shared_resource_init()`。该函数要求 `gp`
+位于 `0x00400000` 开始的 4 MiB 硬件窗口内，并检查资源地址不低于 `shared`、没有越过
+硬件窗口且满足类型对齐。内核仍不持有 Host 为单个 proc 分配的实际长度，因此 allocation
+内部的精确上界和算子布局由 Host/加载器负责。不能用普通 `malloc()` 为跨核资源分配
+内存，也不能在算子 `.o` 中静态定义 `.coherent` section。
 
 `lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度

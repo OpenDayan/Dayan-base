@@ -4,12 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define OS_COHERENT __attribute__((section(".coherent"), aligned(64)))
-
 void platform_init(void);
 uintptr_t platform_hart_id(void);
-void *platform_coherent_base(void);
-size_t platform_coherent_size(void);
 
 void platform_cache_init(void);
 void platform_cache_clean(const void *addr, size_t size);

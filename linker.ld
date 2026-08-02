@@ -7,13 +7,10 @@ __stack_size = DEFINED(CONFIG_STACK_SIZE) ? CONFIG_STACK_SIZE : 0x10000;
 __heap_size = DEFINED(CONFIG_HEAP_SIZE) ? CONFIG_HEAP_SIZE : 0x100000;
 __ram_base = DEFINED(CONFIG_RAM_BASE) ? CONFIG_RAM_BASE : 0x80000000;
 __ram_size = DEFINED(CONFIG_RAM_SIZE) ? CONFIG_RAM_SIZE : 0x04000000;
-__coherent_base = DEFINED(CONFIG_COHERENT_BASE) ? CONFIG_COHERENT_BASE : 0x90000000;
-__coherent_size = DEFINED(CONFIG_COHERENT_SIZE) ? CONFIG_COHERENT_SIZE : 0x00400000;
 
 MEMORY
 {
-    RAM (rwx)      : ORIGIN = __ram_base, LENGTH = __ram_size
-    COHERENT (rw)  : ORIGIN = __coherent_base, LENGTH = __coherent_size
+    RAM (rwx) : ORIGIN = __ram_base, LENGTH = __ram_size
 }
 
 SECTIONS
@@ -89,14 +86,21 @@ SECTIONS
     } > RAM
     __ram_used_end = .;
 
-    .coherent ORIGIN(COHERENT) (NOLOAD) :
+    /* Coherent storage is Host-owned and must never enter the firmware ELF. */
+    .coherent (NOLOAD) :
     {
-        __coherent_start = .;
-        KEEP(*(.coherent .coherent.*))
-        __coherent_used_end = .;
-        . = ORIGIN(COHERENT) + LENGTH(COHERENT);
-        __coherent_end = .;
-    } > COHERENT
+        *(.coherent .coherent.*)
+    } > RAM
+
+    .tdata :
+    {
+        *(.tdata .tdata.*)
+    } > RAM
+
+    .tbss (NOLOAD) :
+    {
+        *(.tbss .tbss.*)
+    } > RAM
 
     /DISCARD/ :
     {
@@ -113,16 +117,15 @@ SECTIONS
     ASSERT((__heap_size % 16) == 0,
            "HEAP_SIZE must be a 16-byte multiple")
     ASSERT(SIZEOF(.data) == 0,
-           "ordinary mutable .data is unsafe; keep state per hart or coherent")
+           "ordinary mutable .data is unsafe; keep state per hart")
     ASSERT(SIZEOF(.bss) == 0,
-           "ordinary mutable .bss is unsafe; keep state per hart or coherent")
+           "ordinary mutable .bss is unsafe; keep state per hart")
     ASSERT(SIZEOF(.init_array) == 0,
            "constructors are unsupported")
     ASSERT(__ram_used_end <= ORIGIN(RAM) + LENGTH(RAM),
            "image, per-hart stacks, and heaps exceed RAM")
-    ASSERT(__coherent_used_end <= ORIGIN(COHERENT) + LENGTH(COHERENT),
-           "coherent objects exceed the coherent window")
-    ASSERT((ORIGIN(RAM) + LENGTH(RAM) <= ORIGIN(COHERENT)) ||
-           (ORIGIN(COHERENT) + LENGTH(COHERENT) <= ORIGIN(RAM)),
-           "RAM and coherent windows overlap")
+    ASSERT(SIZEOF(.coherent) == 0,
+           "coherent storage is allocated by Host, not the firmware linker")
+    ASSERT(SIZEOF(.tdata) == 0 && SIZEOF(.tbss) == 0,
+           "tp is current and cannot address ELF TLS")
 }

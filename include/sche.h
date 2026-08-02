@@ -23,12 +23,14 @@ _Static_assert(offsetof(struct proc, thread) == 0,
                "proc must inherit thread as its first member");
 
 void sche_init(void);
-/* Every variadic argument must be passed as one uintptr_t ABI word. */
+/* shared_base is Host-owned; every variadic argument is one uintptr_t word. */
 int proc_init(struct proc *proc, proc_fn entry,
-              void *stack, size_t stack_size, size_t argc, ...);
+              void *stack, size_t stack_size, void *shared_base,
+              size_t argc, ...);
 /* Consumes args; copy it first if the caller needs to read it again. */
 int proc_vinit(struct proc *proc, proc_fn entry,
-               void *stack, size_t stack_size, size_t argc, va_list args);
+               void *stack, size_t stack_size, void *shared_base,
+               size_t argc, va_list args);
 /* Moves an external-event waiter back to this CPU's ready queue. */
 int proc_wake(struct proc *proc);
 void proc_yield(void);

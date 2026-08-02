@@ -50,12 +50,7 @@ _Static_assert(sizeof(struct thread) == 40, "thread layout must stay fixed");
 int thread_init(struct thread *thread, uint32_t type);
 void switch_context(struct thread *prev, struct thread *next);
 
-static inline struct thread *thread_self(void)
-{
-    struct thread *thread;
-
-    __asm__ volatile("mv %0, tp" : "=r"(thread));
-    return thread;
-}
+/* U-Boot-style global register variable: current has no memory object. */
+register struct thread *current __asm__("tp");
 
 #endif

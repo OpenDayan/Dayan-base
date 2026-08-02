@@ -1,10 +1,9 @@
-#include <stddef.h>
 #include <stdint.h>
 
 #include <dayan_sys.h>
 
+#include "config.h"
 #include "errno.h"
-#include "platform.h"
 #include "sche.h"
 
 _Static_assert(sizeof(dayan_resource_t) == 16,
@@ -69,17 +68,19 @@ static uint32_t shared_resource_state(
     return __atomic_load_n(&resource->state, __ATOMIC_ACQUIRE);
 }
 
-static int shared_resource_in_coherent(
+static int shared_resource_valid(
     const dayan_shared_resource_t *resource)
 {
-    uintptr_t start = (uintptr_t)platform_coherent_base();
+    uintptr_t start = (uintptr_t)CONFIG_COHERENT_BASE;
+    uintptr_t size = (uintptr_t)CONFIG_COHERENT_SIZE;
+    uintptr_t base = (uintptr_t)shared;
     uintptr_t addr = (uintptr_t)resource;
-    size_t size = platform_coherent_size();
 
-    if (addr < start || size < sizeof(*resource) ||
-        (addr & (_Alignof(dayan_shared_resource_t) - 1)))
+    if (!base || size < sizeof(*resource) || base < start ||
+        base - start >= size || addr < base || addr < start ||
+        addr - start > size - sizeof(*resource))
         return 0;
-    return addr - start <= size - sizeof(*resource);
+    return !(addr & (_Alignof(dayan_shared_resource_t) - 1));
 }
 
 static int resource_ready(struct proc *proc, void *arg)
@@ -250,7 +251,7 @@ int dayan_resource_wait_free(dayan_resource_t *resource)
 
 int dayan_shared_resource_init(dayan_shared_resource_t *resource)
 {
-    if (!resource || !shared_resource_in_coherent(resource))
+    if (!resource || !shared_resource_valid(resource))
         return -EINVAL;
 
     __atomic_store_n(&resource->lock, 0, __ATOMIC_RELAXED);

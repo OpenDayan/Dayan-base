@@ -5,9 +5,6 @@
 #include "errno.h"
 #include "platform.h"
 
-extern unsigned char __coherent_start[];
-extern unsigned char __coherent_end[];
-
 void platform_init(void)
 {
     platform_cache_init();
@@ -19,16 +16,6 @@ uintptr_t platform_hart_id(void)
 
     __asm__ volatile("csrr %0, mhartid" : "=r"(hartid));
     return hartid;
-}
-
-void *platform_coherent_base(void)
-{
-    return __coherent_start;
-}
-
-size_t platform_coherent_size(void)
-{
-    return (size_t)(__coherent_end - __coherent_start);
 }
 
 __attribute__((weak)) void platform_cache_init(void)
