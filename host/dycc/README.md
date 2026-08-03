@@ -128,12 +128,15 @@ npu_buffer_desc_init(&buffer_desc, 4096);
 npu_buffer_create(context, &buffer_desc, &output);
 
 npu_kernel_launch_attrs_t attrs;
-npu_kernel_launch_attrs_init(&attrs, context, stream);
+npu_kernel_launch_attrs_init(&attrs, context, stream, "demo-task");
 attrs.config.task_dim = {8, 1, 1};
 attrs.config.task_mode = NPUTaskMode::kSingleCore;
 
 int status = demo_kernel(output, 8, &attrs);
 ```
+
+第四个参数是本次 launch 的 Task/根 Proc 名称，必须非空且最多 15 bytes。它不要求与
+kernel 符号名相同，因此同一个 kernel 的不同用途可以在 `dyperf` 中显示不同名称。
 
 同步 wrapper 等待并销毁执行 Event，返回 kernel status。异步模式通过一个 Event 表示
 整个 logical grid：

@@ -55,6 +55,14 @@ static uint32_t all_mask(uint32_t count)
     return count == 32U ? UINT32_MAX : (UINT32_C(1) << count) - 1U;
 }
 
+static int task_name_valid(const char name[NPU_IPC_PROC_NAME_SIZE])
+{
+    _Static_assert(NPU_PROC_NAME_SIZE == NPU_IPC_PROC_NAME_SIZE,
+                   "Runtime and IPC proc name sizes");
+    return name && name[0] &&
+           strnlen(name, NPU_IPC_PROC_NAME_SIZE) < NPU_IPC_PROC_NAME_SIZE;
+}
+
 static size_t output_charge(const struct server_output *output)
 {
     return sizeof(*output) + output->size;
@@ -1404,6 +1412,7 @@ static int kernel_launch_locked(dayan_server_t *server,
     if (!context || !stream || !kernel || context->closing ||
         stream->context != context || kernel->module->context != context ||
         request->flags || request->reserved ||
+        !task_name_valid(request->task_name) ||
         request->argument_count > NPU_KERNEL_MAX_ARGS)
         return -EINVAL;
     status = launch_total_units(request, &total_units);
@@ -1431,6 +1440,8 @@ static int kernel_launch_locked(dayan_server_t *server,
     command->data.launch.config.task_mode = (NPUTaskMode)request->task_mode;
     command->data.launch.total_units = total_units;
     command->data.launch.cookie = request->cookie;
+    memcpy(command->data.launch.task_name, request->task_name,
+           sizeof(command->data.launch.task_name));
     for (index = 0; index < request->argument_count; ++index) {
         const npu_package_argument_t *expected =
             &view->arguments[metadata->first_argument + index];

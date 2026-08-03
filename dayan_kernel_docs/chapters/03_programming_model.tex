@@ -109,7 +109,7 @@ npu_buffer_desc_init(&buffer_desc, 4096);
 npu_buffer_create(context, &buffer_desc, &output);
 
 npu_kernel_launch_attrs_t attrs;
-npu_kernel_launch_attrs_init(&attrs, context, stream);
+npu_kernel_launch_attrs_init(&attrs, context, stream, "demo-task");
 attrs.config.task_dim = {8, 1, 1};
 attrs.config.task_mode = NPUTaskMode::kSingleCore;
 
@@ -120,6 +120,7 @@ int status = demo_kernel(output, 64, &attrs);
   字段 & 含义 \\
   \code{version}、\code{reserved} & 由初始化函数设置；reserved 保持 0。 \\
   \code{context}、\code{stream} & 启动所属资源域和有序命令队列；二者必须属于同一 Context。 \\
+  \code{task_name} & 本次 launch 的 root proc 名称；必须非空且最多 15 bytes。 \\
   \code{config.task_dim} & x、y、z 三维 logical task 数量，三个分量都必须非零。 \\
   \code{config.task_mode} & \code{kSingleCore} 或 \code{kFourCore}；不含物理 Cluster/Core 编号。 \\
   \code{flags} & 0 为同步；\code{NPU_KERNEL_LAUNCH_ASYNC} 为异步。 \\

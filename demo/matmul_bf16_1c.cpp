@@ -621,12 +621,12 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         state.b[index].uram = state.uram_base + Layout::b_base(index);
     }
 
-    int status = dayan_create_proc(consumer_0, &state);
+    int status = dayan_create_proc("consumer-0", consumer_0, &state);
 #if MATMUL_BF16_1C_SLICES == 3
     if (status >= 0)
-        status = dayan_create_proc(consumer_1, &state);
+        status = dayan_create_proc("consumer-1", consumer_1, &state);
     if (status >= 0)
-        status = dayan_create_proc(consumer_2, &state);
+        status = dayan_create_proc("consumer-2", consumer_2, &state);
 #endif
     if (status < 0) {
         state.status = status;
@@ -965,7 +965,8 @@ __host__ int main(int argc, char **argv)
         status = upload(stream, bt_buffer, bt.data(), bt_bytes, timeout_ms);
 
     if (status == 0) {
-        npu_kernel_launch_attrs_init(&launch_attrs, context, stream);
+        npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
+                                     "matmul-bf16-1c");
         launch_attrs.config.task_dim = NPUTaskDim3{1, 1, 1};
         launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
         launch_attrs.timeout_ms = timeout_ms;

@@ -28,7 +28,7 @@ wait 接口把当前 \code{tp} 作为 Produce token 写入对应硬件队列，�
 
 \begin{dayantable}{proc 与内存接口}{tab:kernel-030-proc}{X[38,l] X[62,l]}
   符号 & 行为 \\
-  \code{dayan_create_proc} & 在当前 Core 创建子 proc；成功返回正的 proc ID，失败返回负值。 \\
+  \code{dayan_create_proc(name, entry, argument)} & 在当前 Core 创建带名称的子 proc；成功返回正的 proc ID，失败返回负值。 \\
   \code{dayan_join} & 等待指定的直属子 proc，取得其 64-bit 返回值并回收 zombie slot。 \\
   \code{dayan_join_all} & 等待并回收当前 proc 的全部直属子 proc。 \\
   \code{dayan_proc_exit} & 以指定的 64-bit 返回值结束当前 proc；不返回。 \\
@@ -39,6 +39,7 @@ wait 接口把当前 \code{tp} 作为 Produce token 写入对应硬件队列，�
 
 子 proc 数由 \code{DAYAN_KERNEL_DESC} 声明；Host 创建 root 时一次性从该 Hart 专属
 预留所有子 slot，达到 family 上限或尚未 join 的 zombie 占满预留 slot 后创建失败。
+名称必须非空、以 NUL 结尾并完整放入 16-byte 字段，因此有效名称最多为 15 bytes。
 子 proc 与父 proc 共享 logical task、shared 和 URAM 范围，但有独立栈与 printf buffer。
 \code{dayan_join} 只接受直属子 proc ID；子 proc 退出会减少父 proc 的未结束计数，只有
 匹配的 join 或计数归零的 join-all 才会被唤醒。proc 正常返回等价于返回值为 0；退出前

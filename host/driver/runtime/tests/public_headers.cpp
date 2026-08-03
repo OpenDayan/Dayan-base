@@ -6,6 +6,9 @@ static_assert(static_cast<uint32_t>(NPUTaskMode::kSingleCore) == 1);
 static_assert(static_cast<uint32_t>(NPUTaskMode::kFourCore) == 4);
 static_assert(sizeof(NPUTaskDim3) == 12);
 static_assert(sizeof(NPULaunchConfig) == 16);
+static_assert(NPU_PROC_NAME_SIZE == 16);
+static_assert(sizeof(npu_profile_event_t) == 24);
+static_assert(NPU_SERVICE_PROC_NAME_SIZE == NPU_PROC_NAME_SIZE);
 static_assert(NPU_PROFILE_PROC_RUNNING == 0);
 static_assert(NPU_PROFILE_PROC_KILL_WAIT_PRODUCE == 7);
 

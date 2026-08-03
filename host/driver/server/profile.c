@@ -8,6 +8,8 @@
 _Static_assert(sizeof(npu_service_profile_event_t) ==
                sizeof(struct rpc_profile_event),
                "Host and Device profile event ABI");
+_Static_assert(NPU_SERVICE_PROC_NAME_SIZE == RPC_PROC_NAME_SIZE,
+               "Host and Device profile name ABI");
 
 static int profile_config_call(npu_service_device_t *device,
                                struct npu_service_profile_core *core,
@@ -149,6 +151,22 @@ int npu_service_profile_copy(npu_service_device_t *device,
     } else {
         status = npu_hal_memory_read(device->hal, allocation, target, events,
                                      core->offset, bytes);
+        if (status == 0) {
+            size_t event_index;
+
+            for (event_index = 0; event_index < count; ++event_index) {
+                if (!events[event_index].event_id ||
+                    events[event_index].state >
+                        RPC_PROFILE_PROC_KILL_WAIT_PRODUCE ||
+                    !events[event_index].name[0] ||
+                    strnlen(events[event_index].name,
+                            sizeof(events[event_index].name)) ==
+                        sizeof(events[event_index].name)) {
+                    status = -EPROTO;
+                    break;
+                }
+            }
+        }
         callback_status = status < 0 ? status : device->options.profile(
             device->options.callback_context, target.cluster, target.core,
             events, count);

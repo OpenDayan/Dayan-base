@@ -72,6 +72,10 @@ struct NPULaunchConfig {
 Runtime、Server 和 BL1 都会校验 mode 只能为 1 或 4，并在 mode 4 时拒绝其它 x
 维度。Device kernel 可用 `dayan_task_id(DAYAN_TASK_X/Y/Z)`、
 `dayan_task_dim(...)` 和 `dayan_task_mode()` 读取逻辑坐标；这些 API 不返回物理位置。
+每次 `npu_kernel_launch` 还必须在 `npu_launch_desc_init(&desc, task_name)` 中提供 Task
+名称；dycc wrapper 则通过
+`npu_kernel_launch_attrs_init(&attrs, context, stream, task_name)` 提供。名称非空且最多
+15 bytes，Runtime 会把它复制进每个 logical task 对应的 root Proc。
 
 ### HAL topology 与内存
 
@@ -142,16 +146,20 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
-create-proc ABI v3 使用 208-byte `rpc_proc_create_request`，包含 entry、栈、shared、
+create-proc ABI v4 使用 224-byte `rpc_proc_create_request`，包含 entry、栈、shared、
 printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
-以及最大子 proc 数和 URAM base/size。BL1 创建 root 时一次性专属预留全部子 slot；
-`dayan_create_proc(entry, argument)` 在同一 Core 创建子 proc，返回正的 ID 并继承
-logical task、`shared/gp` 和 URAM。`dayan_join`/`dayan_join_all` 回收直属子 proc；父
+最大子 proc 数、URAM base/size，以及固定 16-byte Proc 名称。Runtime launch 必须提供
+非空 Task 名称；名称最多 15 bytes，最后一 byte 留给 NUL。BL1 创建 root 时一次性专属
+预留全部子 slot；`dayan_create_proc(name, entry, argument)` 在同一 Core 创建有独立名称的
+子 proc，返回正的 ID 并继承 logical task、`shared/gp` 和 URAM。
+`dayan_join`/`dayan_join_all` 回收直属子 proc；父
 proc 返回前隐式等待全部子 proc，因而 root 的终态覆盖整棵子树。每个 proc 退出会
 flush/CLEAR 输出；只有 root 主动向 Host 上报返回值。最后由 scheduler 栈归还整组静态
 slot，并把描述符置为 `EXITED` 或 `FAILED`。
 
-`RPC_PROC_PS` 返回目标 Hart 的系统/算子 proc 快照。`RPC_PROC_KILL_ALL` 不碰 init 和
+`RPC_PROC_PS` v3 返回目标 Hart 的系统/算子 proc 快照，每条记录包含相同的 16-byte
+名称。系统 Proc 分别命名为 `rpc-receive`、`rpc-send` 和 `profile-flush`。
+`RPC_PROC_KILL_ALL` 不碰 init 和
 三个系统 proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
 等待者标为 `KILL_WAIT_PRODUCE`，结果 token 到达后再释放。被 kill 的 root 以
 `-ECANCELED` 完成，子 proc 不单独通知 Host。
@@ -170,15 +178,17 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 
 profile 是设备级、单会话能力。`npu_profile_start()` 默认通过 HAL 分配 16 MiB 普通
 Device RAM；Service 根据已启动 Hart 数量把它均分为独立 FIFO，避免多个 Hart 写同一
-write index，也不改变 8-byte 原始事件 ABI。容量可通过
+write index。profile v3 的每条原始事件为 24 bytes：8-byte cycle/proc/state 头加
+16-byte Proc 名称。容量可通过
 `npu_profile_options_t.buffer_size` 配置。
 
-每个原始事件由两个 32-bit word 组成：低 32 bit 是 `cycle`，中间 16 bit 是
-proc ID，最高 16 bit 是状态变化后的目标状态，数值与 Device 的 `THREAD_*` 状态一致：
+每个事件头的低 32 bit 是 `cycle`，中间 16 bit 是 proc ID，最高 16 bit 是状态变化后的
+目标状态，数值与 Device 的 `THREAD_*` 状态一致：
 0/1 分别为 RUNNING/READY，2--7 为各种等待、退出与 kill-wait-produce 状态。START 会先
 写入该 Hart 所有现存 proc 的初始状态（receive、send、profile 以及最多 16 个算子
-proc），之后每次 proc 状态实际变化只写一个事件。因此每 Hart FIFO 至少要容纳完整的
-19 项初始快照，事件数不要求成对。FIFO 写满时，专用 profile 系统 proc 清理 cache 并
+proc），之后每次 proc 状态实际变化只写一个事件。profile 运行期间新建的 Proc 会先写
+带名称的 `WAIT_START`，因此 Host 能立即建立新的 tid/name 映射。每 Hart FIFO 至少要
+容纳完整的 19 项初始快照，事件数不要求成对。FIFO 写满时，专用 profile 系统 proc 清理 cache 并
 发送 `RPC_PROFILE_FLUSH`；Host response 的 `continue_profile` 决定该 Hart 是否继续记录。
 STOP 会关闭记录、等待正在进行的 flush，并把未满尾批次交给 Host。
 
@@ -206,7 +216,9 @@ npu_profile_destroy(profile);
 
 `batch.cluster/hart` 只描述观测数据来源，不参与 Runtime 的 kernel 调度接口。
 `host/dyperf` 封装上述流程并生成 Chrome Trace Viewer JSON；每个 Hart 是独立 pid，
-每个 proc ID 是独立 tid，各目标状态被展开为连续的状态区间。推荐使用
+每个 proc ID 是独立 tid，`thread_name` 使用事件携带的 Proc 名称，各目标状态被展开为
+连续的状态区间。Device cycle 按 1 ns 解释，Trace `ts` 写为带纳秒精度的小数微秒。
+推荐使用
 `dyperf [OPTIONS] -- COMMAND [ARG...]`：工具先启动 profile，再以另一个 Runtime Session
 运行算子，并自动向子进程传递 `DAYAN_SERVER_SOCKET`。
 

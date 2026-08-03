@@ -8,13 +8,14 @@
 extern "C" {
 #endif
 
-#define NPU_RUNTIME_OPTIONS_VERSION 3U
+#define NPU_RUNTIME_OPTIONS_VERSION 4U
 #define NPU_CONTEXT_DESC_VERSION    1U
 #define NPU_BUFFER_DESC_VERSION     1U
 #define NPU_STREAM_DESC_VERSION     1U
-#define NPU_LAUNCH_DESC_VERSION     2U
+#define NPU_LAUNCH_DESC_VERSION     3U
 #define NPU_TIMEOUT_INFINITE        UINT32_MAX
 #define NPU_KERNEL_MAX_ARGS         8U
+#define NPU_PROC_NAME_SIZE          16U
 #define NPU_DEFAULT_SERVER_SOCKET   "/tmp/dayan-server.sock"
 #define NPU_RUNTIME_OUTPUT_CLEAR    (1U << 0)
 #define NPU_RUNTIME_OUTPUT_CONTINUED (1U << 1)
@@ -144,6 +145,7 @@ typedef struct npu_launch_desc {
     uint32_t reserved;
     NPULaunchConfig config;
     uint64_t cookie;
+    char task_name[NPU_PROC_NAME_SIZE];
     npu_kernel_arg_t args[NPU_KERNEL_MAX_ARGS];
 } npu_launch_desc_t;
 
@@ -174,11 +176,12 @@ typedef struct npu_profile_options {
     uint64_t buffer_size;
 } npu_profile_options_t;
 
-/* Raw Device event: cycle[31:0], proc ID[47:32], target state[63:48]. */
+/* Raw Device event plus the fixed 16-byte name of the referenced proc. */
 typedef struct npu_profile_event {
     uint32_t cycle;
     uint16_t event_id;
     uint16_t state;
+    char name[NPU_PROC_NAME_SIZE];
 } npu_profile_event_t;
 
 typedef enum npu_profile_proc_state {
@@ -204,7 +207,8 @@ void npu_context_desc_init(npu_context_desc_t *desc);
 void npu_buffer_desc_init(npu_buffer_desc_t *desc, uint64_t size);
 void npu_stream_desc_init(npu_stream_desc_t *desc);
 void npu_launch_config_init(NPULaunchConfig *config);
-void npu_launch_desc_init(npu_launch_desc_t *desc);
+/* task_name must be nonempty, NUL-terminated, and fit in 16 bytes. */
+void npu_launch_desc_init(npu_launch_desc_t *desc, const char *task_name);
 void npu_profile_options_init(npu_profile_options_t *options);
 void npu_kernel_arg_value(npu_kernel_arg_t *arg, uint64_t value,
                           uint32_t size);
@@ -281,19 +285,34 @@ int npu_profile_destroy(npu_profile_t *profile);
 #ifdef __cplusplus
 static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
+static_assert(sizeof(npu_launch_desc_t) == 312, "NPU launch descriptor ABI");
+static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
+              "NPU launch task name offset");
+static_assert(offsetof(npu_launch_desc_t, args) == 56,
+              "NPU launch argument offset");
 static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
-static_assert(sizeof(npu_profile_event_t) == 8, "NPU profile event ABI");
+static_assert(sizeof(npu_profile_event_t) == 24, "NPU profile event ABI");
 static_assert(offsetof(npu_profile_event_t, state) == 6,
               "NPU profile state offset");
+static_assert(offsetof(npu_profile_event_t, name) == 8,
+              "NPU profile name offset");
 static_assert(sizeof(npu_profile_batch_info_t) == 16,
               "NPU profile batch ABI");
 #else
 _Static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 _Static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
+_Static_assert(sizeof(npu_launch_desc_t) == 312,
+               "NPU launch descriptor ABI");
+_Static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
+               "NPU launch task name offset");
+_Static_assert(offsetof(npu_launch_desc_t, args) == 56,
+               "NPU launch argument offset");
 _Static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
-_Static_assert(sizeof(npu_profile_event_t) == 8, "NPU profile event ABI");
+_Static_assert(sizeof(npu_profile_event_t) == 24, "NPU profile event ABI");
 _Static_assert(offsetof(npu_profile_event_t, state) == 6,
                "NPU profile state offset");
+_Static_assert(offsetof(npu_profile_event_t, name) == 8,
+               "NPU profile name offset");
 _Static_assert(sizeof(npu_profile_batch_info_t) == 16,
                "NPU profile batch ABI");
 #endif

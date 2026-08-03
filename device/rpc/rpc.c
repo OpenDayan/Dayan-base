@@ -190,13 +190,13 @@ int rpc_init(void)
     rpc_transaction_init(&rpc->trap, 0, 0, 0);
     platform_rpc_init();
 
-    status = proc_init(&rpc->receive, rpc_receive_main,
+    status = proc_init(&rpc->receive, "rpc-receive", rpc_receive_main,
                        (void *)base, CONFIG_RPC_STACK_SIZE, 0,
                        0, 0, 0);
     if (status < 0)
         return status;
     base += CONFIG_RPC_STACK_SIZE;
-    status = proc_init(&rpc->send, rpc_send_main,
+    status = proc_init(&rpc->send, "rpc-send", rpc_send_main,
                        (void *)base, CONFIG_RPC_STACK_SIZE, 0,
                        0, 0, 0);
     if (status < 0)

@@ -11,6 +11,8 @@ struct proc_family;
 struct rpc_proc_ps_snapshot;
 struct rpc_proc_kill_result;
 
+#define PROC_NAME_SIZE 16U
+
 typedef void (*proc_fn)(void);
 /* Runs in scheduler context and must not block. */
 typedef int (*proc_poll_fn)(struct proc *proc, void *arg);
@@ -19,6 +21,7 @@ typedef void (*proc_cleanup_fn)(struct proc *proc, void *arg);
 
 struct proc {
     struct thread thread;
+    char name[PROC_NAME_SIZE];
     struct list_head node;
     proc_poll_fn poll;
     void *poll_arg;
@@ -52,16 +55,16 @@ _Static_assert(offsetof(struct proc, thread) == 0,
 
 void sche_init(void);
 /* shared_base is Host-owned; printf_buffer remains owned by the caller. */
-int proc_init(struct proc *proc, proc_fn entry,
+int proc_init(struct proc *proc, const char *name, proc_fn entry,
               void *stack, size_t stack_size, void *shared_base,
               void *printf_buffer, size_t printf_capacity,
               size_t argc, ...);
 /* Consumes args; copy it first if the caller needs to read it again. */
-int proc_vinit(struct proc *proc, proc_fn entry,
+int proc_vinit(struct proc *proc, const char *name, proc_fn entry,
                void *stack, size_t stack_size, void *shared_base,
                void *printf_buffer, size_t printf_capacity,
                size_t argc, va_list args);
-int proc_init_args(struct proc *proc, proc_fn entry,
+int proc_init_args(struct proc *proc, const char *name, proc_fn entry,
                    void *stack, size_t stack_size, void *shared_base,
                    void *printf_buffer, size_t printf_capacity,
                    size_t argc, const uintptr_t *args);
@@ -70,8 +73,9 @@ int proc_set_task(struct proc *proc, const uint32_t task_id[3],
                   const uint32_t task_dim[3], uint32_t task_mode);
 int proc_slot_acquire(size_t stack_size, size_t printf_size,
                       struct proc **proc_out);
-int proc_slot_init_args(struct proc *proc, proc_fn entry, void *shared_base,
-                        size_t argc, const uintptr_t *args);
+int proc_slot_init_args(struct proc *proc, const char *name, proc_fn entry,
+                        void *shared_base, size_t argc,
+                        const uintptr_t *args);
 void proc_slot_release(struct proc *proc);
 int proc_family_create(struct proc *owner, uint32_t max_child_procs,
                        size_t child_stack_size,
@@ -81,8 +85,8 @@ void proc_family_destroy(struct proc_family *family);
 int proc_set_resources(struct proc *proc, struct proc_family *family,
                        size_t shared_size, void *uram_base,
                        size_t uram_size);
-int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
-                      uint32_t *proc_id_out);
+int proc_create_child(struct proc *parent, const char *name, proc_fn entry,
+                      void *argument, uint32_t *proc_id_out);
 int proc_join(uint32_t proc_id, int64_t *result);
 int proc_join_all(void);
 int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot);

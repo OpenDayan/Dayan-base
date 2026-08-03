@@ -725,6 +725,7 @@ static struct dispatch_result dispatch_group(
         desc.uram_allocation = uram_allocation;
         desc.uram_size = metadata->uram_size;
         desc.max_child_procs = metadata->max_child_procs;
+        desc.name = command->data.launch.task_name;
         desc.task_dim[0] = command->data.launch.config.task_dim.x;
         desc.task_dim[1] = command->data.launch.config.task_dim.y;
         desc.task_dim[2] = command->data.launch.config.task_dim.z;

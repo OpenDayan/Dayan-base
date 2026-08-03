@@ -110,6 +110,7 @@ struct npu_service_launch {
     npu_hal_core_t target;
     npu_hal_allocation_t *request_allocation;
     uint64_t request_address;
+    char name[NPU_SERVICE_PROC_NAME_SIZE];
     uint32_t released;
 };
 

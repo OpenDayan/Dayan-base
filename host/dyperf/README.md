@@ -9,6 +9,12 @@ make -C host/dyperf
 build/host/dyperf/dyperf --duration-ms 1000 -o trace.json
 ```
 
+持续观察当前 Server，直到按下 Ctrl-C：
+
+```sh
+build/host/dyperf/dyperf --follow -o trace.json
+```
+
 最常用的方式是让 `dyperf` 直接启动待观测算子：
 
 ```sh
@@ -26,6 +32,8 @@ Session 连接同一个 Server；`dyperf` 会把自身选择的 socket 写入子
 - `--socket PATH`：Dayan Server socket；未指定时优先读取
   `DAYAN_SERVER_SOCKET`，再使用 `/tmp/dayan-server.sock`。
 - `--duration-ms MS`：采集时长；设为 `0` 时持续采集到 Ctrl-C。
+- `--follow`：持续采集到 Ctrl-C；command 模式下则持续到子进程退出。不能与
+  `--duration-ms` 同时使用。
 - `--buffer-size SIZE`：全局 Device profile 缓冲区，默认 16 MiB，支持 `K/M/G` 后缀。
 - `--output FILE`：输出文件，默认 `dayan-trace.json`。
 
@@ -41,9 +49,12 @@ Runtime 连接、提交 memcpy 或 launch。
 数量。单个 Runtime 句柄内部的 control 调用仍按 socket 串行化；需要独立的长轮询时，
 应像 `dyperf` 一样使用单独 Runtime Session。
 
-每个 Hart 映射为独立 `pid`，每个 Device proc ID 映射为独立 `tid`。Device 在 START 时
-先报告所有现存 proc 的初始状态，之后报告每次状态切换后的目标状态；工具把这些事件
-展开成 `RUNNING`、`READY`、`WAIT_POLL`、`WAIT_EVENT`、`WAIT_START`、`WAIT_EXIT`、
+每个 Hart 映射为独立 `pid`，每个 Device proc ID 映射为独立 `tid`，每条
+`thread_name` metadata 使用该 Proc 的固定 16-byte 名称。Device 在 START 时先报告所有
+现存 proc 的初始状态，之后报告每次状态切换后的目标状态；采样期间新建的 Proc 会先
+产生带名称的 `WAIT_START`，因此新 tid 会被持续发现并立即命名。工具把这些事件展开成
+`RUNNING`、`READY`、`WAIT_POLL`、`WAIT_EVENT`、`WAIT_START`、`WAIT_EXIT`、
 `WAIT_PRODUCE` 和 `KILL_WAIT_PRODUCE` 状态区间。JSON 中的 `B/E` 只用于表达区间，不是
-Device 原始事件类型。工具会按 Hart 独立扩展 32-bit cycle 回绕；因为当前 ABI 没有约定
-固定时钟频率，JSON 的 `ts` 保留设备 cycle 单位，不换算为纳秒或微秒。
+Device 原始事件类型。工具会按 Hart 独立扩展 32-bit cycle 回绕，并按
+`1 cycle = 1 ns` 转换时间。Chrome Trace 的 `ts` 使用带三位小数的微秒值保存纳秒精度，
+同时设置 `displayTimeUnit: "ns"`。

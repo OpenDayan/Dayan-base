@@ -404,7 +404,15 @@ int main(void)
         assert(npu_module_load(context, package, package_size, &module) == 0);
         assert(npu_module_get_kernel(module, "resource_kernel",
                                      &resource_kernel) == 0);
-        npu_launch_desc_init(&launch);
+        npu_launch_desc_init(&launch, "");
+        assert(npu_kernel_launch(stream, resource_kernel, &launch,
+                                 &unexpected) == -EINVAL);
+        assert(!unexpected);
+        npu_launch_desc_init(&launch, "task-name-is-far-too-long");
+        assert(npu_kernel_launch(stream, resource_kernel, &launch,
+                                 &unexpected) == -EINVAL);
+        assert(!unexpected);
+        npu_launch_desc_init(&launch, "resource-test");
         assert(npu_kernel_launch(stream, resource_kernel, &launch,
                                  &unexpected) == -ENOSPC);
         assert(!unexpected);
@@ -423,7 +431,7 @@ int main(void)
         assert(npu_module_load(context, package, package_size, &module) == 0);
         assert(npu_module_get_kernel(module, "resource_kernel",
                                      &resource_kernel) == 0);
-        npu_launch_desc_init(&launch);
+        npu_launch_desc_init(&launch, "resource-test");
         assert(npu_kernel_launch(stream, resource_kernel, &launch,
                                  &unexpected) == -ENOSPC);
         assert(!unexpected);

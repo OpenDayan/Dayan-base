@@ -61,7 +61,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
     int found = 0;
     int status;
 
-    npu_launch_desc_init(&launch);
+    npu_launch_desc_init(&launch, "kill-test");
     launch.config.task_dim = (NPUTaskDim3){ 1, 1, 1 };
     launch.config.task_mode = (NPUTaskMode)1;
     launch.arg_count = 2;
@@ -69,9 +69,11 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
                           NPU_KERNEL_ARG_WRITE);
     npu_kernel_arg_value(&launch.args[1], value, sizeof(value));
     status = npu_kernel_launch(stream, kernel, &launch, &event);
-    if (status < 0)
+    if (status < 0) {
+        fprintf(stderr, "kill test launch failed: %d\n", status);
         return status;
-    for (attempt = 0; attempt < 500U && !found; ++attempt) {
+    }
+    for (attempt = 0; attempt < 5000U && !found; ++attempt) {
         uint32_t cluster;
 
         for (cluster = 0; cluster < server->hal_info.cluster_count &&
@@ -94,6 +96,8 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
                         if (snapshot.records[record].host_proc_id !=
                                 snapshot.records[record].proc_id ||
                             snapshot.records[record].parent_proc_id ||
+                            strcmp(snapshot.records[record].name,
+                                   "kill-test") != 0 ||
                             snapshot.reserved_slots != 1U ||
                             snapshot.global_free_slots != 15U)
                             return -EIO;
@@ -111,11 +115,15 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
             (void)nanosleep(&delay, 0);
         }
     }
-    if (!found)
+    if (!found) {
+        fprintf(stderr, "kill test proc was not visible through rpc_ps\n");
         return -ETIMEDOUT;
+    }
     status = npu_service_rpc_kill_all(server->device, target, &killed);
-    if (status < 0)
+    if (status < 0) {
+        fprintf(stderr, "kill test rpc_kill_all failed: %d\n", status);
         return status;
+    }
     if (killed.killed_roots != 1U || killed.killed_children ||
         killed.released_slots != 1U || killed.waiting_produce)
         return -EIO;
@@ -124,8 +132,10 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         snapshot.global_free_slots != 16U || snapshot.reserved_slots)
         return status < 0 ? status : -EIO;
     status = npu_event_wait(event, 10000, &info);
-    if (status < 0)
+    if (status < 0) {
+        fprintf(stderr, "kill test event wait failed: %d\n", status);
         return status;
+    }
     if (info.status != -ECANCELED)
         return -EIO;
     return npu_event_destroy(event);
@@ -201,7 +211,7 @@ static int run_grid(npu_stream_t *stream, npu_kernel_t *kernel,
         fprintf(stderr, "grid upload submit failed: %d\n", status);
         return status;
     }
-    npu_launch_desc_init(&launch);
+    npu_launch_desc_init(&launch, "grid-kernel");
     launch.config.task_dim = dim;
     launch.config.task_mode = (NPUTaskMode)mode;
     launch.arg_count = 2;
@@ -260,6 +270,8 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
     int saw_wait = 0;
     int saw_exit = 0;
     int saw_full = 0;
+    int saw_named_root = 0;
+    int saw_named_child = 0;
     int end = 0;
     int status;
 
@@ -283,12 +295,26 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
         if (batch.count && !(first_hart_mask & (UINT32_C(1) << batch.hart))) {
             if (batch.count < 3U || events[0].event_id != 1U ||
                 events[0].state != NPU_PROFILE_PROC_RUNNING ||
-                events[1].event_id != 2U || events[2].event_id != 3U)
+                strcmp(events[0].name, "rpc-receive") != 0 ||
+                events[1].event_id != 2U ||
+                strcmp(events[1].name, "rpc-send") != 0 ||
+                events[2].event_id != 3U ||
+                strcmp(events[2].name, "profile-flush") != 0)
                 return -EIO;
             first_hart_mask |= UINT32_C(1) << batch.hart;
             ++first_hart_count;
         }
         for (index = 0; index < batch.count; ++index) {
+            if (!events[index].name[0] ||
+                strnlen(events[index].name, sizeof(events[index].name)) ==
+                    sizeof(events[index].name))
+                return -EIO;
+            if (strcmp(events[index].name, "grid-kernel") == 0 ||
+                strcmp(events[index].name, "kill-test") == 0)
+                saw_named_root = 1;
+            if (strcmp(events[index].name, "child-write") == 0 ||
+                strcmp(events[index].name, "nested-write") == 0)
+                saw_named_child = 1;
             switch (events[index].state) {
             case NPU_PROFILE_PROC_RUNNING:
                 saw_running = 1;
@@ -314,7 +340,8 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
         end = !!(batch.flags & NPU_PROFILE_BATCH_END);
     }
     if (!event_count || first_hart_count != core_count || !saw_running ||
-        !saw_ready || !saw_wait || !saw_exit || !saw_full)
+        !saw_ready || !saw_wait || !saw_exit || !saw_full ||
+        !saw_named_root || !saw_named_child)
         return -EIO;
     return npu_profile_destroy(profile);
 }
@@ -411,7 +438,10 @@ int main(int argc, char **argv)
         status = npu_service_rpc_ps(server->device, target, &snapshot);
         if (status == 0 &&
             (snapshot.count != 3U || snapshot.global_free_slots != 16U ||
-             snapshot.reserved_slots))
+             snapshot.reserved_slots ||
+             strcmp(snapshot.records[0].name, "rpc-receive") != 0 ||
+             strcmp(snapshot.records[1].name, "rpc-send") != 0 ||
+             strcmp(snapshot.records[2].name, "profile-flush") != 0))
             status = -EIO;
         if (status == 0)
             status = npu_service_rpc_kill_all(server->device, target,
@@ -438,8 +468,9 @@ int main(int argc, char **argv)
 
         stage = "profile start";
         npu_profile_options_init(&options);
-        /* 1 KiB/Hart fits the snapshot and still forces a full flush. */
-        options.buffer_size = (uint64_t)core_count * 1024U;
+        /* Exactly 128 events/Hart fits the snapshot and forces a flush. */
+        options.buffer_size = (uint64_t)core_count * 128U *
+                              sizeof(npu_profile_event_t);
         status = npu_profile_start(runtime, &options, &profile);
     }
     if (status == 0) {
@@ -475,7 +506,7 @@ int main(int argc, char **argv)
         npu_event_t *unexpected = 0;
 
         stage = "four-core dimension validation";
-        npu_launch_desc_init(&invalid);
+        npu_launch_desc_init(&invalid, "invalid-grid");
         invalid.config.task_dim = (NPUTaskDim3){ 3, 1, 1 };
         invalid.config.task_mode = (NPUTaskMode)4;
         if (npu_kernel_launch(stream, kernel, &invalid, &unexpected) !=

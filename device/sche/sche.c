@@ -78,6 +78,10 @@ _Static_assert(CONFIG_PROC_STACK_SIZE == RPC_PROC_MAX_STACK_SIZE,
                "static proc stack capacity must match RPC validation");
 _Static_assert(CONFIG_PROC_PRINTF_SIZE == RPC_PROC_MAX_PRINTF_SIZE,
                "static proc printf capacity must match RPC validation");
+_Static_assert(PROC_NAME_SIZE == DAYAN_PROC_NAME_SIZE,
+               "scheduler and public proc name sizes must match");
+_Static_assert(PROC_NAME_SIZE == RPC_PROC_NAME_SIZE,
+               "scheduler and RPC proc name sizes must match");
 
 struct proc *proc_self(void)
 {
@@ -203,8 +207,9 @@ int proc_slot_acquire(size_t stack_size, size_t printf_size,
     return 0;
 }
 
-int proc_slot_init_args(struct proc *proc, proc_fn entry, void *shared_base,
-                        size_t argc, const uintptr_t *args)
+int proc_slot_init_args(struct proc *proc, const char *name, proc_fn entry,
+                        void *shared_base, size_t argc,
+                        const uintptr_t *args)
 {
     struct proc_slot *slot;
 
@@ -215,7 +220,7 @@ int proc_slot_init_args(struct proc *proc, proc_fn entry, void *shared_base,
          slot->state != PROC_SLOT_CHILD) ||
         slot->cpu != cpu_self())
         return -EPERM;
-    return proc_init_args(proc, entry, slot->stack, slot->stack_size,
+    return proc_init_args(proc, name, entry, slot->stack, slot->stack_size,
                           shared_base,
                           slot->printf_size ? slot->printf_buffer : 0,
                           slot->printf_size, argc, args);
@@ -260,7 +265,26 @@ int thread_init(struct thread *thread, uint32_t type)
     return 0;
 }
 
-int proc_init_args(struct proc *proc, proc_fn entry,
+static int proc_name_copy(char destination[PROC_NAME_SIZE],
+                          const char *source)
+{
+    size_t length;
+
+    if (!destination || !source || !source[0])
+        return -EINVAL;
+    for (length = 0; length < PROC_NAME_SIZE; ++length) {
+        destination[length] = source[length];
+        if (!source[length]) {
+            memset(destination + length + 1, 0,
+                   PROC_NAME_SIZE - length - 1);
+            return 0;
+        }
+    }
+    memset(destination, 0, PROC_NAME_SIZE);
+    return -ENAMETOOLONG;
+}
+
+int proc_init_args(struct proc *proc, const char *name, proc_fn entry,
                    void *stack, size_t stack_size, void *shared_base,
                    void *printf_buffer, size_t printf_capacity,
                    size_t argc, const uintptr_t *args)
@@ -285,9 +309,14 @@ int proc_init_args(struct proc *proc, proc_fn entry,
     if (top < base || top - base < sizeof(*frame))
         return -EINVAL;
 
-    status = thread_init(&proc->thread, THREAD_TYPE_PROC);
+    status = proc_name_copy(proc->name, name);
     if (status < 0)
         return status;
+    status = thread_init(&proc->thread, THREAD_TYPE_PROC);
+    if (status < 0) {
+        memset(proc->name, 0, sizeof(proc->name));
+        return status;
+    }
 
     frame = (struct proc_frame *)(top - sizeof(*frame));
     frame->entry = (uintptr_t)entry;
@@ -336,7 +365,7 @@ int proc_init_args(struct proc *proc, proc_fn entry,
 }
 
 __attribute__((noinline))
-int proc_vinit(struct proc *proc, proc_fn entry,
+int proc_vinit(struct proc *proc, const char *name, proc_fn entry,
                void *stack, size_t stack_size, void *shared_base,
                void *printf_buffer, size_t printf_capacity,
                size_t argc, va_list args)
@@ -348,11 +377,11 @@ int proc_vinit(struct proc *proc, proc_fn entry,
         return -EINVAL;
     for (i = 0; i < argc; ++i)
         words[i] = va_arg(args, uintptr_t);
-    return proc_init_args(proc, entry, stack, stack_size, shared_base,
+    return proc_init_args(proc, name, entry, stack, stack_size, shared_base,
                           printf_buffer, printf_capacity, argc, words);
 }
 
-int proc_init(struct proc *proc, proc_fn entry,
+int proc_init(struct proc *proc, const char *name, proc_fn entry,
               void *stack, size_t stack_size, void *shared_base,
               void *printf_buffer, size_t printf_capacity,
               size_t argc, ...)
@@ -361,7 +390,7 @@ int proc_init(struct proc *proc, proc_fn entry,
     int status;
 
     va_start(args, argc);
-    status = proc_vinit(proc, entry, stack, stack_size, shared_base,
+    status = proc_vinit(proc, name, entry, stack, stack_size, shared_base,
                         printf_buffer, printf_capacity, argc, args);
     va_end(args);
     return status;
@@ -623,8 +652,8 @@ static void child_proc_cleanup(struct proc *proc, void *arg)
         (void)proc_event_wake_all(&parent->wait_children);
 }
 
-int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
-                      uint32_t *proc_id_out)
+int proc_create_child(struct proc *parent, const char *name, proc_fn entry,
+                      void *argument, uint32_t *proc_id_out)
 {
     struct proc_family *family;
     struct proc_slot *child_slot;
@@ -632,7 +661,7 @@ int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
     uintptr_t args[1];
     int status;
 
-    if (!parent || parent != proc_self() || !entry || !proc_id_out)
+    if (!parent || parent != proc_self() || !name || !entry || !proc_id_out)
         return -EINVAL;
     family = parent->family;
     if (!family || family->root->thread.cpu != cpu_self())
@@ -645,7 +674,8 @@ int proc_create_child(struct proc *parent, proc_fn entry, void *argument,
         return -ENOMEM;
     child = &child_slot->proc;
     args[0] = (uintptr_t)argument;
-    status = proc_slot_init_args(child, entry, parent->shared_base, 1, args);
+    status = proc_slot_init_args(child, name, entry, parent->shared_base, 1,
+                                 args);
     if (status < 0) {
         family_slot_release(child_slot);
         return status;
@@ -744,6 +774,7 @@ static void snapshot_proc(struct rpc_proc_info *record,
     record->result = proc->exit_status;
     record->pc = proc->thread.pc;
     record->cookie = proc->cookie;
+    memcpy(record->name, proc->name, sizeof(record->name));
 }
 
 static int snapshot_slot_flags(const struct proc_slot *slot,

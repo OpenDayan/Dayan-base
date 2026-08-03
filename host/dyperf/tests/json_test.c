@@ -5,11 +5,13 @@
 int main(int argc, char **argv)
 {
     const npu_profile_event_t events[] = {
-        { UINT32_C(0xfffffff0), 7, NPU_PROFILE_PROC_WAIT_EVENT },
-        { UINT32_C(0x00000010), 7, NPU_PROFILE_PROC_READY },
+        { UINT32_C(0xfffffff0), 7, NPU_PROFILE_PROC_WAIT_EVENT, "worker" },
+        { UINT32_C(0x00000010), 7, NPU_PROFILE_PROC_READY, "worker" },
+        { UINT32_C(0x00000020), 9, NPU_PROFILE_PROC_WAIT_START,
+          "late\"child" },
     };
     const npu_profile_batch_info_t batch = {
-        2, 3, 2, 0,
+        2, 3, 3, 0,
     };
     struct trace_writer writer;
     char *command[] = {

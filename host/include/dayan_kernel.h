@@ -59,7 +59,7 @@ typedef struct dayan_kernel_resource_desc {
 extern "C" {
 #endif
 
-#define NPU_KERNEL_LAUNCH_ATTRS_VERSION 2U
+#define NPU_KERNEL_LAUNCH_ATTRS_VERSION 3U
 #define NPU_KERNEL_LAUNCH_ASYNC         (1U << 0)
 
 typedef struct npu_kernel_descriptor npu_kernel_descriptor_t;
@@ -73,12 +73,14 @@ typedef struct npu_kernel_launch_attrs {
     uint32_t timeout_ms;
     uint32_t reserved;
     uint64_t cookie;
+    char task_name[NPU_PROC_NAME_SIZE];
     npu_event_t **event_out;
 } npu_kernel_launch_attrs_t;
 
 void npu_kernel_launch_attrs_init(npu_kernel_launch_attrs_t *attrs,
                                   npu_context_t *context,
-                                  npu_stream_t *stream);
+                                  npu_stream_t *stream,
+                                  const char *task_name);
 
 /* Entry points used by dycc-generated Host wrappers. */
 int npu_kernel_descriptor_create(
@@ -110,10 +112,22 @@ static inline uint64_t npu_kernel_pack_f64(double value)
 #ifdef __cplusplus
 static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
               "Dayan kernel resource descriptor ABI");
+static_assert(sizeof(npu_kernel_launch_attrs_t) == 80,
+              "Dayan kernel launch attributes ABI");
+static_assert(offsetof(npu_kernel_launch_attrs_t, task_name) == 56,
+              "Dayan kernel launch task name offset");
+static_assert(offsetof(npu_kernel_launch_attrs_t, event_out) == 72,
+              "Dayan kernel launch event offset");
 }
 #else
 _Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
                "Dayan kernel resource descriptor ABI");
+_Static_assert(sizeof(npu_kernel_launch_attrs_t) == 80,
+               "Dayan kernel launch attributes ABI");
+_Static_assert(offsetof(npu_kernel_launch_attrs_t, task_name) == 56,
+               "Dayan kernel launch task name offset");
+_Static_assert(offsetof(npu_kernel_launch_attrs_t, event_out) == 72,
+               "Dayan kernel launch event offset");
 #endif
 
 #endif

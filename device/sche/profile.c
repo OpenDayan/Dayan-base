@@ -70,6 +70,7 @@ static void profile_queue_event(struct profile_state *state,
     event->cycle = profile_cycle();
     event->event_id = (uint16_t)proc->thread.id;
     event->state = (uint16_t)proc->thread.state;
+    memcpy(event->name, proc->name, sizeof(event->name));
 }
 
 void profile_record_proc_state(const struct proc *proc)
@@ -240,6 +241,6 @@ int profile_init(void)
     INIT_LIST_HEAD(&state->wake);
     INIT_LIST_HEAD(&state->flush_done);
     stack = __profile_stack_start + hart * CONFIG_PROFILE_STACK_SIZE;
-    return proc_init(&state->worker, profile_main,
+    return proc_init(&state->worker, "profile-flush", profile_main,
                      stack, CONFIG_PROFILE_STACK_SIZE, 0, 0, 0, 0);
 }

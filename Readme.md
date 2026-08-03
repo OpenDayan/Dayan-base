@@ -161,7 +161,8 @@ socket 提交 package 与 logical task，不接触固件符号表或物理拓扑
 
 `host/dyperf` 通过 Runtime 开启 Device proc 状态 trace，并输出 Chrome Trace Viewer
 JSON。默认申请一个 16 MiB 的全局 profile allocation，Service 按已启动 Hart 切成互不
-覆盖的 FIFO；原始事件保持 8 bytes，不在事件中附加物理拓扑。采集时 Cluster/Hart 只在
+覆盖的 FIFO；每个 24-byte 原始事件包含 cycle、proc ID、状态和固定 16-byte Proc 名称，
+但不附加物理拓扑。采集时 Cluster/Hart 只在
 Runtime 的批次头中返回，用来为每个 Hart 建立独立时间线：
 
 ```sh
@@ -169,9 +170,10 @@ make dyperf
 build/host/dyperf/dyperf --duration-ms 1000 -o trace.json
 ```
 
-每个 Hart 映射为 Trace Viewer 的独立 pid，每个 Device proc ID 映射为 tid；时间线直接
-展示 RUNNING、READY 和各种等待/退出状态区间。profile 启动时先记录所有现存 proc 的
-初始状态，随后每次状态变化写入目标状态。
+每个 Hart 映射为 Trace Viewer 的独立 pid，每个 Device proc ID 映射为 tid，并用 Proc
+名称设置 `thread_name`；时间线直接展示 RUNNING、READY 和各种等待/退出状态区间。
+profile 启动时先记录所有现存 proc 的初始状态，随后每次状态变化写入目标状态；采样中
+新建的 Proc 也会从带名称的 `WAIT_START` 开始记录。一个 cycle 按 1 ns 处理。
 详细选项见 [`host/dyperf/README.md`](host/dyperf/README.md)。
 
 ### Kernel demos
@@ -274,9 +276,9 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
 
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
-208-byte v3 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+224-byte v4 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
 0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 proc 数、URAM
-base/size 以及完成状态。BL1 校验
+base/size、固定 16-byte Proc 名称以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
 回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_procs` 个静态 slot；
 子孙创建、退出与 join 不再经过 Host。每个 proc 退出都 flush/CLEAR 自己的输出；只有
@@ -287,7 +289,7 @@ scheduler 在自己的栈上调用 cleanup，把描述符从 `RUNNING` 更新为
 Host 管理目标 Hart 使用 `RPC_PROC_PS` (`0x0102`) 和 `RPC_PROC_KILL_ALL` (`0x0103`)，
 响应分别为 `0x8102`、`0x8103`。PS 固定返回三个系统 proc（RPC receive/send 与
 profile）和至多 16 个算子 proc
-的状态、父 ID、直属子计数、logical task、返回值与 cookie。kill-all 保留 init/RPC/profile
+的名称、状态、父 ID、直属子计数、logical task、返回值与 cookie。kill-all 保留 init/RPC/profile
 proc，摘除其它 proc 的 ready/poll/event/system-wait 节点；非 Produce slot 立即释放，
 等待 Produce 的 slot 进入 `THREAD_KILL_WAIT_PRODUCE`，收到硬件 token 后才释放。
 
@@ -343,8 +345,9 @@ scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队
 所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留 `1 + max_children`
 个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init、两个 RPC
 proc 和 profile proc 不计入，因此单个 kernel 最多声明 15 个子 proc。
-`dayan_create_proc()` 创建的子 proc 保持在同一 hart，继承 logical task、`gp/shared`
-与 URAM，并返回正的 proc ID。`dayan_join(id, &result)` 精确等待直属子 proc，
+`dayan_create_proc(name, entry, argument)` 创建的子 proc 保持在同一 hart，拥有不超过
+15 bytes 的名称，继承 logical task、`gp/shared` 与 URAM，并返回正的 proc ID。
+`dayan_join(id, &result)` 精确等待直属子 proc，
 `dayan_join_all()` 等待全部直属子 proc；每个 proc 退出前都会隐式 join-all，因此 root
 进入终态时整棵子树已经完成。`dayan_proc_exit(result)` 可显式设置 64-bit 返回值。
 托管 cleanup 在退出后把 slot 归还静态池；slot 的 64 KiB 栈和 4 KiB 输出缓冲在
@@ -376,8 +379,9 @@ Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项�
 
 `dayan_uram_base()` 和 `dayan_uram_size()` 返回 Service 为当前 kernel 实例在本 Core
 分配的私有 URAM；默认每 Core 容量为 1.5 MiB，地址窗口从 `0x00800000` 起并以 2 MiB
-为 Core stride。声明、分配和释放大小以 1 KiB 为粒度。`dayan_create_proc(entry, arg)`
-使用 kernel 描述符预留的 slot 在同 Core 创建一个单参数子 proc；达到声明上限时返回
+为 Core stride。声明、分配和释放大小以 1 KiB 为粒度。
+`dayan_create_proc(name, entry, arg)` 使用 kernel 描述符预留的 slot 在同 Core 创建一个
+有名称的单参数子 proc；达到声明上限时返回
 失败。
 
 `dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前

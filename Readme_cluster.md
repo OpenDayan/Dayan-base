@@ -264,6 +264,9 @@ python3 "$DAYAN_TC_RUNNER" \
 未显式指定 `--duration-ms` 时，采样持续到算子退出，`dyperf` 返回算子的退出码。显式
 指定时，该值限制采样时长，但工具仍会等待算子退出。一个 Server 同时只允许一个
 profile owner；重复启动第二个 `dyperf` 会得到 `-EBUSY`，不会影响已运行的算子。
+不启动子命令而持续观察 Server 时使用 `--follow`，按 Ctrl-C 结束。采样开始后新创建的
+root/child Proc 也会产生带 16-byte 名称的 `WAIT_START` 事件；Trace Viewer 以 proc ID
+作为 tid、Proc 名称作为 `thread_name`。时间轴按 `1 cycle = 1 ns` 显示。
 
 ### 4.5 runner 日志
 

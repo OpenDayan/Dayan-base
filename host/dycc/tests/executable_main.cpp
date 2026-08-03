@@ -4,6 +4,6 @@ int main(void)
 {
     npu_kernel_launch_attrs_t attrs;
 
-    npu_kernel_launch_attrs_init(&attrs, nullptr, nullptr);
+    npu_kernel_launch_attrs_init(&attrs, nullptr, nullptr, "compile-test");
     return attrs.version == NPU_KERNEL_LAUNCH_ATTRS_VERSION ? 0 : 1;
 }

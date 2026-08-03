@@ -48,13 +48,21 @@ void npu_launch_config_init(NPULaunchConfig *config)
 #endif
 }
 
-void npu_launch_desc_init(npu_launch_desc_t *desc)
+void npu_launch_desc_init(npu_launch_desc_t *desc, const char *task_name)
 {
+    size_t length;
+
     if (!desc)
         return;
     memset(desc, 0, sizeof(*desc));
     desc->version = NPU_LAUNCH_DESC_VERSION;
     npu_launch_config_init(&desc->config);
+    if (!task_name || !task_name[0])
+        return;
+    length = strnlen(task_name, sizeof(desc->task_name));
+    if (length == sizeof(desc->task_name))
+        return;
+    memcpy(desc->task_name, task_name, length + 1U);
 }
 
 void npu_kernel_arg_value(npu_kernel_arg_t *arg, uint64_t value,

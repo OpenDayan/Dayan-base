@@ -7,6 +7,7 @@
 #define ENOMEM     12
 #define EBUSY      16
 #define EINVAL     22
+#define ENAMETOOLONG 36
 #define ENOSYS     38
 #define EOVERFLOW  75
 #define ECANCELED 125

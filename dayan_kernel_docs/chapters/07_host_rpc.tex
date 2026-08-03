@@ -90,7 +90,7 @@ CSR 和 32 个整数寄存器。Host 校验版本、大小与来源 hart 后调�
 
 \subsection{创建 proc}
 
-Host 把 208-byte v3 \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
+Host 把 224-byte v4 \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
 \code{EXITED} 或 \code{FAILED}：
 
 \begin{dayantable}{proc create 描述符}{tab:kernel-064}{X[26,l] X[18,l] X[56,l]}
@@ -101,6 +101,7 @@ Host 把 208-byte v3 \code{rpc_proc_create_request} 放在普通 Device RAM，�
   result & 128--151 & status、proc ID、hart ID、cookie。 \\
   logical task & 152--183 & 三维 task ID、三维 task dim、task mode 和 reserved。 \\
   kernel resources & 184--207 & 最大子 proc 数、reserved、URAM base 和 size。 \\
+  proc name & 208--223 & 固定 16-byte root proc 名称。 \\
 \end{dayantable}
 
 Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot 池取得 root，把状态改为
@@ -109,6 +110,7 @@ Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot
 
 stack size 范围为 1--64 KiB，printf buffer 不超过 4 KiB，参数数量不超过 8。
 root 与最多 15 个子 proc 共用 16 个算子 slot；init、RPC 与 profile proc 不计入。
+名称必须非空且在 16-byte 字段内以 NUL 结尾，所以有效名称最多为 15 bytes。
 shared 区域为空时 base/size 同时为 0；非空时必须位于 coherent window 且 16-byte 对齐。
 URAM 区域为空时 base/size 同时为 0；非空时必须落在请求来源 hart 的 URAM window，
 base 和 size 都按 1 KiB 对齐。最大子 proc 数当前不超过 15。

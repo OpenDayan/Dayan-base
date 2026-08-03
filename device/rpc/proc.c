@@ -8,6 +8,7 @@
 #include "rpc.h"
 #include "sche.h"
 #include "stdlib.h"
+#include "string.h"
 
 static int range_inside(uint64_t address, uint64_t size,
                         uint64_t base, uint64_t capacity)
@@ -59,6 +60,9 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
         request->resource_reserved ||
         request->state != RPC_PROC_SUBMITTED ||
         request->argc > RPC_PROC_MAX_ARGS ||
+        !request->name[0] ||
+        strnlen(request->name, sizeof(request->name)) ==
+            sizeof(request->name) ||
         request->max_child_procs > RPC_PROC_MAX_CHILD_PROCS ||
         request->stack_size < RPC_PROC_MIN_STACK_SIZE ||
         request->stack_size > RPC_PROC_MAX_STACK_SIZE ||
@@ -124,7 +128,8 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     if (status < 0)
         goto complete;
 
-    status = proc_slot_init_args(proc, (proc_fn)(uintptr_t)request->entry,
+    status = proc_slot_init_args(proc, request->name,
+                                 (proc_fn)(uintptr_t)request->entry,
                                  (void *)(uintptr_t)request->shared_base,
                                  request->argc, request->args);
     if (status < 0)

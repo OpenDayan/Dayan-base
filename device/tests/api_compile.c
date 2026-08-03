@@ -9,6 +9,8 @@
 
 #include <dayan_sys.h>
 
+_Static_assert(DAYAN_PROC_NAME_SIZE == 16U, "public proc name ABI");
+
 static void compile_child(void *argument)
 {
     (void)argument;
@@ -40,7 +42,7 @@ int operator_api_compile(dayan_resource_t *resource,
     status |= dayan_shared_resource_wait_ready(shared_resource);
     status |= dayan_shared_resource_consume(shared_resource);
     status |= dayan_shared_resource_wait_free(shared_resource);
-    child = dayan_create_proc(compile_child, memory);
+    child = dayan_create_proc("compile-child", compile_child, memory);
     if (child > 0)
         status |= dayan_join((uint32_t)child, &child_result);
     else

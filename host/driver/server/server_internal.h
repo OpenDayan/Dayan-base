@@ -194,6 +194,7 @@ struct server_command {
             uint64_t completed_units;
             int64_t aggregate_status;
             uint64_t cookie;
+            char task_name[NPU_PROC_NAME_SIZE];
             struct server_launch_group *groups;
             struct server_invocation *invocations;
         } launch;

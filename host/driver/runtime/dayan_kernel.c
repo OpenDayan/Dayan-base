@@ -28,9 +28,12 @@ static pthread_mutex_t descriptor_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct npu_kernel_descriptor *descriptor_list;
 
 void npu_kernel_launch_attrs_init(npu_kernel_launch_attrs_t *attrs,
-                                    npu_context_t *context,
-                                    npu_stream_t *stream)
+                                  npu_context_t *context,
+                                  npu_stream_t *stream,
+                                  const char *task_name)
 {
+    size_t name_length;
+
     if (!attrs)
         return;
     memset(attrs, 0, sizeof(*attrs));
@@ -40,6 +43,12 @@ void npu_kernel_launch_attrs_init(npu_kernel_launch_attrs_t *attrs,
     npu_launch_config_init(&attrs->config);
     if (context && context->runtime)
         attrs->timeout_ms = context->runtime->default_timeout_ms;
+    if (!task_name || !task_name[0])
+        return;
+    name_length = strnlen(task_name, sizeof(attrs->task_name));
+    if (name_length == sizeof(attrs->task_name))
+        return;
+    memcpy(attrs->task_name, task_name, name_length + 1U);
 }
 
 int npu_kernel_descriptor_create(
@@ -159,6 +168,9 @@ int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
         !runtime_stream_valid(attrs->stream) ||
         attrs->stream->context != attrs->context ||
         argc > NPU_KERNEL_MAX_ARGS || (argc && !args) ||
+        !attrs->task_name[0] ||
+        strnlen(attrs->task_name, sizeof(attrs->task_name)) ==
+            sizeof(attrs->task_name) ||
         ((attrs->flags & NPU_KERNEL_LAUNCH_ASYNC) && !attrs->event_out))
         return -EINVAL;
     pthread_mutex_lock(&descriptor->mutex);
@@ -166,7 +178,7 @@ int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
     pthread_mutex_unlock(&descriptor->mutex);
     if (!binding)
         return status;
-    npu_launch_desc_init(&launch);
+    npu_launch_desc_init(&launch, attrs->task_name);
     launch.config = attrs->config;
     launch.cookie = attrs->cookie;
     launch.arg_count = (uint32_t)argc;

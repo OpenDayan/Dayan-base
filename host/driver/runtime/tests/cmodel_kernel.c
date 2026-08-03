@@ -33,7 +33,7 @@ static void nested_write(void *argument)
 {
     struct child_work *work = argument;
     int64_t result = -1;
-    int child = dayan_create_proc(child_write, work);
+    int child = dayan_create_proc("child-write", child_write, work);
 
     if (child < 0 || dayan_join((uint32_t)child, &result) < 0 ||
         result != (int64_t)work->value)
@@ -63,7 +63,9 @@ void grid_kernel(uint64_t *output, uint64_t base)
     if (dayan_task_mode() == 4U) {
         dayan_cluster_barrier_t *barrier =
             (dayan_cluster_barrier_t *)shared;
-        volatile uint64_t *published = (volatile uint64_t *)shared + 1;
+        volatile uint64_t *published =
+            (volatile uint64_t *)((unsigned char *)shared +
+                                  sizeof(*barrier));
 
         if (x == 0U)
             *published = base;
@@ -78,20 +80,26 @@ void grid_kernel(uint64_t *output, uint64_t base)
     work->uram_tail = (uint64_t *)((unsigned char *)uram +
                                   dayan_uram_size() - sizeof(uint64_t));
     work->value = expected;
+    if (dayan_create_proc("", child_write, work) >= 0 ||
+        dayan_create_proc("child-name-is-too-long", child_write, work) >= 0) {
+        output[linear] = TEST_FAILURE;
+        return;
+    }
     for (uint32_t child = 0; child < TEST_CHILD_PROCS; ++child) {
-        children[child] = dayan_create_proc(child_write, work);
+        children[child] = dayan_create_proc("child-write", child_write,
+                                            work);
         if (children[child] < 0) {
             output[linear] = TEST_FAILURE;
             return;
         }
     }
-    if (dayan_create_proc(child_write, work) >= 0)
+    if (dayan_create_proc("child-write", child_write, work) >= 0)
         output[linear] = TEST_FAILURE;
     child_result = -1;
     if (dayan_join((uint32_t)children[0], &child_result) < 0 ||
         child_result != (int64_t)expected ||
         dayan_join((uint32_t)children[1], 0) < 0 ||
-        dayan_create_proc(nested_write, work) < 0 ||
+        dayan_create_proc("nested-write", nested_write, work) < 0 ||
         dayan_join_all() < 0)
         output[linear] = TEST_FAILURE;
     dayan_proc_exit((int64_t)expected);

@@ -124,14 +124,15 @@ void dayan_yield(void)
     proc_yield();
 }
 
-int dayan_create_proc(dayan_proc_entry_t entry, void *argument)
+int dayan_create_proc(const char *name, dayan_proc_entry_t entry,
+                      void *argument)
 {
     uint32_t proc_id;
     int status;
 
-    if (!entry)
+    if (!name || !entry)
         return -EINVAL;
-    status = proc_create_child(proc_self(), (proc_fn)entry, argument,
+    status = proc_create_child(proc_self(), name, (proc_fn)entry, argument,
                                &proc_id);
     return status < 0 ? status : (int)proc_id;
 }

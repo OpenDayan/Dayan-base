@@ -25,6 +25,8 @@ _Static_assert((int)NPU_SERVICE_LAUNCH_FAILED == (int)RPC_PROC_FAILED,
                "Host and Device launch state ABI");
 _Static_assert(NPU_SERVICE_PROC_MAX_RECORDS == RPC_PROC_PS_MAX_RECORDS,
                "Host and Device proc snapshot capacity ABI");
+_Static_assert(NPU_SERVICE_PROC_NAME_SIZE == RPC_PROC_NAME_SIZE,
+               "Host and Device proc name size ABI");
 _Static_assert(sizeof(npu_service_proc_info_t) ==
                sizeof(struct rpc_proc_info),
                "Host and Device proc record ABI");
@@ -439,6 +441,13 @@ static int task_valid(const npu_service_launch_desc_t *desc)
     return 1;
 }
 
+static int proc_name_valid(const char *name)
+{
+    return name && name[0] &&
+           strnlen(name, NPU_SERVICE_PROC_NAME_SIZE) <
+               NPU_SERVICE_PROC_NAME_SIZE;
+}
+
 static int shared_address(npu_service_device_t *device,
                           const npu_service_launch_desc_t *desc,
                           uint64_t *address_out)
@@ -597,6 +606,7 @@ int npu_service_launch(npu_service_device_t *device,
         desc->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
         desc->max_child_procs > RPC_PROC_MAX_CHILD_PROCS ||
         desc->resource_reserved ||
+        !proc_name_valid(desc->name) ||
         !task_valid(desc) ||
         !npu_hal_address_valid(device->hal, desc->target, desc->entry, 2))
         return -EINVAL;
@@ -647,6 +657,7 @@ int npu_service_launch(npu_service_device_t *device,
         request.task_dim[axis] = desc->task_dim[axis];
     }
     request.task_mode = desc->task_mode;
+    memcpy(request.name, desc->name, strlen(desc->name) + 1U);
     status = npu_hal_memory_write(device->hal, allocation, desc->target, 0,
                                   &request, sizeof(request));
     if (status < 0)
@@ -668,6 +679,8 @@ int npu_service_launch(npu_service_device_t *device,
     if (request.version != RPC_PROC_CREATE_VERSION ||
         request.size != sizeof(request) || request.hart_id != desc->target.core ||
         request.cookie != desc->cookie ||
+        !proc_name_valid(request.name) ||
+        strcmp(request.name, desc->name) != 0 ||
         (request.state != RPC_PROC_RUNNING &&
          request.state != RPC_PROC_EXITED &&
          request.state != RPC_PROC_FAILED)) {
@@ -683,6 +696,7 @@ int npu_service_launch(npu_service_device_t *device,
     launch->target = desc->target;
     launch->request_allocation = allocation;
     launch->request_address = request_address;
+    memcpy(launch->name, request.name, sizeof(launch->name));
     pthread_mutex_lock(&device->mutex);
     ++device->active_launches;
     pthread_mutex_unlock(&device->mutex);
@@ -712,7 +726,8 @@ int npu_service_launch_query(npu_service_launch_t *launch,
     if (request.version != RPC_PROC_CREATE_VERSION ||
         request.size != sizeof(request) ||
         request.hart_id != launch->target.core ||
-        request.state > RPC_PROC_FAILED)
+        request.state > RPC_PROC_FAILED || !proc_name_valid(request.name) ||
+        memcmp(request.name, launch->name, sizeof(request.name)))
         return -EPROTO;
     memset(info, 0, sizeof(*info));
     info->state = request.state;
@@ -722,6 +737,7 @@ int npu_service_launch_query(npu_service_launch_t *launch,
     memcpy(info->task_id, request.task_id, sizeof(info->task_id));
     info->task_mode = request.task_mode;
     info->cookie = request.cookie;
+    memcpy(info->name, request.name, sizeof(info->name));
     return 0;
 }
 
@@ -784,6 +800,7 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
     uint64_t address;
     uint64_t response;
     uint32_t booted;
+    uint32_t record;
     int status;
 
     if (!device || !snapshot_out ||
@@ -840,6 +857,12 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
     if (snapshot.status < 0) {
         status = snapshot.status >= INT32_MIN ? (int)snapshot.status : -EIO;
         goto out;
+    }
+    for (record = 0; record < snapshot.count; ++record) {
+        if (!proc_name_valid(snapshot.records[record].name)) {
+            status = -EPROTO;
+            goto out;
+        }
     }
     memset(snapshot_out, 0, sizeof(*snapshot_out));
     snapshot_out->target = target;

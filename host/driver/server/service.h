@@ -10,10 +10,11 @@
 extern "C" {
 #endif
 
-#define NPU_SERVICE_OPTIONS_VERSION 5U
-#define NPU_SERVICE_LAUNCH_DESC_VERSION 3U
+#define NPU_SERVICE_OPTIONS_VERSION 6U
+#define NPU_SERVICE_LAUNCH_DESC_VERSION 4U
 #define NPU_SERVICE_TIMEOUT_INFINITE UINT32_MAX
 #define NPU_SERVICE_LAUNCH_MAX_ARGS 8U
+#define NPU_SERVICE_PROC_NAME_SIZE 16U
 #define NPU_SERVICE_OUTPUT_CLEAR (1U << 0)
 #define NPU_SERVICE_PROC_MAX_RECORDS 19U
 #define NPU_SERVICE_PROFILE_DEFAULT_BUFFER_SIZE (16U * 1024U * 1024U)
@@ -50,18 +51,23 @@ typedef struct npu_service_profile_event {
     uint32_t cycle;
     uint16_t event_id;
     uint16_t state;
+    char name[NPU_SERVICE_PROC_NAME_SIZE];
 } npu_service_profile_event_t;
 
 #ifdef __cplusplus
-static_assert(sizeof(npu_service_profile_event_t) == 8,
+static_assert(sizeof(npu_service_profile_event_t) == 24,
               "Service profile event ABI");
 static_assert(offsetof(npu_service_profile_event_t, state) == 6,
               "Service profile state offset");
+static_assert(offsetof(npu_service_profile_event_t, name) == 8,
+              "Service profile name offset");
 #else
-_Static_assert(sizeof(npu_service_profile_event_t) == 8,
+_Static_assert(sizeof(npu_service_profile_event_t) == 24,
                "Service profile event ABI");
 _Static_assert(offsetof(npu_service_profile_event_t, state) == 6,
                "Service profile state offset");
+_Static_assert(offsetof(npu_service_profile_event_t, name) == 8,
+               "Service profile name offset");
 #endif
 
 typedef int (*npu_service_profile_fn)(
@@ -100,6 +106,7 @@ typedef struct npu_service_launch_desc {
     uint32_t resource_reserved;
     uint64_t printf_buffer_size;
     uint64_t args[NPU_SERVICE_LAUNCH_MAX_ARGS];
+    const char *name;
     uint64_t cookie;
 } npu_service_launch_desc_t;
 
@@ -111,6 +118,7 @@ typedef struct npu_service_launch_info {
     uint32_t task_id[3];
     uint32_t task_mode;
     uint64_t cookie;
+    char name[NPU_SERVICE_PROC_NAME_SIZE];
 } npu_service_launch_info_t;
 
 typedef struct npu_service_proc_info {
@@ -127,6 +135,7 @@ typedef struct npu_service_proc_info {
     int64_t result;
     uint64_t pc;
     uint64_t cookie;
+    char name[NPU_SERVICE_PROC_NAME_SIZE];
 } npu_service_proc_info_t;
 
 typedef struct npu_service_proc_snapshot {

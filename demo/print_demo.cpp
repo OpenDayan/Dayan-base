@@ -120,7 +120,8 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = npu_stream_create(context, nullptr, &stream);
     if (status == 0) {
-        npu_kernel_launch_attrs_init(&launch_attrs, context, stream);
+        npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
+                                     "print-demo");
         launch_attrs.config.task_dim = NPUTaskDim3{2, 2, 1};
         launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
         printf("[host] launch grid=(2,2,1), "

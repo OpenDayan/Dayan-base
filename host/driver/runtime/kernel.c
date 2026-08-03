@@ -231,11 +231,16 @@ static int launch_config_valid(const NPULaunchConfig *config)
            (mode != 4U || config->task_dim.x == 4U);
 }
 
+static int task_name_valid(const char name[NPU_PROC_NAME_SIZE])
+{
+    return name && name[0] &&
+           strnlen(name, NPU_PROC_NAME_SIZE) < NPU_PROC_NAME_SIZE;
+}
+
 int npu_kernel_launch(npu_stream_t *stream, npu_kernel_t *kernel,
                       const npu_launch_desc_t *desc,
                       npu_event_t **event_out)
 {
-    npu_launch_desc_t defaults;
     npu_ipc_kernel_launch_t request;
     struct npu_event *event;
     struct npu_context *context;
@@ -243,16 +248,15 @@ int npu_kernel_launch(npu_stream_t *stream, npu_kernel_t *kernel,
     size_t index;
     int status;
 
+    _Static_assert(NPU_PROC_NAME_SIZE == NPU_IPC_PROC_NAME_SIZE,
+                   "Runtime and IPC proc name sizes");
     if (!runtime_stream_valid(stream) || !kernel || !kernel->module ||
         kernel->module->context != stream->context || !event_out)
         return -EINVAL;
     *event_out = 0;
-    if (!desc) {
-        npu_launch_desc_init(&defaults);
-        desc = &defaults;
-    }
-    if (desc->version != NPU_LAUNCH_DESC_VERSION || desc->flags ||
+    if (!desc || desc->version != NPU_LAUNCH_DESC_VERSION || desc->flags ||
         desc->reserved || desc->arg_count > NPU_KERNEL_MAX_ARGS ||
+        !task_name_valid(desc->task_name) ||
         !launch_config_valid(&desc->config))
         return -EINVAL;
     event = calloc(1, sizeof(*event));
@@ -269,6 +273,7 @@ int npu_kernel_launch(npu_stream_t *stream, npu_kernel_t *kernel,
     request.task_z = desc->config.task_dim.z;
     request.task_mode = (uint32_t)desc->config.task_mode;
     request.argument_count = desc->arg_count;
+    memcpy(request.task_name, desc->task_name, sizeof(request.task_name));
     for (index = 0; index < desc->arg_count; ++index) {
         const npu_kernel_arg_t *source = &desc->args[index];
         npu_ipc_launch_argument_t *destination = &request.arguments[index];

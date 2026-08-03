@@ -95,6 +95,7 @@ static void usage(FILE *file, const char *program)
             "  -s, --socket PATH       Server socket (env DAYAN_SERVER_SOCKET, else %s)\n"
             "  -o, --output FILE       output JSON (default: dayan-trace.json)\n"
             "  -d, --duration-ms MS    capture duration; 0 waits for Ctrl-C or COMMAND\n"
+            "  -f, --follow            continuously capture until Ctrl-C or COMMAND exits\n"
             "  -b, --buffer-size SIZE  Device buffer bytes; K/M/G accepted\n"
             "  -- COMMAND [ARG...]     profile while COMMAND uses the same Server\n"
             "  -h, --help              show this help\n",
@@ -178,6 +179,37 @@ static int trace_item_begin(struct trace_writer *writer)
     return 0;
 }
 
+static int trace_json_string(FILE *file, const char *text, size_t capacity)
+{
+    size_t index;
+
+    if (fputc('"', file) == EOF)
+        return -EIO;
+    for (index = 0; index < capacity && text[index]; ++index) {
+        unsigned char value = (unsigned char)text[index];
+
+        if (value == '"' || value == '\\') {
+            if (fputc('\\', file) == EOF || fputc(value, file) == EOF)
+                return -EIO;
+        } else if (value == '\b' || value == '\f' || value == '\n' ||
+                   value == '\r' || value == '\t') {
+            const char escaped = value == '\b' ? 'b' :
+                                 value == '\f' ? 'f' :
+                                 value == '\n' ? 'n' :
+                                 value == '\r' ? 'r' : 't';
+
+            if (fputc('\\', file) == EOF || fputc(escaped, file) == EOF)
+                return -EIO;
+        } else if (value < 0x20U) {
+            if (fprintf(file, "\\u%04x", value) < 0)
+                return -EIO;
+        } else if (fputc(value, file) == EOF) {
+            return -EIO;
+        }
+    }
+    return fputc('"', file) == EOF ? -EIO : 0;
+}
+
 static uint64_t trace_pid(uint32_t cluster, uint32_t hart)
 {
     return UINT64_C(1) + ((uint64_t)cluster << 32) + hart;
@@ -225,18 +257,25 @@ static struct trace_target *trace_target_get(struct trace_writer *writer,
 
 static int trace_proc_metadata(struct trace_writer *writer,
                                struct trace_target *target,
-                               uint16_t event_id)
+                               uint16_t event_id,
+                               const char name[NPU_PROC_NAME_SIZE])
 {
+    size_t name_length;
+
     if (target->proc_seen[event_id])
         return 0;
+    name_length = strnlen(name, NPU_PROC_NAME_SIZE);
+    if (!name_length || name_length == NPU_PROC_NAME_SIZE)
+        return -EPROTO;
     target->proc_seen[event_id] = 1;
     if (trace_item_begin(writer) < 0 ||
         fprintf(writer->file,
                 "{\"name\":\"thread_name\",\"ph\":\"M\","
                 "\"pid\":%" PRIu64 ",\"tid\":%u,\"args\":{"
-                "\"name\":\"proc %u\"}}",
-                trace_pid(target->cluster, target->hart), event_id,
-                event_id) < 0)
+                "\"name\":",
+                trace_pid(target->cluster, target->hart), event_id) < 0 ||
+        trace_json_string(writer->file, name, name_length) < 0 ||
+        fputs("}}", writer->file) == EOF)
         return -EIO;
     return 0;
 }
@@ -281,17 +320,23 @@ static int trace_state_event(struct trace_writer *writer,
                              uint32_t raw_cycle)
 {
     const char *name = trace_state_name(state);
+    char timestamp[48];
+    int length;
 
     if (!name)
         return -EPROTO;
+    length = snprintf(timestamp, sizeof(timestamp), "%" PRIu64 ".%03" PRIu64,
+                      cycle / 1000U, cycle % 1000U);
+    if (length < 0 || (size_t)length >= sizeof(timestamp))
+        return -EOVERFLOW;
     if (trace_item_begin(writer) < 0 ||
         fprintf(writer->file,
                 "{\"name\":\"%s\",\"cat\":\"proc_state\","
                 "\"ph\":\"%s\",\"pid\":%" PRIu64 ","
-                "\"tid\":%u,\"ts\":%" PRIu64 ",\"args\":{"
+                "\"tid\":%u,\"ts\":%s,\"args\":{"
                 "\"cycle\":%u,\"state\":%u}}",
                 name, phase, trace_pid(target->cluster, target->hart),
-                event_id, cycle, raw_cycle, state) < 0)
+                event_id, timestamp, raw_cycle, state) < 0)
         return -EIO;
     return 0;
 }
@@ -314,8 +359,13 @@ static int trace_write_batch(struct trace_writer *writer,
 
         if (!trace_state_name(event->state))
             return -EPROTO;
-        if (trace_proc_metadata(writer, target, event->event_id) < 0)
-            return -EIO;
+        {
+            int metadata_status = trace_proc_metadata(
+                writer, target, event->event_id, event->name);
+
+            if (metadata_status < 0)
+                return metadata_status;
+        }
         cycle = extend_cycle(target, event->cycle);
         if (target->state_valid[event->event_id] &&
             trace_state_event(writer, target, event->event_id,
@@ -381,7 +431,8 @@ static int trace_writer_close(struct trace_writer *writer)
         }
     }
     if (writer->file &&
-        fputs("],\"metadata\":{\"time_unit\":\"device_cycle\"}}\n",
+        fputs("],\"displayTimeUnit\":\"ns\",\"metadata\":{"
+              "\"time_unit\":\"ns\",\"cycle_ns\":1}}\n",
               writer->file) == EOF)
         status = -EIO;
     if (writer->file && fclose(writer->file) < 0)
@@ -426,6 +477,7 @@ int main(int argc, char **argv)
         { "socket", required_argument, 0, 's' },
         { "output", required_argument, 0, 'o' },
         { "duration-ms", required_argument, 0, 'd' },
+        { "follow", no_argument, 0, 'f' },
         { "buffer-size", required_argument, 0, 'b' },
         { "help", no_argument, 0, 'h' },
         { 0, 0, 0, 0 },
@@ -445,6 +497,7 @@ int main(int argc, char **argv)
     int command_exit_status = 0;
     int command_started = 0;
     int duration_set = 0;
+    int follow_set = 0;
     int writer_open = 0;
     int profile_started = 0;
     int status = 0;
@@ -452,7 +505,7 @@ int main(int argc, char **argv)
 
     if (!socket_path || !*socket_path)
         socket_path = NPU_DEFAULT_SERVER_SOCKET;
-    while ((option = getopt_long(argc, argv, "+s:o:d:b:h", long_options,
+    while ((option = getopt_long(argc, argv, "+s:o:d:b:fh", long_options,
                                  0)) != -1) {
         uint64_t value;
 
@@ -471,6 +524,10 @@ int main(int argc, char **argv)
             }
             duration_value = value;
             duration_set = 1;
+            break;
+        case 'f':
+            duration_value = 0;
+            follow_set = 1;
             break;
         case 'b':
             status = parse_u64(optarg, &value);
@@ -492,9 +549,14 @@ int main(int argc, char **argv)
         usage(stderr, argv[0]);
         return 2;
     }
+    if (duration_set && follow_set) {
+        fprintf(stderr,
+                "dyperf: --duration-ms and --follow are mutually exclusive\n");
+        return 2;
+    }
     if (optind < argc) {
         command = &argv[optind];
-        if (!duration_set)
+        if (!duration_set && !follow_set)
             duration_value = 0;
     }
     if (signal(SIGINT, handle_signal) == SIG_ERR ||

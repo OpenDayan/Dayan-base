@@ -96,15 +96,16 @@ struct rpc_proc_exit_request {
     uint64_t cookie;
 };
 
-#define RPC_PROC_CREATE_VERSION       3U
+#define RPC_PROC_CREATE_VERSION       4U
 #define RPC_PROC_MAX_ARGS             8U
 #define RPC_PROC_SLOTS_PER_HART       16U
+#define RPC_PROC_NAME_SIZE            16U
 #define RPC_PROC_MIN_STACK_SIZE       1024U
 #define RPC_PROC_MAX_STACK_SIZE       0x10000U
 #define RPC_PROC_MAX_PRINTF_SIZE      0x1000U
 #define RPC_PROC_MAX_CHILD_PROCS      (RPC_PROC_SLOTS_PER_HART - 1U)
 #define RPC_PROC_URAM_GRANULE         1024U
-#define RPC_PROC_PS_VERSION           2U
+#define RPC_PROC_PS_VERSION           3U
 #define RPC_PROC_KILL_ALL_VERSION     1U
 #define RPC_PROC_PS_SYSTEM_PROCS      3U
 #define RPC_PROC_PS_MAX_RECORDS       \
@@ -154,6 +155,7 @@ struct rpc_proc_create_request {
     uint32_t resource_reserved;
     uint64_t uram_base;
     uint64_t uram_size;
+    char name[RPC_PROC_NAME_SIZE];
 };
 
 struct rpc_proc_info {
@@ -170,6 +172,7 @@ struct rpc_proc_info {
     int64_t result;
     uint64_t pc;
     uint64_t cookie;
+    char name[RPC_PROC_NAME_SIZE];
 };
 
 struct rpc_proc_ps_snapshot {
@@ -199,7 +202,7 @@ struct rpc_proc_kill_result {
     uint64_t reserved;
 };
 
-#define RPC_PROFILE_VERSION 2U
+#define RPC_PROFILE_VERSION 3U
 
 enum rpc_profile_proc_state {
     RPC_PROFILE_PROC_RUNNING = 0,
@@ -221,6 +224,7 @@ struct rpc_profile_event {
     uint32_t cycle;
     uint16_t event_id;
     uint16_t state;
+    char name[RPC_PROC_NAME_SIZE];
 };
 
 /* Host-owned descriptor used by RPC_PROFILE_CONFIG. */
@@ -297,28 +301,34 @@ _Static_assert(offsetof(struct rpc_proc_create_request, max_child_procs) == 184,
                "Host proc child resource offset");
 _Static_assert(offsetof(struct rpc_proc_create_request, uram_base) == 192,
                "Host proc URAM base offset");
-_Static_assert(sizeof(struct rpc_proc_create_request) == 208,
+_Static_assert(offsetof(struct rpc_proc_create_request, name) == 208,
+               "Host proc name offset");
+_Static_assert(sizeof(struct rpc_proc_create_request) == 224,
                "Host proc create ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_proc_info, result) == 56,
                "Host proc info result offset");
 _Static_assert(offsetof(struct rpc_proc_info, cookie) == 72,
                "Host proc info cookie offset");
-_Static_assert(sizeof(struct rpc_proc_info) == 80,
+_Static_assert(offsetof(struct rpc_proc_info, name) == 80,
+               "Host proc info name offset");
+_Static_assert(sizeof(struct rpc_proc_info) == 96,
                "Host proc info ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_proc_ps_snapshot, records) == 48,
                "Host proc snapshot record offset");
-_Static_assert(sizeof(struct rpc_proc_ps_snapshot) == 1568,
+_Static_assert(sizeof(struct rpc_proc_ps_snapshot) == 1872,
                "Host proc snapshot ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_proc_kill_result, status) == 16,
                "Host proc kill result status offset");
 _Static_assert(sizeof(struct rpc_proc_kill_result) == 48,
                "Host proc kill result ABI must stay fixed");
-_Static_assert(sizeof(struct rpc_profile_event) == 8,
+_Static_assert(sizeof(struct rpc_profile_event) == 24,
                "proc profile event ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_profile_event, event_id) == 4,
                "proc profile event ID offset");
 _Static_assert(offsetof(struct rpc_profile_event, state) == 6,
                "proc profile event state offset");
+_Static_assert(offsetof(struct rpc_profile_event, name) == 8,
+               "proc profile event name offset");
 _Static_assert(sizeof(struct rpc_profile_config) == 64,
                "proc profile config ABI must stay fixed");
 _Static_assert(sizeof(struct rpc_profile_flush_request) == 40,
