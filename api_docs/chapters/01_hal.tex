@@ -1,0 +1,129 @@
+\documentclass[../dayan_api_reference.tex]{subfiles}
+
+\begin{document}
+
+\section{HAL API}\label{sec:api-hal}
+
+HAL 是 Server/Service 与具体设备后端之间的公开控制面，同时向 Runtime data worker
+定义不暴露物理拓扑的数据面 ABI。本章只记录
+\code{host/driver/hal/hal.h} 与 \code{host/driver/hal/dataplane.h}；
+\code{hal_internal.h}、\code{client_internal.h} 和 backend ops 不属于对外 API。
+
+除特别说明外，返回 \code{int} 的函数以 0 表示成功，以负 Linux errno 表示失败。
+allocation、HAL 和 data client 都是不透明 handle；创建者负责按本章列出的对应 close/free
+函数释放。
+
+\subsection{公开类型与常量}
+
+\begin{dayantable}{HAL 核心类型}{tab:api-hal-types}{X[34,l] X[66,l]}
+  类型 & 用途 \\
+  \code{npu_hal_t} & 一个已打开的控制后端；保存 topology、内存 arena 和首个致命 I/O 状态。 \\
+  \code{npu_hal_allocation_t} & HAL 物理 allocation handle；地址由 viewer 的 Cluster/Core 可见性决定。 \\
+  \code{npu_hal_core_t} & \code{cluster/core} 二元物理执行位置。 \\
+  \code{npu_hal_memory_class_t} & 普通 DRAM、coherent memory 或 Core-local URAM。 \\
+  \code{npu_hal_memory_scope_t} & Device、Cluster 或 Core 可见范围。 \\
+  \code{npu_hal_memory_usage_t} & Buffer、firmware、kernel、heap、launch、shared、URAM、profile 或 Atomic Cache backing。 \\
+  \code{npu_hal_memory_region_t} & 一个可分配地址区间及其 class、scope 和归属位置。 \\
+  \code{npu_hal_options_t} & backend、设备编号、Cluster stride、topology、地址偏移和 region 表。 \\
+  \code{npu_hal_info_t} & 已打开设备的 ABI、topology、data provider 和传输限制。 \\
+  \code{npu_hal_memory_request_t} & allocation 的 class/scope/usage/owner/位置/大小/对齐或固定地址请求。 \\
+  \code{npu_hal_allocation_info_t} & 已分配对象的地址、大小、属性和归属位置快照。 \\
+\end{dayantable}
+
+\begin{dayantable}{HAL 数据面类型}{tab:api-hal-data-types}{X[36,l] X[64,l]}
+  类型 & 用途 \\
+  \code{npu_hal_data_client_t} & Runtime 侧导入 provider handles 后得到的不透明 client。 \\
+  \code{npu_hal_data_direction_t} & \code{HOST_TO_DEVICE} 或 \code{DEVICE_TO_HOST}。 \\
+  \code{npu_hal_data_export_t} & Server 通过 SCM\_RIGHTS 发送的 provider、handle 数与 opaque 参数。 \\
+  \code{npu_hal_data_token_t} & 一次传输的 provider、方向、长度和 opaque 定位信息。 \\
+\end{dayantable}
+
+\begin{dayantable}{HAL 枚举值与上限}{tab:api-hal-enums}{X[47,l] X[53,l]}
+  API & 含义 \\
+  \code{NPU_HAL_MAX_CLUSTERS} / \code{NPU_HAL_MAX_CORES_PER_CLUSTER} & ABI 最多表示 32 个 Cluster、每 Cluster 32 个 Core。 \\
+  \code{NPU_HAL_MEMORY_NORMAL} / \code{NPU_HAL_MEMORY_COHERENT} / \code{NPU_HAL_MEMORY_URAM} & 三种 memory class。 \\
+  \code{NPU_HAL_MEMORY_DEVICE} / \code{NPU_HAL_MEMORY_CLUSTER} / \code{NPU_HAL_MEMORY_CORE} & 三种 visibility scope。 \\
+  \code{NPU_HAL_MEMORY_BUFFER} / \code{NPU_HAL_MEMORY_FIRMWARE} / \code{NPU_HAL_MEMORY_KERNEL} & 普通 Buffer、固件与已装载 kernel 用途。 \\
+  \code{NPU_HAL_MEMORY_HEAP} / \code{NPU_HAL_MEMORY_LAUNCH} / \code{NPU_HAL_MEMORY_SHARED} & Device heap、launch descriptor 与 coherent shared 用途。 \\
+  \code{NPU_HAL_MEMORY_KERNEL_URAM} / \code{NPU_HAL_MEMORY_PROFILE} / \code{NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING} & Kernel URAM、profile FIFO 与 Atomic Cache backing 用途。 \\
+  \code{NPU_HAL_DATA_HOST_TO_DEVICE} / \code{NPU_HAL_DATA_DEVICE_TO_HOST} & token 数据面的两个传输方向。 \\
+  \code{NPU_HAL_DATA_MAX_HANDLES} & 一次 data-plane export 最多携带 64 个 provider handle。 \\
+\end{dayantable}
+
+版本字段分别使用 \code{NPU_HAL_ABI_VERSION}、\code{NPU_HAL_OPTIONS_VERSION}、
+\code{NPU_HAL_MEMORY_REQUEST_VERSION}、\code{NPU_HAL_DATA_EXPORT_VERSION} 和
+\code{NPU_HAL_DATA_TOKEN_VERSION}。任意位置使用 \code{NPU_HAL_ANY_CLUSTER}、
+\code{NPU_HAL_ANY_CORE}；无限等待使用 \code{NPU_HAL_TIMEOUT_INFINITE}。当前公开 backend
+和 data provider 分别为 \code{NPU_HAL_BACKEND_FUSE_XDMA} 与
+\code{NPU_HAL_DATA_PROVIDER_FD_OFFSET}。
+
+\subsection{生命周期与 topology}
+
+\begin{dayantable}{HAL 生命周期与查询}{tab:api-hal-life}{X[38,l] X[62,l]}
+  API & 行为 \\
+  \code{npu_hal_options_init} & 填充 backend、单 Cluster 四 Core 等默认选项和版本。 \\
+  \code{npu_hal_open} & 校验 options，建立内存管理器并打开所选 backend。 \\
+  \code{npu_hal_close} & 关闭 backend，销毁全部 arena 与同步对象；接受空指针。 \\
+  \code{npu_hal_device_status} & 返回 0，或首个不可恢复 backend I/O 错误；故障状态具有粘性。 \\
+  \code{npu_hal_get_info} & 返回规范化后的 HAL ABI、topology 和 data-plane 能力。 \\
+  \code{npu_hal_get_memory_region} & 按索引返回一个公开 memory region。 \\
+  \code{npu_hal_core_valid} & 判断 Cluster/Core 二元组是否落在当前 topology 内。 \\
+  \code{npu_hal_memory_capacity} & 累加指定 viewer 可见的某类内存总容量。 \\
+\end{dayantable}
+
+\subsection{地址、寄存器、IRQ 与启动}
+
+raw address API 只供 BL1、RPC 和 Service 实现使用；Runtime 应只持有逻辑 Buffer。
+Cluster 参数选择物理地址空间，Core 参数进一步选择 mailbox 或启动目标。
+
+\begin{dayantable}{HAL 控制面访问}{tab:api-hal-control}{X[39,l] X[61,l]}
+  API & 行为 \\
+  \code{npu_hal_copy_to_address} & 将 Host 字节写到指定 Cluster 的原始设备地址。 \\
+  \code{npu_hal_copy_from_address} & 从指定 Cluster 的原始设备地址读取到 Host。 \\
+  \code{npu_hal_copy_address} & 通过有界 Host staging chunk 在同一 Cluster 内完成 D2D 拷贝。 \\
+  \code{npu_hal_register_read} & 从 backend 控制窗口读取任意长度寄存器字段。 \\
+  \code{npu_hal_register_write} & 向 backend 控制窗口写入任意长度寄存器字段。 \\
+  \code{npu_hal_irq_status} & 读取一个 Cluster 的 Host IRQ pending bitmap。 \\
+  \code{npu_hal_irq_wait} & 等待任一 Cluster 的非零 IRQ；超时返回 \code{-ETIMEDOUT} 并清空输出。 \\
+  \code{npu_hal_irq_ack} & 向目标 Cluster 写 IRQ clear mask。 \\
+  \code{npu_hal_irq_mailbox} & 读取指定 Core 对应的 Host IRQ mailbox command。 \\
+  \code{npu_hal_command_submit} & 写 Device mailbox 并置位目标 Core 的 MSIP。 \\
+  \code{npu_hal_wait_command_consumed} & 等待目标 Core 清除 MSIP，受毫秒 timeout 限制。 \\
+  \code{npu_hal_boot_core} & 等待旧命令消费、提交 BL1 entry，再等待 BL0 消费启动命令。 \\
+\end{dayantable}
+
+设备文件返回 \code{EIO}、\code{ENODEV}、\code{EBADF} 等不可恢复错误时，访问函数会
+记录该状态；后续控制访问直接返回同一故障，供 Server 自动退出。
+
+\subsection{物理内存管理}
+
+\begin{dayantable}{HAL allocation API}{tab:api-hal-memory}{X[39,l] X[61,l]}
+  API & 行为 \\
+  \code{npu_hal_memory_request_init} & 初始化通用 Device-scope 普通 Buffer 请求及 64-byte 对齐。 \\
+  \code{npu_hal_memory_alloc} & 在匹配的 region 中按大小和对齐选择空闲地址。 \\
+  \code{npu_hal_memory_reserve} & 在匹配 region 中占用指定 \code{fixed_address} 范围。 \\
+  \code{npu_hal_memory_free} & 从 arena 移除 allocation；handle 随即失效。 \\
+  \code{npu_hal_memory_info} & 返回 allocation 的规范化属性。 \\
+  \code{npu_hal_memory_visible} & 判断 allocation 是否对指定 viewer 可见。 \\
+  \code{npu_hal_address_valid} & 判断原始地址范围是否属于 viewer 可见的任一 region。 \\
+  \code{npu_hal_memory_address} & 取得 allocation 对指定 viewer 的设备地址。 \\
+  \code{npu_hal_memory_write} & 校验 handle、viewer、offset 和长度后写入 allocation。 \\
+  \code{npu_hal_memory_read} & 校验 handle、viewer、offset 和长度后读出 allocation。 \\
+\end{dayantable}
+
+\subsection{token 数据面}
+
+\begin{dayantable}{HAL data-plane API}{tab:api-hal-data}{X[42,l] X[58,l]}
+  API & 行为 \\
+  \code{npu_hal_export_data_plane} & 导出 provider 描述和一组可经 SCM\_RIGHTS 发送的 handles。 \\
+  \code{npu_hal_prepare_transfer} & 校验 allocation 范围和传输限制，签发一次 scoped token。 \\
+  \code{npu_hal_finish_transfer} & 校验原 token 并向 provider 提交 Host 传输结果。 \\
+  \code{npu_hal_data_client_import} & Runtime 导入 export 与 handles，取得匹配 provider client。 \\
+  \code{npu_hal_data_client_close} & 关闭 client 持有的 handles 并释放 provider 状态。 \\
+  \code{npu_hal_data_client_transfer} & 使用 token 直接在 Host buffer 与 provider 之间搬运 payload。 \\
+\end{dayantable}
+
+export/token 的 opaque 字段只由 provider 解释。Runtime 仅校验版本、方向和长度，并在
+完成消息中原样回传 token；Cluster/Core 和物理地址不会进入 Runtime 公共对象 API。
+
+\end{document}

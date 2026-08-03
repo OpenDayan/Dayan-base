@@ -1,0 +1,128 @@
+\documentclass[../dayan_api_reference.tex]{subfiles}
+
+\begin{document}
+
+\section{Service API}\label{sec:api-service}
+
+Service 接收一个已打开的 HAL，负责 BL1 生命周期、Device API ELF、kernel 重定位、
+Host--Device RPC 和按物理 Hart 启动 proc。Server API 在 Service 之上提供 Unix socket
+daemon 与 logical task scheduler。本章记录 \code{service.h} 和 \code{server.h}；
+\code{service_internal.h}、\code{server_internal.h}、scheduler helper 和 RPC worker
+实现均不属于公开 API。
+
+\subsection{公开类型与回调}
+
+\begin{dayantable}{Service 类型}{tab:api-service-types}{X[37,l] X[63,l]}
+  类型 & 用途 \\
+  \code{npu_service_device_t} & 绑定一个 HAL 的不透明 Device service。 \\
+  \code{npu_service_launch_t} & 一个 Host root proc 及其 Host-owned create descriptor。 \\
+  \code{npu_service_launch_state_t} & Host-visible launch 的 SUBMITTED、RUNNING、EXITED 或 FAILED 状态。 \\
+  \code{npu_service_output_fn} & 接收 Cluster/Core/proc 的 WRITE 或 CLEAR 输出事件。 \\
+  \code{npu_service_trap_fn} & 接收目标 Hart 上报的 trap record。 \\
+  \code{npu_service_proc_exit_fn} & 接收 Host root proc 的返回值和 launch cookie。 \\
+  \code{npu_service_profile_event_t} & 24-B 原始 Device profile event，含 cycle、event ID、状态和 Proc 名称。 \\
+  \code{npu_service_profile_fn} & 接收某 Cluster/Core 的一批原始 profile events。 \\
+  \code{npu_service_options_t} & RPC polling、默认 timeout、四类 callback 及 callback context。 \\
+  \code{npu_service_launch_desc_t} & 物理 target、entry、参数、logical task、shared/URAM、子 proc、名称和 cookie。 \\
+  \code{npu_service_launch_info_t} & launch 状态、目标、proc ID、返回状态、task ID、名称和 cookie。 \\
+  \code{npu_service_proc_info_t} & 一个 proc 的父子关系、状态、slot、task、结果、PC、cookie 和名称。 \\
+  \code{npu_service_proc_snapshot_t} & 一个 Hart 的 proc records 与 slot 计数。 \\
+  \code{npu_service_kill_result_t} & kill-all 的 root/child、立即释放和等待 Produce 数量。 \\
+  \code{dayan_server_t} & socket daemon、scheduler、Session 和对象表的不透明实例。 \\
+  \code{dayan_server_options_t} & socket、firmware/API ELF、启用 mask、资源限制及嵌套 HAL/Service options。 \\
+\end{dayantable}
+
+\code{struct trap_record} 是 callback 使用的只读前置声明类型，其 Device trap 布局不由
+Service API 定义。
+
+\begin{dayantable}{Service 常量与枚举}{tab:api-service-constants}{X[47,l] X[53,l]}
+  API & 含义 \\
+  \code{NPU_SERVICE_OPTIONS_VERSION} / \code{NPU_SERVICE_LAUNCH_DESC_VERSION} & 当前 options 版本 6、launch descriptor 版本 4。 \\
+  \code{DAYAN_SERVER_OPTIONS_VERSION} & 当前 Server options 版本 6。 \\
+  \code{NPU_SERVICE_TIMEOUT_INFINITE} & Service 调用无限等待。 \\
+  \code{NPU_SERVICE_LAUNCH_MAX_ARGS} & root Proc 最多 8 个 64-bit 参数。 \\
+  \code{NPU_SERVICE_PROC_NAME_SIZE} & Proc 名称固定 16 B，其中必须含一个 NUL。 \\
+  \code{NPU_SERVICE_PROC_MAX_RECORDS} & 单 Hart snapshot 最多 19 条记录。 \\
+  \code{NPU_SERVICE_PROFILE_DEFAULT_BUFFER_SIZE} & 默认 Device-wide profile buffer 为 16 MiB。 \\
+  \code{NPU_SERVICE_OUTPUT_CLEAR} & output callback 事件要求清空该 Proc 的 Host 缓冲。 \\
+  \code{NPU_SERVICE_LAUNCH_SUBMITTED} / \code{NPU_SERVICE_LAUNCH_RUNNING} & launch 已提交或正在运行。 \\
+  \code{NPU_SERVICE_LAUNCH_EXITED} / \code{NPU_SERVICE_LAUNCH_FAILED} & launch 正常退出或创建/执行失败。 \\
+  \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统、Host root 与 Device child Proc record。 \\
+  \code{NPU_SERVICE_PROC_ZOMBIE} / \code{NPU_SERVICE_PROC_KILL_WAIT_PRODUCE} & 等待 join 的已退出 Proc，或 kill 后等待异步 produce 的 Proc。 \\
+\end{dayantable}
+
+\subsection{Service 生命周期}
+
+\begin{dayantable}{Service 生命周期 API}{tab:api-service-life}{X[38,l] X[62,l]}
+  API & 行为 \\
+  \code{npu_service_options_init} & 设置版本、1 ms RPC poll、60 s 默认 timeout 和默认 callbacks。 \\
+  \code{npu_service_open} & 查询 HAL topology、建立 per-Hart pending call 表并启动 RPC worker。 \\
+  \code{npu_service_close} & 停止 profile/worker，释放 kernel、heap、firmware 与 Atomic Cache tracking；不关闭 HAL。 \\
+  \code{npu_service_abort} & 设置一次性失败状态，拒绝新 Device 操作并唤醒所有 pending RPC。 \\
+  \code{npu_service_status} & 返回 0 或 Service 首个 abort 状态。 \\
+  \code{npu_service_get_options} & 返回 Service 持有的只读 options 指针。 \\
+\end{dayantable}
+
+正常关闭应先让所有 \code{npu_service_launch_t} 终结并 release。设备已经不可访问时，
+Server 先 abort，再用 abandon 路径释放 Host tracking。
+
+\subsection{BL1、Device API 与 kernel}
+
+\begin{dayantable}{固件和 kernel API}{tab:api-service-kernel}{X[40,l] X[60,l]}
+  API & 行为 \\
+  \code{npu_service_load_bl1} & 从内存 ELF 为指定 Cluster 装载 BL1，配置 Atomic Cache，并启动 core mask。 \\
+  \code{npu_service_load_bl1_file} & 读取路径后执行同一 BL1 加载流程。 \\
+  \code{npu_service_set_api_elf} & 从内存 ELF 建立允许 Device object 解析的公开符号表。 \\
+  \code{npu_service_set_api_elf_file} & 从文件安装 Device API ELF 符号表。 \\
+  \code{npu_service_kernel_resolve} & 将 ET\_REL object 装入 target Cluster、解析 entry，并刷新已启动 Hart 的 I-cache。 \\
+  \code{npu_service_kernel_forget} & 减少 object identity 引用；最后一个引用释放模块 allocation。 \\
+\end{dayantable}
+
+同一 object identity 与内容可在一个 Cluster 内复用。调用方必须保证传给 resolve/forget
+的 object 指针、大小配对一致；Service 不向 Runtime 暴露最终设备地址。
+
+\subsection{proc launch}
+
+\begin{dayantable}{Service launch API}{tab:api-service-launch}{X[40,l] X[60,l]}
+  API & 行为 \\
+  \code{npu_service_launch_desc_init} & 设置描述符版本、默认 stack/printf、单 task 与单 Core mode。 \\
+  \code{npu_service_launch} & 校验 target 和 allocation，发送 \code{RPC_PROC_CREATE}，返回 launch handle。 \\
+  \code{npu_service_launch_query} & 从 Host-owned create descriptor 读取当前状态和返回信息。 \\
+  \code{npu_service_launch_wait} & 轮询 query，直到终态或 timeout。 \\
+  \code{npu_service_launch_release} & 仅在 EXITED/FAILED 后释放 create allocation 和 handle。 \\
+  \code{npu_service_launch_abandon} & Device 无法再查询时只回收 Host allocation/tracking。 \\
+\end{dayantable}
+
+\code{target} 必须显式指定 Cluster/Core；\code{task_id/task_dim/task_mode} 描述逻辑任务。
+shared 和 URAM 使用 HAL allocation handle 加 offset/size，Service 会再次校验 class、scope、
+可见性及对齐。一个 root 的最大子 proc 数在创建时静态预留。
+
+\subsection{Hart 管理与 profile}
+
+\begin{dayantable}{Service 管理 API}{tab:api-service-admin}{X[43,l] X[57,l]}
+  API & 行为 \\
+  \code{npu_service_rpc_ps} & 向指定 Hart 请求完整 proc 快照并转换为 Service records。 \\
+  \code{npu_service_rpc_kill_all} & 使用默认 timeout 终止目标 Hart 上的全部非系统 proc。 \\
+  \code{npu_service_rpc_kill_all_timeout} & 与 kill-all 相同，但由调用方给出 shutdown timeout。 \\
+  \code{npu_service_profile_start} & 分配一个 Device-wide buffer，按 booted Hart 分片并发送 START。 \\
+  \code{npu_service_profile_stop} & 对各 Hart 发送 STOP、取回尾批次并释放 profile allocation。 \\
+\end{dayantable}
+
+profile 是 Device-wide 单 owner 能力；不同 Hart 拥有独立 FIFO slice。Service callback
+中的 event 保留 Device cycle、event ID、状态和固定 16-byte proc 名称。
+
+\subsection{Runtime Server}
+
+\begin{dayantable}{dayan\_server API}{tab:api-service-server}{X[42,l] X[58,l]}
+  API & 行为 \\
+  \code{dayan_server_options_init} & 初始化 socket、资源限制及嵌套 HAL/Service options。 \\
+  \code{dayan_server_create} & 打开 HAL/Service，加载可选 firmware/API ELF，建立 slots、socket 和 scheduler。 \\
+  \code{dayan_server_run} & poll/accept Runtime 连接，直到 stop flag、主动停止或设备 I/O 故障。 \\
+  \code{dayan_server_request_stop} & 幂等停止监听，取消 Context 并 shutdown 全部 Session socket。 \\
+  \code{dayan_server_destroy} & 并行 kill-all、abort pending RPC、回收 scheduler/连接和全部 Host 资源。 \\
+\end{dayantable}
+
+\code{dayan_server_run} 的外部 stop 指针只用于读取异步信号状态。收到 SIGINT/SIGTERM 时，
+主程序先让 run 返回，再调用 destroy；Device 已失联时 destroy 跳过 Device 侧 RPC。
+
+\end{document}

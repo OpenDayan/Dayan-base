@@ -1,0 +1,38 @@
+\documentclass{dayan-manual}
+
+\InputIfFileExists{build/version.tex}{}{\providecommand{\DocVersion}{unknown}}
+
+\title{Dayan 对外 API 参考手册}
+\subtitle{HAL、Service、Runtime、RPC 与 dapi}
+\author{中国科学院计算技术研究所}
+\version{\DocVersion}
+\date{2026-08-03}
+
+\hypersetup{
+  pdftitle={Dayan对外API参考手册},
+  pdfsubject={Dayan HAL Service Runtime RPC与dapi接口},
+  pdfauthor={中国科学院计算技术研究所}
+}
+
+\usepackage{subfiles}
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\maketitle
+\hypersetup{pageanchor=true}
+\pagenumbering{Roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\subfile{chapters/01_hal}
+\clearpage
+\subfile{chapters/02_service}
+\clearpage
+\subfile{chapters/03_runtime}
+\clearpage
+\subfile{chapters/04_rpc}
+\clearpage
+\subfile{chapters/05_dapi}
+
+\end{document}

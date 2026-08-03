@@ -1,0 +1,15 @@
+rpc_call
+rpc_clear
+rpc_clear_proc
+rpc_command_arg
+rpc_command_opcode
+rpc_command_pack
+rpc_heap_acquire
+rpc_heap_release
+rpc_init
+rpc_proc_exit
+rpc_proc_wait_cancel
+rpc_profile_flush
+rpc_receive
+rpc_write
+rpc_write_proc

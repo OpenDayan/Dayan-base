@@ -1,0 +1,225 @@
+\documentclass[../dayan_api_reference.tex]{subfiles}
+
+\begin{document}
+
+\section{Runtime API}\label{sec:api-runtime}
+
+Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/data socket 与
+\code{dayan_server} 通讯，不打开寄存器或 IRQ 设备。公开入口由
+\code{dayan_runtime.h} 汇总 \code{npu_runtime.h}、\code{npu_package.h} 和
+\code{dayan_kernel.h}；dycc 源码标注来自 \code{dayan_compiler.h}。
+\code{runtime_internal.h} 和 socket protocol 不属于应用 API。
+
+\subsection{对象、描述符与状态}
+
+\begin{dayantable}{Runtime 对象与配置}{tab:api-runtime-types}{X[38,l] X[62,l]}
+  类型 & 用途 \\
+  \code{NPUTaskDim3} & logical task grid 的 x/y/z 维度。 \\
+  \code{NPUTaskMode} & 单 Core 模式 1 或四 Core Cluster 模式 4。 \\
+  \code{NPULaunchConfig} & task dim 与 task mode 的组合。 \\
+  \code{npu_runtime_t} & 一个 control/data socket Session。 \\
+  \code{npu_context_t} & Session 内的隔离对象域、内存 quota 和命令上限。 \\
+  \code{npu_buffer_t} & Server 管理的逻辑 Buffer handle。 \\
+  \code{npu_stream_t} & 保序异步命令队列。 \\
+  \code{npu_module_t} & 已加载 Dayan package。 \\
+  \code{npu_kernel_t} & Module 中一个可启动 kernel。 \\
+  \code{npu_event_t} & 命令状态、顺序号、结果和 cookie。 \\
+  \code{npu_profile_t} & Device-wide profile session。 \\
+  \code{npu_runtime_output_fn} & 接收 Cluster/Core/Proc 的 Device 输出或 clear 事件。 \\
+  \code{npu_buffer_flags_t} & Buffer 的位置、coherency 和 read/write 能力位。 \\
+  \code{npu_kernel_arg_kind_t} / \code{npu_kernel_arg_access_t} & 参数载荷种类和 Buffer 访问方向。 \\
+  \code{npu_event_state_t} & Event 的 queued/running/终态枚举。 \\
+  \code{npu_profile_proc_state_t} & Profile event 中的 Proc scheduler 状态。 \\
+  \code{npu_runtime_options_t} & socket、连接/默认 timeout 和 Device output callback。 \\
+  \code{npu_context_desc_t} & Context quota 与最大 pending commands。 \\
+  \code{npu_buffer_desc_t} & Buffer 大小、对齐和 read/write/coherent/local flags。 \\
+  \code{npu_stream_desc_t} & Stream priority 与 flags。 \\
+  \code{npu_kernel_arg_t} & 64-bit value 或 Buffer+offset 参数及访问方向。 \\
+  \code{npu_launch_desc_t} & task 配置、参数、cookie 和固定 16-byte Task 名称。 \\
+  \code{npu_event_info_t} & event state、command type、status、sequence 和 cookie。 \\
+  \code{npu_kernel_info_t} & task mode、并发、参数及 stack/coherent/resident/URAM 资源元数据。 \\
+  \code{npu_profile_options_t} & profile buffer 大小和 flags。 \\
+  \code{npu_profile_event_t} & 原始 Device cycle、event ID、proc state 和名称。 \\
+  \code{npu_profile_batch_info_t} & 一批事件的 Cluster、Hart、数量和 END flag。 \\
+\end{dayantable}
+
+\begin{dayantable}{Runtime 版本与通用限制}{tab:api-runtime-constants}{X[48,l] X[52,l]}
+  API & 含义 \\
+  \code{NPU_RUNTIME_OPTIONS_VERSION} / \code{NPU_CONTEXT_DESC_VERSION} & Runtime options 版本 4，Context descriptor 版本 1。 \\
+  \code{NPU_BUFFER_DESC_VERSION} / \code{NPU_STREAM_DESC_VERSION} & Buffer 与 Stream descriptor 版本均为 1。 \\
+  \code{NPU_LAUNCH_DESC_VERSION} / \code{NPU_PROFILE_OPTIONS_VERSION} & Launch descriptor 版本 3，Profile options 版本 1。 \\
+  \code{NPU_TIMEOUT_INFINITE} & Runtime wait/synchronize 的无限 timeout。 \\
+  \code{NPU_KERNEL_MAX_ARGS} & 一个 kernel launch 最多 8 个参数。 \\
+  \code{NPU_PROC_NAME_SIZE} & Task/Proc 名称固定 16 B。 \\
+  \code{NPU_DEFAULT_SERVER_SOCKET} & 默认 control socket 为 \code{/tmp/dayan-server.sock}。 \\
+  \code{NPU_PROFILE_DEFAULT_BUFFER_SIZE} & 默认 Device-wide profile buffer 为 16 MiB。 \\
+  \code{NPU_PROFILE_MAX_BATCH_EVENTS} & 单次 \code{npu_profile_read} 最多返回 4096 个 event。 \\
+\end{dayantable}
+
+\begin{dayantable}{Runtime flags 与状态}{tab:api-runtime-enums}{X[48,l] X[52,l]}
+  API & 含义 \\
+  \code{NPU_TASK_MODE_SINGLE_CORE} / \code{NPU_TASK_MODE_FOUR_CORE} & C API 的 task mode 1 与 4；C++ 对应 \code{kSingleCore} 与 \code{kFourCore}。 \\
+  \code{NPU_RUNTIME_OUTPUT_CLEAR} / \code{NPU_RUNTIME_OUTPUT_CONTINUED} & output callback 的清空事件与同一消息续片。 \\
+  \code{NPU_BUFFER_DEVICE_LOCAL} / \code{NPU_BUFFER_COHERENT} & 请求 Device-local 或 coherent Buffer。 \\
+  \code{NPU_BUFFER_READ} / \code{NPU_BUFFER_WRITE} & Buffer 允许作为 Device read source 或 write destination。 \\
+  \code{NPU_KERNEL_ARG_VALUE} / \code{NPU_KERNEL_ARG_BUFFER} & 立即数参数或 Buffer+offset 参数。 \\
+  \code{NPU_KERNEL_ARG_READ} / \code{NPU_KERNEL_ARG_WRITE} & Kernel 对 Buffer 参数的访问方向。 \\
+  \code{NPU_EVENT_QUEUED} / \code{NPU_EVENT_RUNNING} & Event 尚未执行或正在执行。 \\
+  \code{NPU_EVENT_COMPLETE} / \code{NPU_EVENT_FAILED} / \code{NPU_EVENT_CANCELLED} & Event 的三个终态。 \\
+  \code{NPU_PROFILE_BATCH_END} & 此 batch 是 stop 后的最后一批 profile event。 \\
+\end{dayantable}
+
+所有版本化描述符必须先调用对应 init 函数。
+
+\subsection{初始化 helper}
+
+\begin{dayantable}{Runtime 描述符初始化}{tab:api-runtime-init}{X[42,l] X[58,l]}
+  API & 行为 \\
+  \code{npu_runtime_options_init} & 设置默认 socket、连接 timeout、命令 timeout 和版本。 \\
+  \code{npu_context_desc_init} & 清零并设置 Context 描述符版本。 \\
+  \code{npu_buffer_desc_init} & 设置 Buffer 版本、大小、默认 read/write 和对齐。 \\
+  \code{npu_stream_desc_init} & 设置 Stream 版本与默认 priority。 \\
+  \code{npu_launch_config_init} & 设置 \code{task_dim=(1,1,1)} 和单 Core mode。 \\
+  \code{npu_launch_desc_init} & 初始化 launch，并复制必需的非空 Task 名称。 \\
+  \code{npu_profile_options_init} & 设置版本与默认 16 MiB profile buffer。 \\
+  \code{npu_kernel_arg_value} & 构造指定字节宽度的立即数参数。 \\
+  \code{npu_kernel_arg_buffer} & 构造 Buffer、offset 与 read/write access 参数。 \\
+\end{dayantable}
+
+\subsection{Runtime、Context 与 Buffer}
+
+\begin{dayantable}{基础对象 API}{tab:api-runtime-objects}{X[39,l] X[61,l]}
+  API & 行为 \\
+  \code{npu_runtime_open} & 建立 control/data socket，导入 HAL data-plane handles 并启动 data worker。 \\
+  \code{npu_runtime_close} & 依次关闭 profile 与全部 Context，等待 data jobs，停止 worker 并关闭 Session。 \\
+  \code{npu_context_create} & 在 Session 内创建隔离 Context。 \\
+  \code{npu_context_destroy} & 取消 Context 队列并回收全部子对象和已授权 token。 \\
+  \code{npu_buffer_create} & 按描述符向 Server 申请逻辑 Buffer。 \\
+  \code{npu_buffer_destroy} & 在无引用命令后释放 Buffer。 \\
+  \code{npu_buffer_get_size} & 返回 Buffer 创建时的字节数。 \\
+\end{dayantable}
+
+\subsection{Stream 与 memcpy}
+
+\begin{dayantable}{Stream 和搬运 API}{tab:api-runtime-stream}{X[42,l] X[58,l]}
+  API & 行为 \\
+  \code{npu_stream_create} & 在 Context 中建立一个保序队列。 \\
+  \code{npu_stream_destroy} & 队列排空后销毁 Stream。 \\
+  \code{npu_stream_synchronize} & 等到调用前排入 Stream 的全部命令终结。 \\
+  \code{npu_stream_wait_event} & 在目标 Stream 排入对另一个 Event 的依赖。 \\
+  \code{npu_memcpy_h2d_async} & 申请 H2D token，由 data worker 将 Host buffer 直接写入 Device Buffer。 \\
+  \code{npu_memcpy_d2h_async} & 申请 D2H token，由 data worker 直接读入 Host buffer。 \\
+  \code{npu_memcpy_d2d_async} & 在 Server/HAL 控制面排入 Device Buffer 间拷贝。 \\
+\end{dayantable}
+
+三个 memcpy 都返回 Event。H2D/D2H 的 Host 指针必须保持有效到 Event 终态；payload 不
+经过 socket。源/目标范围、Buffer access flags 和 Context 所有权在提交时校验。
+
+\subsection{Module、Kernel 与 launch}
+
+\begin{dayantable}{Runtime kernel API}{tab:api-runtime-kernel}{X[40,l] X[60,l]}
+  API & 行为 \\
+  \code{npu_module_load} & 从内存中的 Dayan package 创建 Module。 \\
+  \code{npu_module_load_file} & 从文件读取并加载 package。 \\
+  \code{npu_module_unload} & 在所有 Kernel handle 和 active command 释放后卸载 Module。 \\
+  \code{npu_module_get_kernel} & 按 package kernel 名称返回 Kernel handle。 \\
+  \code{npu_kernel_release} & 释放 Kernel handle 引用。 \\
+  \code{npu_kernel_get_info} & 读取 package 中公开的 kernel 资源和参数元数据。 \\
+  \code{npu_kernel_launch} & 按 launch desc 排入一个 logical grid 并返回聚合 Event。 \\
+\end{dayantable}
+
+四 Core mode 要求 \code{task_dim.x == 4}；每个 y/z group 原子占用同一 Cluster 的四个
+Core。Runtime 不接受 Cluster/Core 参数，物理放置由 Server scheduler 依据资源和 Buffer
+可见性决定。
+
+\subsection{Event 与 profile}
+
+\begin{dayantable}{Event API}{tab:api-runtime-event}{X[37,l] X[63,l]}
+  API & 行为 \\
+  \code{npu_event_record} & 在 Stream 尾部插入一个无操作 marker Event。 \\
+  \code{npu_event_query} & 非阻塞读取 Event info，并顺带投递已到达的 Device output。 \\
+  \code{npu_event_wait} & 等待 Event 终态或 timeout，并返回最终 info。 \\
+  \code{npu_event_destroy} & 删除用户可见 Event；仍被 Stream wait 引用时失败。 \\
+\end{dayantable}
+
+\begin{dayantable}{Profile API}{tab:api-runtime-profile}{X[37,l] X[63,l]}
+  API & 行为 \\
+  \code{npu_profile_start} & 取得全局 profile owner 并让 Service 配置所有 booted Hart。 \\
+  \code{npu_profile_read} & 读取一批同一 Cluster/Hart 的 events；支持 timeout。 \\
+  \code{npu_profile_stop} & 停止 Device 采样并让剩余 batch 可被读取。 \\
+  \code{npu_profile_destroy} & 在 stop 且尾批次排空后释放 profile handle。 \\
+\end{dayantable}
+
+\begin{dayantable}{Profile Proc 状态}{tab:api-runtime-profile-state}{X[49,l] X[51,l]}
+  API & 含义 \\
+  \code{NPU_PROFILE_PROC_RUNNING} / \code{NPU_PROFILE_PROC_READY} & Proc 正在执行或位于 scheduler ready queue。 \\
+  \code{NPU_PROFILE_PROC_WAIT_POLL} / \code{NPU_PROFILE_PROC_WAIT_EVENT} & Proc 等待轮询条件或事件唤醒。 \\
+  \code{NPU_PROFILE_PROC_WAIT_START} / \code{NPU_PROFILE_PROC_WAIT_EXIT} & Proc 等待启动或等待子 Proc 退出。 \\
+  \code{NPU_PROFILE_PROC_WAIT_PRODUCE} & Proc 等待异步执行单元 produce 结果。 \\
+  \code{NPU_PROFILE_PROC_KILL_WAIT_PRODUCE} & Proc 已被 kill，但 slot 必须等 produce 后才能释放。 \\
+\end{dayantable}
+
+\subsection{Package 与 dycc wrapper}
+
+\begin{dayantable}{Package API}{tab:api-runtime-package}{X[36,l] X[64,l]}
+  API & 行为 \\
+  \code{npu_package_build} & 将 RISC-V ET\_REL、kernel 描述、参数和同步资源编码成 v3 package。 \\
+  \code{npu_package_free} & 释放 package builder 返回的 Host image。 \\
+\end{dayantable}
+
+\code{npu_package_header_t}、\code{npu_package_kernel_t}、
+\code{npu_package_argument_t} 和 \code{npu_package_sync_t} 是稳定 little-endian package
+记录；\code{npu_package_kernel_desc_t} 是 builder 输入。公开 task-mode bitmap、参数
+access flag、immutable module flag、ISA 字符串和 proc/URAM 限制均定义在
+\code{npu_package.h}。
+
+\begin{dayantable}{Package 类型}{tab:api-runtime-package-types}{X[43,l] X[57,l]}
+  类型 & 用途 \\
+  \code{npu_package_arg_kind_t} & Package 参数是 64-bit value 或 Runtime Buffer。 \\
+  \code{npu_package_sync_type_t} & Package 同步资源类型；当前只有 shared resource。 \\
+  \code{npu_package_header_t} & 固定 128-B package header 与各表的 offset/count。 \\
+  \code{npu_package_kernel_t} & 固定 96-B kernel 记录及其 task/resource 元数据。 \\
+  \code{npu_package_argument_t} & 固定 16-B 参数 kind、size、alignment 和 access。 \\
+  \code{npu_package_sync_t} & 固定 32-B 同步资源类型、数量与 producer/consumer count。 \\
+  \code{npu_package_kernel_desc_t} & Host package builder 的 kernel 输入描述。 \\
+\end{dayantable}
+
+\begin{dayantable}{Package 格式常量}{tab:api-runtime-package-constants}{X[49,l] X[51,l]}
+  API & 含义 \\
+  \code{NPU_PACKAGE_MAGIC} / \code{NPU_PACKAGE_VERSION} / \code{NPU_PACKAGE_HEADER_SIZE} & 当前格式 magic、版本 3 和 128-B header。 \\
+  \code{NPU_PACKAGE_KERNEL_VERSION} / \code{NPU_PACKAGE_MAX_KERNELS} & Kernel record 版本 3；单 package 最多 4096 个 kernel。 \\
+  \code{NPU_PACKAGE_MAX_ARGS} & 单 kernel 最多 8 个参数。 \\
+  \code{NPU_PACKAGE_HART_MAX_PROCS} / \code{NPU_PACKAGE_MAX_CHILD_PROCS} & 每 Hart 16 个用户 Proc slot，root 最多声明 15 个 child。 \\
+  \code{NPU_PACKAGE_PROC_MIN_STACK_SIZE} / \code{NPU_PACKAGE_PROC_STACK_SIZE} & stack 下限 1 KiB，当前固定/上限大小 64 KiB。 \\
+  \code{NPU_PACKAGE_PROC_PRINTF_SIZE} / \code{NPU_PACKAGE_URAM_GRANULE} & 默认 printf buffer 4 KiB，URAM 粒度 1 KiB。 \\
+  \code{NPU_PACKAGE_ISA_RV64_DAYAN} & Device object 必须声明的 Dayan RV64 ISA 字符串。 \\
+  \code{NPU_PACKAGE_IMMUTABLE_MODULE} & Package object 在 Module 生命周期内不可变。 \\
+  \code{NPU_PACKAGE_TASK_MODE_SINGLE_CORE} / \code{NPU_PACKAGE_TASK_MODE_FOUR_CORE} / \code{NPU_PACKAGE_TASK_MODE_ALL} & Kernel 支持的 task-mode bitmap。 \\
+  \code{NPU_PACKAGE_ARG_VALUE} / \code{NPU_PACKAGE_ARG_BUFFER} & Package 参数 kind。 \\
+  \code{NPU_PACKAGE_ARG_READ} / \code{NPU_PACKAGE_ARG_WRITE} & Buffer 参数访问 bitmap。 \\
+  \code{NPU_PACKAGE_SYNC_SHARED_RESOURCE} & Atomic Cache 中的跨 Hart resource 描述。 \\
+\end{dayantable}
+
+Wrapper 公开不透明 \code{npu_kernel_descriptor_t} 和版本化
+\code{npu_kernel_launch_attrs_t}。后者使用 \code{NPU_KERNEL_LAUNCH_ATTRS_VERSION}（3）；
+\code{NPU_KERNEL_LAUNCH_ASYNC} 让 launch 返回未完成 Event，否则 wrapper 等待并销毁
+内部 Event。Host 与 Device 共同使用 \code{dayan_kernel_resource_desc_t}、
+\code{DAYAN_KERNEL_RESOURCE_DESC_VERSION}、\code{DAYAN_HART_MAX_PROCS}、
+\code{DAYAN_KERNEL_MAX_CHILD_PROCS} 和 \code{DAYAN_URAM_ALLOCATION_GRANULE} 保持资源
+描述一致。
+
+每个 \code{__kernel__} 必须使用 \code{DAYAN_KERNEL_DESC} 宏（参数为 kernel、
+child\_procs、atomic\_bytes、uram\_bytes）声明静态资源。dycc 识别 \code{__host__}、
+\code{__device__}、\code{__kernel__} 源码标注并生成 Host wrapper；这些标注只影响编译
+切分，不增加 Runtime 二进制 ABI 字段。
+
+\begin{dayantable}{dycc Host wrapper API}{tab:api-runtime-wrapper}{X[43,l] X[57,l]}
+  API & 行为 \\
+  \code{npu_kernel_launch_attrs_init} & 初始化 dycc wrapper 的 Context、Stream、Task 名称、config 和 timeout。 \\
+  \code{npu_kernel_descriptor_create} & 从 Device object、entry、参数和资源描述构造可复用 descriptor。 \\
+  \code{npu_kernel_descriptor_destroy} & 释放 descriptor 及其 package image。 \\
+  \code{npu_kernel_descriptor_launch} & 把 wrapper 参数转换成 Runtime launch；支持同步或 ASYNC flag。 \\
+  \code{npu_kernel_pack_f32} / \code{npu_kernel_pack_f64} & 分别按位把 float 或 double 放入 64-bit value 参数槽。 \\
+\end{dayantable}
+
+\end{document}

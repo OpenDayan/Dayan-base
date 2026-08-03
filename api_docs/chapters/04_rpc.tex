@@ -1,0 +1,149 @@
+\documentclass[../dayan_api_reference.tex]{subfiles}
+
+\begin{document}
+
+\section{RPC API}\label{sec:api-rpc}
+
+RPC 是 BL1 与 Host Service 之间的 mailbox 线协议，也是 Device 系统代码调用 Host
+服务的接口。本章只记录 \code{device/include/rpc.h} 中公开的 opcode、线协议结构和
+函数；\code{rpc_internal.h} 中的 transaction、队列与 trap helper 不属于公开 API。
+
+每条 mailbox command 是 64 bit：高 16 bit 为 opcode，低 48 bit 为参数。Device
+发起的通用调用把低 48 bit 解释为 \code{rpc_packet} 地址；Host 发起的管理调用则按
+具体 opcode 解释为 Host-owned coherent descriptor 地址。全部 opcode 由
+\code{rpc_service} 枚举定义。
+
+\subsection{Command 编码}
+
+\begin{dayantable}{RPC command helper}{tab:api-rpc-command}{X[38,l] X[62,l]}
+  API & 行为 \\
+  \code{RPC_COMMAND_ARG_MASK} & 低 48-bit 参数掩码；可寻址 descriptor 必须完全落在此范围内。 \\
+  \code{rpc_command_pack} & 将 16-bit opcode 与 48-bit 参数编码成 mailbox command。 \\
+  \code{rpc_command_opcode} & 从 command 取出高 16-bit opcode。 \\
+  \code{rpc_command_arg} & 从 command 取出低 48-bit 参数。 \\
+\end{dayantable}
+
+\begin{dayantable}{Device 到 Host 服务 opcode}{tab:api-rpc-d2h-opcode}{X[40,l] X[60,l]}
+  Opcode & 请求 \\
+  \code{RPC_WRITE} & 向指定 Hart/Proc 的 Host 输出流追加字节。 \\
+  \code{RPC_CLEAR} & 清空指定 Hart/Proc 的 Host 输出缓冲。 \\
+  \code{RPC_HEAP_ACQUIRE} & 从 Host 管理的 Device heap 取得一段内存。 \\
+  \code{RPC_HEAP_RELEASE} & 将此前取得的 Device heap 区间交还 Host。 \\
+  \code{RPC_TRAP_REPORT} & 上报 trap record；具体 record 属于内部 trap ABI。 \\
+  \code{RPC_PROC_EXIT} & 上报 Host root Proc 的返回值和 cookie。 \\
+  \code{RPC_PROFILE_FLUSH} & 将当前 Hart 的 profile event batch 交给 Host。 \\
+\end{dayantable}
+
+\begin{dayantable}{Host 到 Device 管理 opcode}{tab:api-rpc-h2d-opcode}{X[42,l] X[58,l]}
+  请求 / 响应 & 请求 \\
+  \code{RPC_PROC_CREATE} / \code{RPC_PROC_CREATE_RESPONSE} & 在指定 Hart 创建一个 Host root Proc。 \\
+  \code{RPC_ICACHE_FLUSH} / \code{RPC_ICACHE_FLUSH_RESPONSE} & 使已加载代码的指令缓存更新可见。 \\
+  \code{RPC_PROC_PS} / \code{RPC_PROC_PS_RESPONSE} & 获取该 Hart 的完整 Proc snapshot。 \\
+  \code{RPC_PROC_KILL_ALL} / \code{RPC_PROC_KILL_ALL_RESPONSE} & 终止该 Hart 上全部非系统 Proc。 \\
+  \code{RPC_PROFILE_CONFIG} / \code{RPC_PROFILE_CONFIG_RESPONSE} & 启动或停止该 Hart 的 profile 采集。 \\
+\end{dayantable}
+
+\subsection{通用与基础服务线协议}
+
+\begin{dayantable}{RPC 基础 wire 类型}{tab:api-rpc-basic-wire}{X[38,l] X[62,l]}
+  类型 & ABI / 用途 \\
+  \code{rpc_packet} & 40 B；request/response 地址和大小，以及由 Host 写回的 64-bit status。 \\
+  \code{rpc_print_request} & 24 B；Hart ID、Proc ID、Device 数据地址和字节数。 \\
+  \code{rpc_heap_request} & 8 B；申请字节数。 \\
+  \code{rpc_heap_response} & 16 B；Host 返回的 Device 地址和实际大小。 \\
+  \code{rpc_heap_release} & 16 B；待释放的 Device 地址与大小。 \\
+\end{dayantable}
+
+Host 读取 request 前，Device 必须 clean 对应 cache line；Host 写完 response/status 后，
+Device 必须 invalidate 后再读。\code{rpc_call} 负责 Device 侧这套所有权转换。
+
+\subsection{Proc 管理线协议}
+
+\begin{dayantable}{Proc ABI 常量}{tab:api-rpc-proc-constant}{X[44,l] X[56,l]}
+  常量 & 含义 \\
+  \code{RPC_PROC_CREATE_VERSION} & 当前 create descriptor 版本 4。 \\
+  \code{RPC_PROC_MAX_ARGS} & 一个 Proc 最多 8 个 64-bit 参数。 \\
+  \code{RPC_PROC_SLOTS_PER_HART} & 每个 Hart 有 16 个用户 Proc slot。 \\
+  \code{RPC_PROC_MAX_CHILD_PROCS} & 一个 root 最多预留 15 个子 Proc slot。 \\
+  \code{RPC_PROC_NAME_SIZE} & Proc 名称固定占 16 B，必须含结尾 NUL。 \\
+  \code{RPC_PROC_MIN_STACK_SIZE} / \code{RPC_PROC_MAX_STACK_SIZE} & Proc stack 合法范围为 1024 B 到 64 KiB。 \\
+  \code{RPC_PROC_MAX_PRINTF_SIZE} & 单个 Proc printf buffer 上限 4 KiB。 \\
+  \code{RPC_PROC_URAM_GRANULE} & URAM 资源以 1 KiB 为分配粒度。 \\
+  \code{RPC_PROC_EXIT_VERSION} & 当前退出通知版本 1。 \\
+  \code{RPC_PROC_EXIT_ROOT} & 标记退出者为 Host 管理的 root Proc。 \\
+  \code{RPC_PROC_PS_VERSION} & 当前 snapshot 版本 3。 \\
+  \code{RPC_PROC_KILL_ALL_VERSION} & 当前 kill result 版本 1。 \\
+  \code{RPC_PROC_PS_SYSTEM_PROCS} & snapshot 为三个系统 Proc 预留 record。 \\
+  \code{RPC_PROC_PS_MAX_RECORDS} & 16 个用户 slot 加三个系统 Proc，共 19 条。 \\
+\end{dayantable}
+
+\begin{dayantable}{Proc 状态与 flags}{tab:api-rpc-proc-state}{X[40,l] X[60,l]}
+  API & 含义 \\
+  \code{rpc_proc_state} & Host-visible Proc 生命周期枚举类型。 \\
+  \code{RPC_PROC_SUBMITTED} / \code{RPC_PROC_RUNNING} & Host 已提交 descriptor，或 BL1 已开始运行。 \\
+  \code{RPC_PROC_EXITED} / \code{RPC_PROC_FAILED} & Proc 正常结束并写回结果，或创建/执行失败。 \\
+  \code{RPC_PROC_INFO_SYSTEM} & record 属于 BL1 系统 Proc。 \\
+  \code{RPC_PROC_INFO_HOST_ROOT} & record 属于 Host 创建的 root Proc。 \\
+  \code{RPC_PROC_INFO_CHILD} & record 属于 Device Proc 创建的直接或间接子 Proc。 \\
+  \code{RPC_PROC_INFO_ZOMBIE} & Proc 已结束但其结果尚未被 join 回收。 \\
+  \code{RPC_PROC_INFO_KILL_WAIT_PRODUCE} & kill 后仍须等待异步 produce 完成才能释放 slot。 \\
+\end{dayantable}
+
+\begin{dayantable}{Proc wire 类型}{tab:api-rpc-proc-wire}{X[42,l] X[58,l]}
+  类型 & ABI / 用途 \\
+  \code{rpc_proc_create_request} & 224 B Host-owned descriptor；含 entry、stack/shared/printf、8 个参数、task grid/mode、子 Proc/URAM 资源、cookie 与名称。Host 保持 request 字段不变，BL1 只更新 state/result 字段。 \\
+  \code{rpc_proc_exit_request} & 40 B；root Proc 的 Hart/Proc ID、返回值、cookie 与 flags。 \\
+  \code{rpc_proc_info} & 96 B；单个 Proc 的父子关系、状态、slot、task、结果、PC、cookie 和名称。 \\
+  \code{rpc_proc_ps_snapshot} & 1872 B；header 加最多 19 条 \code{rpc_proc_info}。 \\
+  \code{rpc_proc_kill_result} & 48 B；kill 状态以及 root/child、已释放 slot、wait-produce 数量。 \\
+\end{dayantable}
+
+\code{rpc_proc_create_request.state} 的所有权是 Host 提交 SUBMITTED，BL1 转成 RUNNING，
+最终写成 EXITED 或 FAILED。四 Core launch 的每个 Hart 都有独立 descriptor 和 RPC，
+Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API。
+
+\subsection{Profile 线协议}
+
+\begin{dayantable}{Profile wire 类型}{tab:api-rpc-profile-wire}{X[41,l] X[59,l]}
+  类型 & ABI / 用途 \\
+  \code{RPC_PROFILE_VERSION} & 当前 profile wire ABI 版本 3。 \\
+  \code{rpc_profile_proc_state} & RUNNING、READY、各类 WAIT 及 KILL\_WAIT\_PRODUCE 共八种采样状态。 \\
+  \code{rpc_profile_command} & \code{RPC_PROFILE_START} 或 \code{RPC_PROFILE_STOP}。 \\
+  \code{rpc_profile_event} & 24 B；32-bit cycle、event ID、状态和 16-B Proc 名称。 \\
+  \code{rpc_profile_config} & 64 B Host-owned descriptor；指定 Hart、buffer、容量、generation 和 start/stop。 \\
+  \code{rpc_profile_flush_request} & 40 B；Device 上报 event buffer、数量、容量和 generation。 \\
+  \code{rpc_profile_flush_response} & 32 B；Host 返回是否继续采样、状态和 generation。 \\
+\end{dayantable}
+
+\begin{dayantable}{Profile Proc 状态值}{tab:api-rpc-profile-state}{X[51,l] X[49,l]}
+  API & 含义 \\
+  \code{RPC_PROFILE_PROC_RUNNING} / \code{RPC_PROFILE_PROC_READY} & Proc 正在执行或位于 ready queue。 \\
+  \code{RPC_PROFILE_PROC_WAIT_POLL} / \code{RPC_PROFILE_PROC_WAIT_EVENT} & 等待轮询条件或事件。 \\
+  \code{RPC_PROFILE_PROC_WAIT_START} / \code{RPC_PROFILE_PROC_WAIT_EXIT} & 等待启动或等待子 Proc 退出。 \\
+  \code{RPC_PROFILE_PROC_WAIT_PRODUCE} & 等待异步单元 produce。 \\
+  \code{RPC_PROFILE_PROC_KILL_WAIT_PRODUCE} & kill 后等待 produce 才能释放 slot。 \\
+\end{dayantable}
+
+\subsection{Device RPC 函数}
+
+\begin{dayantable}{RPC 核心函数}{tab:api-rpc-function}{X[38,l] X[62,l]}
+  API & 行为 \\
+  \code{rpc_init} & 初始化当前 Hart 的 mailbox，并创建 \code{rpc-receive} 与 \code{rpc-send} 系统 Proc。 \\
+  \code{rpc_receive} & 分发一个 Host-to-Device opcode；返回 1 表示要发送 response command，0 表示无响应，负值表示请求已消费但失败。 \\
+  \code{rpc_call} & 发起同步 Device-to-Host 通用服务调用，并管理 request/response cache 可见性。 \\
+  \code{rpc_proc_wait_cancel} & kill Proc 时取消尚在发送队列中的 RPC；返回 1 表示 send Proc 已取得 transaction，必须等待其完成。 \\
+\end{dayantable}
+
+\begin{dayantable}{RPC 服务 wrapper}{tab:api-rpc-wrapper}{X[37,l] X[63,l]}
+  API & 行为 \\
+  \code{rpc_write_proc} & 为显式 Proc ID 发送输出字节；空数据直接成功。 \\
+  \code{rpc_write} & 以当前 Proc 的 Host-visible ID 发送输出字节。 \\
+  \code{rpc_clear_proc} & 要求 Host 清空显式 Proc ID 的输出缓冲。 \\
+  \code{rpc_clear} & 要求 Host 清空当前 Proc 的输出缓冲。 \\
+  \code{rpc_heap_acquire} & 申请 Host 管理的 Device heap 区间。 \\
+  \code{rpc_heap_release} & 释放指定 Device heap 区间。 \\
+  \code{rpc_proc_exit} & 上报 Host root Proc 的返回值；当前公开实现要求 root flag 且 parent ID 为零。 \\
+  \code{rpc_profile_flush} & 同步提交一批 profile events，并取得 Host 的继续/停止决定。 \\
+\end{dayantable}
+
+\end{document}

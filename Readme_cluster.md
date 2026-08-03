@@ -42,10 +42,10 @@ control/data socket，已接受的连接由独立线程处理。不同 Session �
 
 ## 2. 路径与前置条件
 
-以下命令假设 firmware 仓库位于：
+以下命令均从 firmware 仓库根目录执行：
 
 ```sh
-export NPU_FW_ROOT=/home/wangzhe/npu-firmware
+cd /home/wangzhe/npu-firmware
 ```
 
 当前环境中有两种常见的 TestCluster 布局。
@@ -86,8 +86,8 @@ export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 先构建 BL1、公开 API ELF、Host driver、dycc 和 demo：
 
 ```sh
-make -C "$NPU_FW_ROOT" -j72 all
-make -C "$NPU_FW_ROOT/demo" -j72 all
+make -C . -j72 all
+make -C ./demo -j72 all
 ```
 
 机器核心数较少时应降低 `-j72`。关键产物为：
@@ -106,30 +106,26 @@ build/demo/matmul_bf16_4c
 可以先做不依赖 RTL 的 Host 测试和 demo 静态检查：
 
 ```sh
-make -C "$NPU_FW_ROOT/host/driver" -j72 check
-make -C "$NPU_FW_ROOT/host/dyperf" -j72 check
-make -C "$NPU_FW_ROOT/demo" -j72 check
+make -C ./host/driver -j72 check
+make -C ./host/dyperf -j72 check
+make -C ./demo -j72 check
 ```
 
 demo 构建末尾的 `device-isa-check: PASS` 很重要。当前硬件不支持 LR/SC，检查脚本会
 拒绝 Device object 中的 `lr.w/lr.d/sc.w/sc.d`。如果怀疑使用了旧 object，可强制重建：
 
 ```sh
-make -B -C "$NPU_FW_ROOT/demo" -j72 all
+make -B -C ./demo -j72 all
 ```
 
 ## 4. 推荐：使用生命周期 runner
 
-当前开发环境中的 runner 位于：
-
-```sh
-export DAYAN_TC_RUNNER=/home/wangzhe/.codex/skills/run-npu-cluster-sim-operator/scripts/run_testcluster_operator.py
-```
+runner 位于 `./scripts/run_testcluster_operator.py`。
 
 先查看完整选项：
 
 ```sh
-python3 "$DAYAN_TC_RUNNER" --help
+python3 ./scripts/run_testcluster_operator.py --help
 ```
 
 runner 会依次完成：
@@ -152,9 +148,8 @@ TestCluster 启动和四个 Core 的 BL1 加载可能超过 30 秒，因此下�
 即可完成四个 logical task：
 
 ```sh
-cd "$NPU_FW_ROOT"
-python3 "$DAYAN_TC_RUNNER" \
-  --repo "$NPU_FW_ROOT" \
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . \
   --sim-dir "$NPU_TC_ROOT" \
   --sim-bin "$NPU_TC_BIN" \
   --dram-config "$NPU_TC_DRAM" \
@@ -170,9 +165,8 @@ python3 "$DAYAN_TC_RUNNER" \
 ### 4.2 单核 BF16 matmul
 
 ```sh
-cd "$NPU_FW_ROOT"
-python3 "$DAYAN_TC_RUNNER" \
-  --repo "$NPU_FW_ROOT" \
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . \
   --sim-dir "$NPU_TC_ROOT" \
   --sim-bin "$NPU_TC_BIN" \
   --dram-config "$NPU_TC_DRAM" \
@@ -185,8 +179,8 @@ python3 "$DAYAN_TC_RUNNER" \
 默认 shape 为 `M=384, N=64, K=256`。也可在 `--` 后传入显式的 `M N K`，例如：
 
 ```sh
-python3 "$DAYAN_TC_RUNNER" \
-  --repo "$NPU_FW_ROOT" \
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . \
   --sim-dir "$NPU_TC_ROOT" \
   --sim-bin "$NPU_TC_BIN" \
   --dram-config "$NPU_TC_DRAM" \
@@ -205,9 +199,8 @@ Cluster 的 Core 0--3。忘记 `--core-mask 0xf` 时，Runtime 通常会因找�
 建议先运行一个无边缘 tile 的 RTL smoke case：
 
 ```sh
-cd "$NPU_FW_ROOT"
-python3 "$DAYAN_TC_RUNNER" \
-  --repo "$NPU_FW_ROOT" \
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . \
   --sim-dir "$NPU_TC_ROOT" \
   --sim-bin "$NPU_TC_BIN" \
   --dram-config "$NPU_TC_DRAM" \
@@ -221,8 +214,8 @@ python3 "$DAYAN_TC_RUNNER" \
 slice 为 `160/192/160`，Cluster output tile 为 `1024x512`。完整默认 case 可省略参数：
 
 ```sh
-python3 "$DAYAN_TC_RUNNER" \
-  --repo "$NPU_FW_ROOT" \
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . \
   --sim-dir "$NPU_TC_ROOT" \
   --sim-bin "$NPU_TC_BIN" \
   --dram-config "$NPU_TC_DRAM" \
@@ -238,7 +231,7 @@ python3 "$DAYAN_TC_RUNNER" \
 构建。日常调试优先使用前面的单 Cluster tile case，完整数值验证可先运行：
 
 ```sh
-make -C "$NPU_FW_ROOT/demo" run-matmul-4c
+make -C ./demo run-matmul-4c
 ```
 
 ### 4.4 同时运行 dyperf 与算子
@@ -247,9 +240,8 @@ make -C "$NPU_FW_ROOT/demo" run-matmul-4c
 runner 设置的 `DAYAN_SERVER_SOCKET` 会被 `dyperf` 读取并继续传给子进程：
 
 ```sh
-cd "$NPU_FW_ROOT"
-python3 "$DAYAN_TC_RUNNER" \
-  --repo "$NPU_FW_ROOT" \
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . \
   --sim-dir "$NPU_TC_ROOT" \
   --sim-bin "$NPU_TC_BIN" \
   --dram-config "$NPU_TC_DRAM" \
@@ -257,7 +249,7 @@ python3 "$DAYAN_TC_RUNNER" \
   --core-mask 0xf \
   --expect '[host] PASS:' \
   -- ./build/host/dyperf/dyperf \
-     --output "$NPU_FW_ROOT/build/matmul-4c-trace.json" \
+     --output ./build/matmul-4c-trace.json \
      -- ./build/demo/matmul_bf16_4c 1024 512 256
 ```
 
@@ -286,7 +278,7 @@ build/testcluster-runs/<timestamp>-<pid>/
 查看最近一次运行：
 
 ```sh
-latest_run=$(find "$NPU_FW_ROOT/build/testcluster-runs" \
+latest_run=$(find ./build/testcluster-runs \
   -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | \
   sort -n | tail -1 | cut -d' ' -f2-)
 sed -n '1,240p' "$latest_run/operator.log"
@@ -304,7 +296,6 @@ strings "$latest_run/testcluster-tail.raw" | tail -200
 三个终端中使用一致的路径：
 
 ```sh
-export NPU_FW_ROOT=/home/wangzhe/npu-firmware
 export NPU_TC_ROOT=/home/wangzhe/npu-cluster-sim
 export NPU_TC_BIN="$NPU_TC_ROOT/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
@@ -354,12 +345,11 @@ ls -l "$NPU_DEVICE_PREFIX"/xdma0_h2c_0 \
 四核通用配置：
 
 ```sh
-cd "$NPU_FW_ROOT"
-server_log="$NPU_FW_ROOT/build/testcluster-dayan_server.log"
+server_log=./build/testcluster-dayan_server.log
 ./build/host/driver/dayan_server \
   --socket "$DAYAN_SERVER_SOCKET" \
-  --firmware "$NPU_FW_ROOT/build/device/npu-os.elf" \
-  --api-elf "$NPU_FW_ROOT/build/device/npu-os-api.elf" \
+  --firmware ./build/device/npu-os.elf \
+  --api-elf ./build/device/npu-os-api.elf \
   --device-prefix "$NPU_DEVICE_PREFIX" \
   --cluster-count 1 \
   --core-mask 0xf \
@@ -439,7 +429,6 @@ ls -l "$DAYAN_SERVER_SOCKET"
 Device printf：
 
 ```sh
-cd "$NPU_FW_ROOT"
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
   ./build/demo/print_demo 1 2 3 4 5 6 7
 ```
@@ -447,7 +436,6 @@ DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
 单核 matmul：
 
 ```sh
-cd "$NPU_FW_ROOT"
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
   ./build/demo/matmul_bf16_1c
 ```
@@ -455,7 +443,6 @@ DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
 四核 smoke matmul：
 
 ```sh
-cd "$NPU_FW_ROOT"
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
   ./build/demo/matmul_bf16_4c 1024 512 256
 ```
@@ -463,7 +450,6 @@ DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
 四核完整默认 case：
 
 ```sh
-cd "$NPU_FW_ROOT"
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
   ./build/demo/matmul_bf16_4c
 ```
@@ -471,10 +457,9 @@ DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
 在已有 Server 上同时采样四核 smoke case：
 
 ```sh
-cd "$NPU_FW_ROOT"
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
   ./build/host/dyperf/dyperf \
-    --output "$NPU_FW_ROOT/build/matmul-4c-trace.json" \
+    --output ./build/matmul-4c-trace.json \
     -- ./build/demo/matmul_bf16_4c 1024 512 256
 ```
 
@@ -641,13 +626,13 @@ firmware 装载阶段时，可通过 `wchan` 进一步判断是否阻塞在正�
 4c matmul 可在构建时开启 trace：
 
 ```sh
-make -B -C "$NPU_FW_ROOT/demo" -j72 MATMUL_4C_TRACE=1 all
+make -B -C ./demo -j72 MATMUL_4C_TRACE=1 all
 ```
 
 trace 会显著增加 Device printf/RPC 流量并拖慢 RTL，只用于定位问题。完成后恢复：
 
 ```sh
-make -B -C "$NPU_FW_ROOT/demo" -j72 MATMUL_4C_TRACE=0 all
+make -B -C ./demo -j72 MATMUL_4C_TRACE=0 all
 ```
 
 ### 8.10 dyperf 与算子并发问题
