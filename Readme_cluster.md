@@ -45,28 +45,28 @@ control/data socket，已接受的连接由独立线程处理。不同 Session �
 以下命令均从 firmware 仓库根目录执行：
 
 ```sh
-cd /home/wangzhe/npu-firmware
+cd ~/npu-firmware
 ```
 
 当前环境中有两种常见的 TestCluster 布局。
 
-独立发布目录：
+默认使用 `/workspace/npu-cluster-sim` 中已经构建好的二进制模拟器：
 
 ```sh
-export NPU_TC_ROOT=/home/wangzhe/npu-cluster-sim
+export NPU_TC_ROOT=/workspace/npu-cluster-sim
 export NPU_TC_BIN="$NPU_TC_ROOT/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 ```
 
-从 `npu-cluster` 源码仓库构建的默认目录：
+也可以使用当前用户在 `~/npu-cluster` 源码仓库中自行构建的模拟器：
 
 ```sh
-export NPU_TC_ROOT=/home/wangzhe/npu-cluster/sim
+export NPU_TC_ROOT=~/npu-cluster/sim
 export NPU_TC_BIN="$NPU_TC_ROOT/build/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 ```
 
-本地构建布局中，`NPU_TC_ROOT` 必须是 `.../npu-cluster/sim`，不能设成
+本地源码构建布局中，`NPU_TC_ROOT` 必须是 `~/npu-cluster/sim`，不能设成
 `.../sim/build`。TestCluster binary 在 `build/` 下，但 DRAM 配置和运行时资源相对于
 `sim/` 目录查找。
 
@@ -75,7 +75,7 @@ export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 - 可执行的 TestCluster 和匹配其 RTL 配置的 DRAM 配置文件；
 - Linux FUSE 支持、可访问的 `/dev/fuse` 和 `fusermount3`；
 - Device 构建所需的 LLVM/RISC-V 工具链；
-- `/home/wangzhe/npu-kernels`，或构建时通过 `NPU_KERNELS_DIR` 指定其它位置；
+- `~/npu-kernels`，或构建时通过 `NPU_KERNELS_DIR` 指定其它位置；
 - 没有其它进程占用本次使用的 FUSE mount point 和 Dayan socket。
 
 不要执行 `TestCluster --help`。该 binary 会把参数交给 Verilator，仍然启动模拟器。
@@ -250,7 +250,7 @@ python3 ./scripts/run_testcluster_operator.py \
   --expect '[host] PASS:' \
   -- ./build/host/dyperf/dyperf \
      --output ./build/matmul-4c-trace.json \
-     -- ./build/demo/matmul_bf16_4c 1024 512 256
+     -- ./build/demo/matmul_bf16_4c 2048 2048 2048
 ```
 
 未显式指定 `--duration-ms` 时，采样持续到算子退出，`dyperf` 返回算子的退出码。显式
@@ -296,17 +296,17 @@ strings "$latest_run/testcluster-tail.raw" | tail -200
 三个终端中使用一致的路径：
 
 ```sh
-export NPU_TC_ROOT=/home/wangzhe/npu-cluster-sim
+export NPU_TC_ROOT=/workspace/npu-cluster-sim
 export NPU_TC_BIN="$NPU_TC_ROOT/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 export NPU_DEVICE_PREFIX=/tmp/virtual_npu
 export DAYAN_SERVER_SOCKET=/tmp/dayan-testcluster.sock
 ```
 
-若使用源码仓库中的默认 build，只需替换三项 TestCluster 变量：
+若使用 `~/npu-cluster` 源码仓库中的本地 build，只需替换三项 TestCluster 变量：
 
 ```sh
-export NPU_TC_ROOT=/home/wangzhe/npu-cluster/sim
+export NPU_TC_ROOT=~/npu-cluster/sim
 export NPU_TC_BIN="$NPU_TC_ROOT/build/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 ```
@@ -549,20 +549,26 @@ trap/assertion、Server/Host 非零退出、timeout 或数值 mismatch 时，才
 
 ### 8.1 runner 报 missing TestCluster
 
-检查 `--sim-bin`。源码仓库默认 binary 是：
+检查 `--sim-bin`。默认使用的预构建 binary 是：
 
 ```text
-/home/wangzhe/npu-cluster/sim/build/TestCluster
+/workspace/npu-cluster-sim/TestCluster
 ```
+
+若使用本地源码构建，则 binary 是 `~/npu-cluster/sim/build/TestCluster`。
 
 ### 8.2 runner 报 missing DRAM configuration
 
-通常是把 `--sim-dir` 错设成了 `.../sim/build`。应使用：
+通常是 `--sim-dir` 与所选 binary 的目录布局不匹配。默认预构建布局应使用：
 
 ```text
---sim-dir /home/wangzhe/npu-cluster/sim
---sim-bin /home/wangzhe/npu-cluster/sim/build/TestCluster
+--sim-dir /workspace/npu-cluster-sim
+--sim-bin /workspace/npu-cluster-sim/TestCluster
 ```
+
+使用本地源码构建时，应使用 `--sim-dir ~/npu-cluster/sim` 和
+`--sim-bin ~/npu-cluster/sim/build/TestCluster`，不要把 `--sim-dir` 设成
+`~/npu-cluster/sim/build`。
 
 ### 8.3 FUSE endpoint 没有出现
 
