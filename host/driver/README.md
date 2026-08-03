@@ -216,8 +216,10 @@ npu_profile_destroy(profile);
 
 `batch.cluster/hart` 只描述观测数据来源，不参与 Runtime 的 kernel 调度接口。
 `host/dyperf` 封装上述流程并生成 Chrome Trace Viewer JSON；每个 Hart 是独立 pid，
-每个 proc ID 是独立 tid，`thread_name` 使用事件携带的 Proc 名称，各目标状态被展开为
-连续的状态区间。Device cycle 按 1 ns 解释，Trace `ts` 写为带纳秒精度的小数微秒。
+Hart 按 Cluster/Hart 编号升序排列。每个 proc ID 是独立 tid，同一 Hart 内按 Proc 名称
+排序；tid 0 的 `scheduler` 轨道由相邻 Proc 的 `RUNNING` 边界合成。`thread_name` 使用
+事件携带的 Proc 名称，各目标状态被展开为连续的状态区间。Device cycle 按 1 ns 解释，
+Trace `ts` 写为带纳秒精度的小数微秒。
 推荐使用
 `dyperf [OPTIONS] -- COMMAND [ARG...]`：工具先启动 profile，再以另一个 Runtime Session
 运行算子，并自动向子进程传递 `DAYAN_SERVER_SOCKET`。
@@ -289,6 +291,10 @@ HAL、识别 topology、加载 API ELF、为各 Cluster 配置 Atomic Cache back
 Core、等待 BL1 ready，以及 Unix socket 就绪状态。若启动被阻塞，终端中的最后一条
 `[startup]` 或 `[firmware Cn]` 日志就是当前等待阶段；看到 `[ready]` 后 Runtime 才能连接。
 Server 还会记录 Runtime control/data 连接的建立与断开，以及停止过程。
+收到 SIGINT/SIGTERM 后，Server 会停止接收请求，并行向各已启用 Hart 发送短超时的
+`RPC_PROC_KILL_ALL`，随后取消仍在等待的 Host RPC 并回收 scheduler 资源。HAL 会保存
+首个不可恢复的设备 I/O 错误；XDMA/FUSE endpoint 返回 `EIO`、`ENODEV`、`EBADF` 等
+错误时，Server 无需额外信号便会自动退出，并跳过已经不可能完成的 Device 侧清理。
 
 需要由脚本同时启动 cmodel 与 `dayan_server` 时运行：
 

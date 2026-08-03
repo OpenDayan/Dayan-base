@@ -99,6 +99,7 @@ struct npu_service_device {
     uint32_t profile_readers;
     uint32_t worker_started;
     uint32_t worker_stop;
+    int abort_status;
     uint32_t active_launches;
     struct npu_api_symbol *api_symbols;
     size_t api_symbol_count;
@@ -140,5 +141,6 @@ int npu_service_profile_copy(npu_service_device_t *device,
                              npu_hal_core_t target, uint64_t generation,
                              uint64_t address, uint32_t capacity,
                              uint32_t count, int *continue_out);
+void npu_service_profile_discard(npu_service_device_t *device);
 
 #endif

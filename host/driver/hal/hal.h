@@ -118,6 +118,8 @@ void npu_hal_options_init(npu_hal_options_t *options);
 void npu_hal_memory_request_init(npu_hal_memory_request_t *request);
 int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options);
 void npu_hal_close(npu_hal_t *hal);
+/* Returns the first fatal backend I/O error, or zero while usable. */
+int npu_hal_device_status(const npu_hal_t *hal);
 int npu_hal_get_info(npu_hal_t *hal, npu_hal_info_t *info);
 int npu_hal_get_memory_region(npu_hal_t *hal, uint32_t index,
                               npu_hal_memory_region_t *region);

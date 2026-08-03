@@ -17,6 +17,42 @@
 #define NPU_IRQ_MAILBOX_OFFSET   0x20U
 #define NPU_IRQ_POLL_INTERVAL_NS 1000000L
 
+static int backend_error_is_fatal(int status)
+{
+    switch (-status) {
+    case EIO:
+    case ENODEV:
+    case ENXIO:
+    case EBADF:
+    case EPIPE:
+    case ECONNRESET:
+    case ESHUTDOWN:
+    case ESTALE:
+    case ENOENT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int record_backend_status(npu_hal_t *hal, int status)
+{
+    int expected = 0;
+
+    if (status < 0 && backend_error_is_fatal(status))
+        (void)__atomic_compare_exchange_n(&hal->device_status, &expected,
+                                          status, 0, __ATOMIC_SEQ_CST,
+                                          __ATOMIC_SEQ_CST);
+    return status;
+}
+
+int npu_hal_device_status(const npu_hal_t *hal)
+{
+    if (!hal)
+        return -EINVAL;
+    return __atomic_load_n(&hal->device_status, __ATOMIC_SEQ_CST);
+}
+
 static int monotonic_ms(uint64_t *value)
 {
     struct timespec now;
@@ -212,22 +248,34 @@ int npu_hal_memory_capacity(npu_hal_t *hal,
 int npu_hal_copy_to_address(npu_hal_t *hal, uint32_t cluster,
                             uint64_t address, const void *source, size_t size)
 {
+    int status;
+
     if (!hal || cluster >= hal->cluster_count || (!source && size) ||
         !hal->ops->copy_to_address)
         return -EINVAL;
-    return size ? hal->ops->copy_to_address(hal->state, cluster, address,
-                                             source, size) : 0;
+    status = npu_hal_device_status(hal);
+    if (status < 0 || !size)
+        return status;
+    return record_backend_status(
+        hal, hal->ops->copy_to_address(hal->state, cluster, address,
+                                       source, size));
 }
 
 int npu_hal_copy_from_address(npu_hal_t *hal, uint32_t cluster,
                               void *destination, uint64_t address,
                               size_t size)
 {
+    int status;
+
     if (!hal || cluster >= hal->cluster_count || (!destination && size) ||
         !hal->ops->copy_from_address)
         return -EINVAL;
-    return size ? hal->ops->copy_from_address(hal->state, cluster,
-                                               destination, address, size) : 0;
+    status = npu_hal_device_status(hal);
+    if (status < 0 || !size)
+        return status;
+    return record_backend_status(
+        hal, hal->ops->copy_from_address(hal->state, cluster, destination,
+                                         address, size));
 }
 
 int npu_hal_copy_address(npu_hal_t *hal, uint32_t cluster,
@@ -266,19 +314,33 @@ int npu_hal_copy_address(npu_hal_t *hal, uint32_t cluster,
 int npu_hal_register_read(npu_hal_t *hal, uint32_t cluster, uint64_t offset,
                           void *value, size_t size)
 {
+    int status;
+
     if (!hal || cluster >= hal->cluster_count || !value || !size ||
         !hal->ops->register_read)
         return -EINVAL;
-    return hal->ops->register_read(hal->state, cluster, offset, value, size);
+    status = npu_hal_device_status(hal);
+    if (status < 0)
+        return status;
+    return record_backend_status(
+        hal, hal->ops->register_read(hal->state, cluster, offset, value,
+                                     size));
 }
 
 int npu_hal_register_write(npu_hal_t *hal, uint32_t cluster, uint64_t offset,
                            const void *value, size_t size)
 {
+    int status;
+
     if (!hal || cluster >= hal->cluster_count || !value || !size ||
         !hal->ops->register_write)
         return -EINVAL;
-    return hal->ops->register_write(hal->state, cluster, offset, value, size);
+    status = npu_hal_device_status(hal);
+    if (status < 0)
+        return status;
+    return record_backend_status(
+        hal, hal->ops->register_write(hal->state, cluster, offset, value,
+                                      size));
 }
 
 int npu_hal_irq_status(npu_hal_t *hal, uint32_t cluster, uint32_t *status)
@@ -344,6 +406,9 @@ int npu_hal_irq_wait(npu_hal_t *hal, uint32_t timeout_ms,
     result = pthread_mutex_lock(&hal->irq_mutex);
     if (result != 0)
         return -result;
+    result = npu_hal_device_status(hal);
+    if (result < 0)
+        goto finish;
     if (hal->ops->irq_wait) {
         if (timeout_ms != NPU_HAL_TIMEOUT_INFINITE) {
             result = monotonic_ms(&wait_started);
@@ -379,7 +444,7 @@ finish:
         *status = 0;
     }
     pthread_mutex_unlock(&hal->irq_mutex);
-    return result;
+    return record_backend_status(hal, result);
 }
 
 int npu_hal_irq_ack(npu_hal_t *hal, uint32_t cluster, uint32_t mask)
@@ -481,7 +546,10 @@ int npu_hal_export_data_plane(npu_hal_t *hal,
         handles[index] = -1;
     status = npu_hal_get_info(hal, &info);
     if (status == 0)
-        status = hal->ops->export_data_plane(hal->state, exported, handles);
+        status = npu_hal_device_status(hal);
+    if (status == 0)
+        status = record_backend_status(
+            hal, hal->ops->export_data_plane(hal->state, exported, handles));
     if (status == 0 &&
         (exported->version != NPU_HAL_DATA_EXPORT_VERSION ||
          exported->provider != info.data_provider || exported->flags ||

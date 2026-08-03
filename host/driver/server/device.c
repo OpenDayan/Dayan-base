@@ -14,6 +14,7 @@
 #define NPU_DEFAULT_TIMEOUT_MS  60000U
 #define NPU_DEFAULT_STACK_SIZE  UINT64_C(0x10000)
 #define NPU_DEFAULT_PRINTF_SIZE UINT64_C(0x1000)
+#define NPU_RPC_CANCEL_POLL_MS  100U
 
 _Static_assert((int)NPU_SERVICE_LAUNCH_SUBMITTED == (int)RPC_PROC_SUBMITTED,
                "Host and Device launch state ABI");
@@ -269,13 +270,63 @@ static void free_atomic_cache_backing(npu_service_device_t *device)
     }
 }
 
-int npu_service_close(npu_service_device_t *device)
+int npu_service_status(npu_service_device_t *device)
 {
-    int profile_status = 0;
     int status;
 
     if (!device)
         return -EINVAL;
+    pthread_mutex_lock(&device->mutex);
+    status = device->abort_status;
+    pthread_mutex_unlock(&device->mutex);
+    return status;
+}
+
+void npu_service_abort(npu_service_device_t *device, int status)
+{
+    size_t core_count;
+    size_t index;
+
+    if (!device)
+        return;
+    if (status >= 0)
+        status = -ESHUTDOWN;
+    core_count = (size_t)device->hal_info.cluster_count *
+                 device->hal_info.cores_per_cluster;
+    pthread_mutex_lock(&device->mutex);
+    if (!device->abort_status)
+        device->abort_status = status;
+    status = device->abort_status;
+    device->worker_stop = 1;
+    for (index = 0; index < core_count; ++index) {
+        struct npu_pending_call *call = &device->calls[index];
+
+        if (!call->pending)
+            continue;
+        call->pending = 0;
+        call->status = status;
+    }
+    pthread_cond_broadcast(&device->condition);
+    pthread_mutex_unlock(&device->mutex);
+}
+
+int npu_service_close(npu_service_device_t *device)
+{
+    int profile_status = 0;
+    int aborted;
+    int status;
+
+    if (!device)
+        return -EINVAL;
+    aborted = npu_service_status(device) < 0;
+    if (aborted) {
+        npu_service_abort(device, -ESHUTDOWN);
+        if (device->worker_started) {
+            (void)pthread_join(device->worker, 0);
+            device->worker_started = 0;
+        }
+        npu_service_profile_discard(device);
+    }
     pthread_mutex_lock(&device->mutex);
     status = !!device->profile_allocation;
     pthread_mutex_unlock(&device->mutex);
@@ -516,6 +567,35 @@ static int uram_address(npu_service_device_t *device,
     return 0;
 }
 
+static int wait_command_consumed(npu_service_device_t *device,
+                                 npu_hal_core_t core, uint32_t timeout_ms)
+{
+    uint64_t deadline = timeout_ms == NPU_SERVICE_TIMEOUT_INFINITE ?
+        UINT64_MAX : npu_now_ms() + timeout_ms;
+
+    for (;;) {
+        uint64_t now;
+        uint32_t slice = NPU_RPC_CANCEL_POLL_MS;
+        int status = npu_service_status(device);
+
+        if (status < 0)
+            return status;
+        now = npu_now_ms();
+        if (deadline != UINT64_MAX) {
+            uint64_t remaining;
+
+            if (now >= deadline)
+                return -ETIMEDOUT;
+            remaining = deadline - now;
+            if (remaining < slice)
+                slice = (uint32_t)remaining;
+        }
+        status = npu_hal_wait_command_consumed(device->hal, core, slice);
+        if (status != -ETIMEDOUT)
+            return status;
+    }
+}
+
 int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
                          uint64_t *response_out, uint32_t timeout_ms)
@@ -539,6 +619,11 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
     expected = (uint16_t)(opcode | UINT16_C(0x8000));
     call = &device->calls[npu_service_core_index(device, core)];
     pthread_mutex_lock(&device->mutex);
+    if (device->abort_status) {
+        status = device->abort_status;
+        pthread_mutex_unlock(&device->mutex);
+        return status;
+    }
     if (call->pending) {
         pthread_mutex_unlock(&device->mutex);
         return -EBUSY;
@@ -549,7 +634,9 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
     call->status = -EINPROGRESS;
     pthread_mutex_unlock(&device->mutex);
 
-    status = npu_hal_wait_command_consumed(device->hal, core, timeout_ms);
+    status = wait_command_consumed(device, core, timeout_ms);
+    if (status == 0)
+        status = npu_service_status(device);
     if (status == 0)
         status = npu_hal_command_submit(device->hal, core,
                                         rpc_command_pack(opcode, argument));
@@ -718,6 +805,9 @@ int npu_service_launch_query(npu_service_launch_t *launch,
 
     if (!launch || !info || launch->released)
         return -EINVAL;
+    status = npu_service_status(launch->device);
+    if (status < 0)
+        return status;
     status = npu_hal_memory_read(launch->device->hal,
                                  launch->request_allocation, launch->target,
                                  &request, 0, sizeof(request));
@@ -790,6 +880,24 @@ int npu_service_launch_release(npu_service_launch_t *launch)
     pthread_mutex_unlock(&device->mutex);
     free(launch);
     return 0;
+}
+
+int npu_service_launch_abandon(npu_service_launch_t *launch)
+{
+    npu_service_device_t *device;
+    int status;
+
+    if (!launch || launch->released)
+        return -EINVAL;
+    device = launch->device;
+    status = npu_hal_memory_free(device->hal, launch->request_allocation);
+    launch->released = 1;
+    pthread_mutex_lock(&device->mutex);
+    if (device->active_launches)
+        --device->active_launches;
+    pthread_mutex_unlock(&device->mutex);
+    free(launch);
+    return status;
 }
 
 int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
@@ -883,9 +991,10 @@ out:
     return status;
 }
 
-int npu_service_rpc_kill_all(npu_service_device_t *device,
-                             npu_hal_core_t target,
-                             npu_service_kill_result_t *result_out)
+int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
+                                     npu_hal_core_t target,
+                                     uint32_t timeout_ms,
+                                     npu_service_kill_result_t *result_out)
 {
     struct rpc_proc_kill_result result;
     npu_hal_allocation_t *allocation = 0;
@@ -894,7 +1003,7 @@ int npu_service_rpc_kill_all(npu_service_device_t *device,
     uint32_t booted;
     int status;
 
-    if (!device || !result_out ||
+    if (!device || !result_out || !timeout_ms ||
         !npu_hal_core_valid(device->hal, target))
         return -EINVAL;
     pthread_mutex_lock(&device->mutex);
@@ -923,8 +1032,7 @@ int npu_service_rpc_kill_all(npu_service_device_t *device,
     if (status < 0)
         goto out;
     status = npu_service_rpc_call(device, target, RPC_PROC_KILL_ALL,
-                                  address, &response,
-                                  device->options.default_timeout_ms);
+                                  address, &response, timeout_ms);
     if (status < 0)
         goto out;
     if (rpc_command_opcode(response) != RPC_PROC_KILL_ALL_RESPONSE ||
@@ -963,4 +1071,14 @@ out:
             status = free_status;
     }
     return status;
+}
+
+int npu_service_rpc_kill_all(npu_service_device_t *device,
+                             npu_hal_core_t target,
+                             npu_service_kill_result_t *result_out)
+{
+    if (!device)
+        return -EINVAL;
+    return npu_service_rpc_kill_all_timeout(
+        device, target, device->options.default_timeout_ms, result_out);
 }

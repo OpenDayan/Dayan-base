@@ -1105,6 +1105,14 @@ static int poll_invocation(dayan_server_t *server,
         status = npu_service_launch_release(invocation->launch);
         if (status < 0)
             completion = status;
+    } else if (status < 0 && npu_service_status(server->device) < 0) {
+        int release_status;
+
+        terminal = 1;
+        completion = status;
+        release_status = npu_service_launch_abandon(invocation->launch);
+        if (release_status < 0)
+            completion = release_status;
     }
     pthread_mutex_lock(&server->mutex);
     command->dispatching = 0;

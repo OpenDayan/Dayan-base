@@ -13,8 +13,11 @@
 
 #include "npu_package.h"
 #include "npu_runtime.h"
+#include "platform_regs.h"
+#include "rpc.h"
 #include "runtime_internal.h"
 #include "server_internal.h"
+#include "service_internal.h"
 
 struct run_state {
     dayan_server_t *server;
@@ -34,6 +37,13 @@ struct output_capture {
 struct profile_read_state {
     npu_runtime_t *runtime;
     uint64_t profile_id;
+    int status;
+};
+
+struct rpc_call_state {
+    npu_service_device_t *device;
+    npu_hal_core_t target;
+    uint64_t response;
     int status;
 };
 
@@ -97,6 +107,16 @@ static void *run_blocking_profile_read(void *argument)
         state->runtime, NPU_IPC_PROFILE_READ, state->profile_id, &request,
         sizeof(request), &response, &response_size);
     free(response);
+    return 0;
+}
+
+static void *run_blocking_rpc(void *argument)
+{
+    struct rpc_call_state *state = argument;
+
+    state->status = npu_service_rpc_call(
+        state->device, state->target, RPC_ICACHE_FLUSH, 0,
+        &state->response, 60000);
     return 0;
 }
 
@@ -505,6 +525,58 @@ int main(void)
     dayan_server_request_stop(server);
     assert(pthread_join(thread, 0) == 0);
     assert(run.status == 0);
+    dayan_server_destroy(server);
+
+    /* Service abort must interrupt an RPC waiting for Device consumption. */
+    server = 0;
+    assert(dayan_server_create(&server, &server_options) == 0);
+    {
+        struct rpc_call_state rpc_call;
+        pthread_t rpc_thread;
+        uint32_t msip = 1;
+        unsigned attempt;
+
+        fd = open_file(directory, "xdma0_c2h_0", O_RDWR);
+        assert(fd >= 0);
+        assert(pwrite(fd, &msip, sizeof(msip), DAYAN_CLINT_MSIP(0)) ==
+               (ssize_t)sizeof(msip));
+        memset(&rpc_call, 0, sizeof(rpc_call));
+        rpc_call.device = server->device;
+        assert(pthread_create(&rpc_thread, 0, run_blocking_rpc,
+                              &rpc_call) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            int pending;
+
+            pthread_mutex_lock(&server->device->mutex);
+            pending = server->device->calls[0].pending;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (pending)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        npu_service_abort(server->device, -ESHUTDOWN);
+        assert(pthread_join(rpc_thread, 0) == 0);
+        assert(rpc_call.status == -ESHUTDOWN);
+        msip = 0;
+        assert(pwrite(fd, &msip, sizeof(msip), DAYAN_CLINT_MSIP(0)) ==
+               (ssize_t)sizeof(msip));
+        close(fd);
+    }
+    dayan_server_destroy(server);
+
+    /* A lost XDMA/FUSE endpoint must stop the Server without a signal. */
+    server = 0;
+    assert(dayan_server_create(&server, &server_options) == 0);
+    run.server = server;
+    run.status = 0;
+    assert(pthread_create(&thread, 0, run_server, &run) == 0);
+    fd = open_file(directory, "xdma0_user", O_WRONLY);
+    assert(fd >= 0);
+    assert(ftruncate(fd, 0) == 0);
+    close(fd);
+    assert(pthread_join(thread, 0) == 0);
+    assert(run.status == -EIO);
     dayan_server_destroy(server);
     return 0;
 }

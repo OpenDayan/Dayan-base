@@ -162,6 +162,9 @@ int npu_service_open(npu_service_device_t **device_out,
                      npu_hal_t *hal,
                      const npu_service_options_t *options);
 int npu_service_close(npu_service_device_t *device);
+/* Cancels in-flight RPC waits and rejects future Device operations. */
+void npu_service_abort(npu_service_device_t *device, int status);
+int npu_service_status(npu_service_device_t *device);
 
 /* BL1 is a per-Cluster instance; core_mask addresses cores within Cluster. */
 int npu_service_load_bl1(npu_service_device_t *device, uint32_t cluster,
@@ -192,6 +195,8 @@ int npu_service_launch_wait(npu_service_launch_t *launch,
                             uint32_t timeout_ms,
                             npu_service_launch_info_t *info);
 int npu_service_launch_release(npu_service_launch_t *launch);
+/* Host-only cleanup for a launch whose Device can no longer be queried. */
+int npu_service_launch_abandon(npu_service_launch_t *launch);
 
 /* Administrative calls explicitly address one Cluster/Core (Hart). */
 int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
@@ -199,6 +204,10 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
 int npu_service_rpc_kill_all(npu_service_device_t *device,
                              npu_hal_core_t target,
                              npu_service_kill_result_t *result);
+int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
+                                     npu_hal_core_t target,
+                                     uint32_t timeout_ms,
+                                     npu_service_kill_result_t *result);
 
 /* One global allocation is partitioned into one FIFO per booted Hart. */
 int npu_service_profile_start(npu_service_device_t *device,

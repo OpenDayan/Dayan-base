@@ -26,9 +26,17 @@ struct trace_target {
     uint32_t cluster;
     uint32_t hart;
     int have_cycle;
+    int have_execution_state;
+    int scheduler_running;
     unsigned char *proc_seen;
     unsigned char *state_valid;
     uint16_t *proc_state;
+    char (*proc_names)[NPU_PROC_NAME_SIZE];
+};
+
+struct trace_thread_order {
+    const char *name;
+    uint16_t event_id;
 };
 
 struct trace_writer {
@@ -215,6 +223,36 @@ static uint64_t trace_pid(uint32_t cluster, uint32_t hart)
     return UINT64_C(1) + ((uint64_t)cluster << 32) + hart;
 }
 
+static uint64_t trace_process_sort_index(uint32_t cluster, uint32_t hart)
+{
+    return ((uint64_t)cluster << 32) + hart;
+}
+
+static int trace_proc_metadata(struct trace_writer *writer,
+                               struct trace_target *target,
+                               uint16_t event_id,
+                               const char *name)
+{
+    size_t name_length = strnlen(name, NPU_PROC_NAME_SIZE);
+
+    if (!name_length || name_length == NPU_PROC_NAME_SIZE)
+        return -EPROTO;
+    if (target->proc_seen[event_id])
+        return strcmp(target->proc_names[event_id], name) ? -EPROTO : 0;
+    target->proc_seen[event_id] = 1;
+    memcpy(target->proc_names[event_id], name, name_length + 1U);
+    if (trace_item_begin(writer) < 0 ||
+        fprintf(writer->file,
+                "{\"name\":\"thread_name\",\"ph\":\"M\","
+                "\"pid\":%" PRIu64 ",\"tid\":%u,\"args\":{"
+                "\"name\":",
+                trace_pid(target->cluster, target->hart), event_id) < 0 ||
+        trace_json_string(writer->file, name, name_length) < 0 ||
+        fputs("}}", writer->file) == EOF)
+        return -EIO;
+    return 0;
+}
+
 static struct trace_target *trace_target_get(struct trace_writer *writer,
                                               uint32_t cluster,
                                               uint32_t hart)
@@ -232,7 +270,11 @@ static struct trace_target *trace_target_get(struct trace_writer *writer,
     target->state_valid = calloc(DYPERF_EVENT_ID_COUNT, 1);
     target->proc_state = calloc(DYPERF_EVENT_ID_COUNT,
                                 sizeof(*target->proc_state));
-    if (!target->proc_seen || !target->state_valid || !target->proc_state) {
+    target->proc_names = calloc(DYPERF_EVENT_ID_COUNT,
+                                sizeof(*target->proc_names));
+    if (!target->proc_seen || !target->state_valid || !target->proc_state ||
+        !target->proc_names) {
+        free(target->proc_names);
         free(target->proc_state);
         free(target->state_valid);
         free(target->proc_seen);
@@ -252,32 +294,18 @@ static struct trace_target *trace_target_get(struct trace_writer *writer,
         writer->failed = 1;
         return 0;
     }
-    return target;
-}
-
-static int trace_proc_metadata(struct trace_writer *writer,
-                               struct trace_target *target,
-                               uint16_t event_id,
-                               const char name[NPU_PROC_NAME_SIZE])
-{
-    size_t name_length;
-
-    if (target->proc_seen[event_id])
-        return 0;
-    name_length = strnlen(name, NPU_PROC_NAME_SIZE);
-    if (!name_length || name_length == NPU_PROC_NAME_SIZE)
-        return -EPROTO;
-    target->proc_seen[event_id] = 1;
     if (trace_item_begin(writer) < 0 ||
         fprintf(writer->file,
-                "{\"name\":\"thread_name\",\"ph\":\"M\","
-                "\"pid\":%" PRIu64 ",\"tid\":%u,\"args\":{"
-                "\"name\":",
-                trace_pid(target->cluster, target->hart), event_id) < 0 ||
-        trace_json_string(writer->file, name, name_length) < 0 ||
-        fputs("}}", writer->file) == EOF)
-        return -EIO;
-    return 0;
+                "{\"name\":\"process_sort_index\",\"ph\":\"M\","
+                "\"pid\":%" PRIu64 ",\"tid\":0,\"args\":{"
+                "\"sort_index\":%" PRIu64 "}}",
+                trace_pid(cluster, hart),
+                trace_process_sort_index(cluster, hart)) < 0 ||
+        trace_proc_metadata(writer, target, 0, "scheduler") < 0) {
+        writer->failed = 1;
+        return 0;
+    }
+    return target;
 }
 
 static uint64_t extend_cycle(struct trace_target *target, uint32_t cycle)
@@ -341,6 +369,43 @@ static int trace_state_event(struct trace_writer *writer,
     return 0;
 }
 
+static int trace_scheduler_update(struct trace_writer *writer,
+                                  struct trace_target *target,
+                                  uint16_t old_state, int old_state_valid,
+                                  uint16_t new_state,
+                                  uint64_t cycle, uint32_t raw_cycle)
+{
+    int leaves_cpu = old_state_valid &&
+                     old_state == NPU_PROFILE_PROC_RUNNING &&
+                     new_state != NPU_PROFILE_PROC_RUNNING;
+    int enters_cpu = new_state == NPU_PROFILE_PROC_RUNNING;
+
+    if (!target->have_execution_state) {
+        target->have_execution_state = 1;
+        if (!enters_cpu) {
+            if (trace_state_event(writer, target, 0,
+                                  NPU_PROFILE_PROC_RUNNING, "B", cycle,
+                                  raw_cycle) < 0)
+                return -EIO;
+            target->scheduler_running = 1;
+        }
+    } else if (leaves_cpu && !target->scheduler_running) {
+        if (trace_state_event(writer, target, 0,
+                              NPU_PROFILE_PROC_RUNNING, "B", cycle,
+                              raw_cycle) < 0)
+            return -EIO;
+        target->scheduler_running = 1;
+    }
+    if (enters_cpu && target->scheduler_running) {
+        if (trace_state_event(writer, target, 0,
+                              NPU_PROFILE_PROC_RUNNING, "E", cycle,
+                              raw_cycle) < 0)
+            return -EIO;
+        target->scheduler_running = 0;
+    }
+    return 0;
+}
+
 static int trace_write_batch(struct trace_writer *writer,
                              const npu_profile_batch_info_t *batch,
                              const npu_profile_event_t *events)
@@ -372,6 +437,11 @@ static int trace_write_batch(struct trace_writer *writer,
                               target->proc_state[event->event_id], "E",
                               cycle, event->cycle) < 0)
             return -EIO;
+        if (trace_scheduler_update(
+                writer, target, target->proc_state[event->event_id],
+                target->state_valid[event->event_id], event->state,
+                cycle, event->cycle) < 0)
+            return -EIO;
         if (trace_state_event(writer, target, event->event_id,
                               event->state, "B", cycle,
                               event->cycle) < 0)
@@ -397,6 +467,60 @@ static int trace_close_states(struct trace_writer *writer,
                               target->last_cycle) < 0)
             return -EIO;
     }
+    if (target->scheduler_running &&
+        trace_state_event(writer, target, 0, NPU_PROFILE_PROC_RUNNING,
+                          "E", cycle, target->last_cycle) < 0)
+        return -EIO;
+    return 0;
+}
+
+static int trace_thread_order_compare(const void *left, const void *right)
+{
+    const struct trace_thread_order *a = left;
+    const struct trace_thread_order *b = right;
+    int order = strcmp(a->name, b->name);
+
+    if (order)
+        return order;
+    return a->event_id < b->event_id ? -1 : a->event_id != b->event_id;
+}
+
+static int trace_thread_sort_metadata(struct trace_writer *writer,
+                                      const struct trace_target *target)
+{
+    struct trace_thread_order *threads;
+    uint32_t event_id;
+    size_t count = 0;
+    size_t index = 0;
+
+    for (event_id = 0; event_id < DYPERF_EVENT_ID_COUNT; ++event_id) {
+        if (target->proc_seen[event_id])
+            ++count;
+    }
+    threads = calloc(count, sizeof(*threads));
+    if (!threads)
+        return -ENOMEM;
+    for (event_id = 0; event_id < DYPERF_EVENT_ID_COUNT; ++event_id) {
+        if (!target->proc_seen[event_id])
+            continue;
+        threads[index].name = target->proc_names[event_id];
+        threads[index].event_id = (uint16_t)event_id;
+        ++index;
+    }
+    qsort(threads, count, sizeof(*threads), trace_thread_order_compare);
+    for (index = 0; index < count; ++index) {
+        if (trace_item_begin(writer) < 0 ||
+            fprintf(writer->file,
+                    "{\"name\":\"thread_sort_index\",\"ph\":\"M\","
+                    "\"pid\":%" PRIu64 ",\"tid\":%u,\"args\":{"
+                    "\"sort_index\":%zu}}",
+                    trace_pid(target->cluster, target->hart),
+                    threads[index].event_id, index) < 0) {
+            free(threads);
+            return -EIO;
+        }
+    }
+    free(threads);
     return 0;
 }
 
@@ -429,6 +553,10 @@ static int trace_writer_close(struct trace_writer *writer)
                 break;
             }
         }
+        for (closing = writer->targets; status == 0 && closing;
+             closing = closing->next) {
+            status = trace_thread_sort_metadata(writer, closing);
+        }
     }
     if (writer->file &&
         fputs("],\"displayTimeUnit\":\"ns\",\"metadata\":{"
@@ -440,6 +568,7 @@ static int trace_writer_close(struct trace_writer *writer)
     while (target) {
         struct trace_target *next = target->next;
 
+        free(target->proc_names);
         free(target->proc_state);
         free(target->state_valid);
         free(target->proc_seen);

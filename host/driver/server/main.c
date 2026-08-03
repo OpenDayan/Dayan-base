@@ -141,9 +141,11 @@ int main(int argc, char **argv)
                 "releasing resources\n");
     }
     dayan_server_destroy(server);
-    fprintf(stderr, "dayan_server: [shutdown] stopped cleanly\n");
     if (status < 0) {
+        fprintf(stderr,
+                "dayan_server: [shutdown] stopped after service failure\n");
         return 1;
     }
+    fprintf(stderr, "dayan_server: [shutdown] stopped cleanly\n");
     return 0;
 }

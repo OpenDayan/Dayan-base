@@ -322,6 +322,21 @@ int main(void)
     assert(address1 == 0xe00000);
     assert(npu_hal_memory_free(hal, uram1) == 0);
     uram1 = 0;
+    assert(npu_hal_device_status(hal) == 0);
+    fd = endpoint_fd(directory, 0, "user", O_WRONLY);
+    assert(fd >= 0);
+    assert(ftruncate(fd, 0) == 0);
+    close(fd);
+    pending = 0;
+    {
+        uint32_t irq_cluster = 0;
+
+        assert(npu_hal_irq_wait(hal, 100, &irq_cluster, &pending) == -EIO);
+        assert(irq_cluster == NPU_HAL_ANY_CLUSTER && pending == 0);
+    }
+    assert(npu_hal_device_status(hal) == -EIO);
+    assert(npu_hal_copy_to_address(hal, 0, 0, &value, sizeof(value)) ==
+           -EIO);
     npu_hal_close(hal);
     hal = 0;
     options.memory_regions = overlapping_regions;

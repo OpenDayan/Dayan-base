@@ -301,6 +301,25 @@ static void clear_profile_locked(npu_service_device_t *device)
     device->profile_transition = 0;
 }
 
+void npu_service_profile_discard(npu_service_device_t *device)
+{
+    npu_hal_allocation_t *allocation;
+    struct npu_service_profile_core *cores;
+
+    if (!device)
+        return;
+    pthread_mutex_lock(&device->mutex);
+    while (device->profile_readers)
+        (void)pthread_cond_wait(&device->condition, &device->mutex);
+    allocation = device->profile_allocation;
+    cores = device->profile_cores;
+    clear_profile_locked(device);
+    pthread_mutex_unlock(&device->mutex);
+    if (allocation)
+        (void)npu_hal_memory_free(device->hal, allocation);
+    free(cores);
+}
+
 int npu_service_profile_start(npu_service_device_t *device,
                               uint64_t buffer_size)
 {

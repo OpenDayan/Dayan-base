@@ -11,7 +11,14 @@ int main(int argc, char **argv)
           "late\"child" },
     };
     const npu_profile_batch_info_t batch = {
-        2, 3, 3, 0,
+        0, 3, 3, 0,
+    };
+    const npu_profile_event_t hart0_events[] = {
+        { UINT32_C(100), 4, NPU_PROFILE_PROC_RUNNING, "zeta" },
+        { UINT32_C(120), 4, NPU_PROFILE_PROC_WAIT_EVENT, "zeta" },
+    };
+    const npu_profile_batch_info_t hart0_batch = {
+        0, 0, 2, 0,
     };
     struct trace_writer writer;
     char *command[] = {
@@ -29,6 +36,8 @@ int main(int argc, char **argv)
     if (status < 0)
         return 1;
     status = trace_write_batch(&writer, &batch, events);
+    if (status == 0)
+        status = trace_write_batch(&writer, &hart0_batch, hart0_events);
     if (trace_writer_close(&writer) < 0)
         status = -EIO;
     if (command_start(command, "/tmp/dyperf-test.sock", &command_pid) < 0 ||

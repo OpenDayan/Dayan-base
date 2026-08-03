@@ -19,10 +19,20 @@
 #define DAYAN_SERVER_DEFAULT_PROCS_PER_HART 16U
 #define DAYAN_SERVER_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 #define DAYAN_SERVER_MAX_PROFILE_BYTES (64U * 1024U * 1024U)
+#define DAYAN_SERVER_SHUTDOWN_RPC_TIMEOUT_MS 1000U
 
 struct server_connection {
     dayan_server_t *server;
     int fd;
+};
+
+struct server_shutdown_kill {
+    npu_service_device_t *device;
+    npu_hal_core_t target;
+    pthread_t thread;
+    npu_service_kill_result_t result;
+    int status;
+    uint32_t started;
 };
 
 static void server_log(const char *category, const char *format, ...)
@@ -48,6 +58,79 @@ static const char *connection_role_name(uint32_t role)
 {
     return role == NPU_IPC_ROLE_CONTROL ? "control" :
            role == NPU_IPC_ROLE_DATA ? "data" : "unknown";
+}
+
+static void *shutdown_kill_main(void *argument)
+{
+    struct server_shutdown_kill *request = argument;
+
+    request->status = npu_service_rpc_kill_all_timeout(
+        request->device, request->target,
+        DAYAN_SERVER_SHUTDOWN_RPC_TIMEOUT_MS, &request->result);
+    return 0;
+}
+
+static void shutdown_device_processes(dayan_server_t *server)
+{
+    struct server_shutdown_kill *requests;
+    size_t request_count = 0;
+    size_t successful = 0;
+    size_t unavailable = 0;
+    size_t failed = 0;
+    size_t index;
+
+    for (index = 0; index < server->slot_count; ++index) {
+        if (server->slots[index].enabled)
+            ++request_count;
+    }
+    if (!request_count)
+        return;
+    requests = calloc(request_count, sizeof(*requests));
+    if (!requests) {
+        server_log("shutdown", "cannot allocate kill_all requests; "
+                   "forcing Host-side cleanup");
+        return;
+    }
+    request_count = 0;
+    for (index = 0; index < server->slot_count; ++index) {
+        struct server_shutdown_kill *request;
+        int status;
+
+        if (!server->slots[index].enabled)
+            continue;
+        request = &requests[request_count++];
+        request->device = server->device;
+        request->target = server->slots[index].target;
+        request->status = -ECANCELED;
+        status = pthread_create(&request->thread, 0, shutdown_kill_main,
+                                request);
+        if (status)
+            request->status = -status;
+        else
+            request->started = 1;
+    }
+    for (index = 0; index < request_count; ++index) {
+        struct server_shutdown_kill *request = &requests[index];
+
+        if (request->started)
+            (void)pthread_join(request->thread, 0);
+        if (request->status == 0) {
+            ++successful;
+        } else if (request->status == -ENODEV) {
+            ++unavailable;
+        } else {
+            ++failed;
+            server_log("shutdown",
+                       "kill_all Cluster %u Hart %u failed: %s (%d)",
+                       request->target.cluster, request->target.core,
+                       server_status_string(request->status),
+                       request->status);
+        }
+    }
+    server_log("shutdown",
+               "kill_all finished: accepted=%zu unavailable=%zu failed=%zu",
+               successful, unavailable, failed);
+    free(requests);
 }
 
 static uint32_t all_mask(uint32_t count)
@@ -2280,7 +2363,10 @@ static void connection_closed(dayan_server_t *server,
         for (context = session->contexts; context; context = context->next)
             server_cancel_context_locked(server, context);
         if (server->profile_owner == session) {
-            if (server->profile_active && !server->profile_stopping) {
+            if (server->stop) {
+                profile_clear_locked(server);
+            } else if (server->profile_active &&
+                       !server->profile_stopping) {
                 server->profile_stopping = 1;
                 stop_profile = 1;
             } else if (!server->profile_active) {
@@ -2416,8 +2502,17 @@ int dayan_server_run(dayan_server_t *server,
         return -EINVAL;
     for (;;) {
         struct pollfd poll_fd;
+        int device_status;
         int result;
 
+        device_status = npu_hal_device_status(server->hal);
+        if (device_status < 0) {
+            server_log("error", "Device access failed: %s (%d); "
+                       "stopping Server",
+                       server_status_string(device_status), device_status);
+            dayan_server_request_stop(server);
+            return device_status;
+        }
         pthread_mutex_lock(&server->mutex);
         if (server->stop || (stop_requested && *stop_requested)) {
             pthread_mutex_unlock(&server->mutex);
@@ -2516,10 +2611,26 @@ void dayan_server_request_stop(dayan_server_t *server)
 void dayan_server_destroy(dayan_server_t *server)
 {
     struct server_package_cache *package;
+    int device_status;
+    int service_status;
 
     if (!server)
         return;
     dayan_server_request_stop(server);
+    device_status = npu_hal_device_status(server->hal);
+    if (device_status < 0) {
+        server_log("shutdown", "Device is unavailable; skipping Device-side "
+                   "process cleanup");
+    } else {
+        server_log("shutdown", "requesting process cleanup on enabled Harts");
+        shutdown_device_processes(server);
+        device_status = npu_hal_device_status(server->hal);
+    }
+    npu_service_abort(server->device,
+                      device_status < 0 ? device_status : -ESHUTDOWN);
+    pthread_mutex_lock(&server->mutex);
+    pthread_cond_broadcast(&server->condition);
+    pthread_mutex_unlock(&server->mutex);
     if (server->scheduler_started)
         (void)pthread_join(server->scheduler, 0);
     pthread_mutex_lock(&server->mutex);
@@ -2540,7 +2651,10 @@ void dayan_server_destroy(dayan_server_t *server)
     }
     output_list_free(server->pending_outputs);
     profile_chunk_list_free(server->profile_head);
-    (void)npu_service_close(server->device);
+    service_status = npu_service_close(server->device);
+    if (service_status < 0)
+        server_log("shutdown", "Device service cleanup failed: %s (%d)",
+                   server_status_string(service_status), service_status);
     npu_hal_close(server->hal);
     free(server->slots);
     pthread_cond_destroy(&server->condition);

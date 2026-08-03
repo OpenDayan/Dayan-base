@@ -49,10 +49,14 @@ Runtime 连接、提交 memcpy 或 launch。
 数量。单个 Runtime 句柄内部的 control 调用仍按 socket 串行化；需要独立的长轮询时，
 应像 `dyperf` 一样使用单独 Runtime Session。
 
-每个 Hart 映射为独立 `pid`，每个 Device proc ID 映射为独立 `tid`，每条
-`thread_name` metadata 使用该 Proc 的固定 16-byte 名称。Device 在 START 时先报告所有
-现存 proc 的初始状态，之后报告每次状态切换后的目标状态；采样期间新建的 Proc 会先
-产生带名称的 `WAIT_START`，因此新 tid 会被持续发现并立即命名。工具把这些事件展开成
+每个 Hart 映射为独立 `pid`，并通过 `process_sort_index` 固定按 Cluster、Hart 编号升序
+排列；同一 Hart 内的轨道通过 `thread_sort_index` 按 Proc 名称排序，同名 Proc 再按 tid
+排序。每个 Device proc ID 映射为独立 `tid`，每条 `thread_name` metadata 使用该 Proc
+的固定 16-byte 名称。tid 0 保留为 `scheduler` 轨道：工具根据当前 Proc 离开
+`RUNNING` 到下一个 Proc 进入 `RUNNING` 之间的区间合成该轨道，不增加 Device profile
+事件。Device 在 START 时先报告所有现存 proc 的初始状态，之后报告每次状态切换后的
+目标状态；采样期间新建的 Proc 会先产生带名称的 `WAIT_START`，因此新 tid 会被持续
+发现并立即命名。工具把这些事件展开成
 `RUNNING`、`READY`、`WAIT_POLL`、`WAIT_EVENT`、`WAIT_START`、`WAIT_EXIT`、
 `WAIT_PRODUCE` 和 `KILL_WAIT_PRODUCE` 状态区间。JSON 中的 `B/E` 只用于表达区间，不是
 Device 原始事件类型。工具会按 Hart 独立扩展 32-bit cycle 回绕，并按

@@ -7,3 +7,4 @@
 build/
 core
 core.*
+*.json

@@ -52,6 +52,7 @@ struct npu_hal_arena {
 struct npu_hal {
     const struct npu_hal_ops *ops;
     void *state;
+    int device_status;
     uint32_t backend;
     uint32_t cluster_count;
     uint32_t cores_per_cluster;

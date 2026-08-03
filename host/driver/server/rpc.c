@@ -395,8 +395,9 @@ static int pending_response(npu_service_device_t *device,
 void *npu_rpc_worker(void *arg)
 {
     npu_service_device_t *device = arg;
+    int device_failed = 0;
 
-    for (;;) {
+    while (!device_failed) {
         uint32_t cluster;
         uint32_t pending;
         uint32_t core_index;
@@ -414,6 +415,12 @@ void *npu_rpc_worker(void *arg)
         if (wait_status == -ETIMEDOUT)
             continue;
         if (wait_status < 0) {
+            int fatal_status = npu_hal_device_status(device->hal);
+
+            if (fatal_status < 0) {
+                npu_service_abort(device, fatal_status);
+                break;
+            }
             npu_delay_us(device->options.rpc_poll_interval_us);
             continue;
         }
@@ -427,16 +434,32 @@ void *npu_rpc_worker(void *arg)
 
             if (!(pending & mask))
                 continue;
-            if (npu_hal_irq_mailbox(device->hal, core, &command) < 0)
+            if (npu_hal_irq_mailbox(device->hal, core, &command) < 0) {
+                int fatal_status = npu_hal_device_status(device->hal);
+
+                if (fatal_status < 0) {
+                    npu_service_abort(device, fatal_status);
+                    device_failed = 1;
+                    break;
+                }
                 continue;
+            }
             pthread_mutex_lock(&device->mutex);
             is_response = pending_response(device, core, command);
             pthread_mutex_unlock(&device->mutex);
             if (!is_response)
                 (void)npu_rpc_dispatch(device, core, command);
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            if (npu_hal_irq_ack(device->hal, cluster, mask) < 0)
+            if (npu_hal_irq_ack(device->hal, cluster, mask) < 0) {
+                int fatal_status = npu_hal_device_status(device->hal);
+
+                if (fatal_status < 0) {
+                    npu_service_abort(device, fatal_status);
+                    device_failed = 1;
+                    break;
+                }
                 continue;
+            }
             if (is_response) {
                 struct npu_pending_call *call =
                     &device->calls[npu_service_core_index(device, core)];
