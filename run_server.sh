@@ -16,6 +16,11 @@ wait_seconds=${DAYAN_DEVICE_WAIT_SECONDS:-30}
 build_jobs=${DAYAN_BUILD_JOBS:-4}
 skip_build=${DAYAN_SKIP_BUILD:-0}
 
+status()
+{
+    printf '[run_server] %s\n' "$*" >&2
+}
+
 usage()
 {
     cat <<EOF
@@ -129,7 +134,11 @@ if [ "$cluster_count" -gt 32 ]; then
 fi
 
 if [ "$skip_build" -eq 0 ]; then
+    status "building firmware and host driver with $build_jobs jobs"
     make -C "$repo_dir" -j"$build_jobs" device host-driver
+    status "build completed"
+else
+    status "using existing build artifacts (DAYAN_SKIP_BUILD=1)"
 fi
 if [ ! -x "$server_bin" ]; then
     echo "dayan_server is not executable: $server_bin" >&2
@@ -161,14 +170,19 @@ devices_ready()
 
 attempt=0
 max_attempts=$((wait_seconds * 10))
+status "waiting up to ${wait_seconds}s for ${cluster_count} XDMA device(s) under $device_prefix"
 while ! devices_ready; do
     if [ "$attempt" -ge "$max_attempts" ]; then
         echo "XDMA device files did not appear under $device_prefix" >&2
         exit 1
     fi
     attempt=$((attempt + 1))
+    if [ "$attempt" -gt 0 ] && [ "$((attempt % 50))" -eq 0 ]; then
+        status "still waiting for XDMA endpoints ($((attempt / 10))s elapsed)"
+    fi
     sleep 0.1
 done
+status "XDMA endpoints are ready"
 
 server_args=(
     --socket "$socket_path"
@@ -185,4 +199,6 @@ if [ -n "$cluster_mask" ]; then
 fi
 server_args+=("${extra_args[@]}")
 
+status "starting dayan_server: socket=$socket_path clusters=$cluster_count core_mask=$core_mask"
+status "firmware=$firmware api_elf=$api_elf"
 exec "$server_bin" "${server_args[@]}"

@@ -2,6 +2,8 @@
 
 #include <elf.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +30,19 @@ struct load_segment {
     uint64_t memory_size;
     uint32_t flags;
 };
+
+static void firmware_log(uint32_t cluster, const char *format, ...)
+{
+    char message[512];
+    va_list arguments;
+
+    va_start(arguments, format);
+    (void)vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    fprintf(stderr, "dayan_server: [firmware C%u] %s\n", cluster,
+            message);
+    fflush(stderr);
+}
 
 static int segment_compare(const void *left, const void *right)
 {
@@ -388,6 +403,7 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
     uint64_t entry = 0;
     uint32_t valid_mask;
     uint32_t core;
+    const char *stage = "validating the BL1 request";
     int status;
 
     if (!device || !image || cluster >= device->hal_info.cluster_count)
@@ -396,6 +412,9 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
         (UINT32_C(1) << device->hal_info.cores_per_cluster) - 1U;
     if (!core_mask || (core_mask & ~valid_mask))
         return -EINVAL;
+    firmware_log(cluster, "loading BL1 ELF: image=%zu bytes core_mask=0x%08x",
+                 size, core_mask);
+    stage = "checking the Cluster firmware state";
     pthread_mutex_lock(&device->mutex);
     if (device->clusters[cluster].firmware_loaded ||
         device->clusters[cluster].booted_cores) {
@@ -403,11 +422,18 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
         return -EBUSY;
     }
     pthread_mutex_unlock(&device->mutex);
+    stage = "parsing the BL1 ELF";
+    firmware_log(cluster, "parsing BL1 ELF");
     status = parse_segments(device, viewer, image, size, &segments,
                             &segment_count, &entry);
     if (status < 0)
-        return status;
+        goto out;
+    firmware_log(cluster, "ELF parsed: segments=%zu entry=0x%llx",
+                 segment_count, (unsigned long long)entry);
     previous_head = device->firmware_allocations;
+    stage = "reserving BL1 memory segments";
+    firmware_log(cluster, "reserving %zu BL1 memory segment(s)",
+                 segment_count);
     for (core = 0; core < segment_count; ++core) {
         status = reserve_segment(device, cluster, &segments[core]);
         if (status < 0) {
@@ -415,27 +441,48 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
             goto out;
         }
     }
+    firmware_log(cluster, "BL1 memory segments reserved");
+    stage = "configuring Atomic Cache backing";
+    firmware_log(cluster,
+                 "configuring Atomic Cache backing (alignment=%llu bytes)",
+                 (unsigned long long)ATOMIC_CACHE_BACKING_ALIGNMENT);
     status = configure_atomic_cache(device, cluster);
     if (status < 0) {
         rollback_reservations(device, previous_head);
         goto out;
     }
+    firmware_log(cluster,
+                 "Atomic Cache backing configured: address=0x%llx size=%llu bytes",
+                 (unsigned long long)device->clusters[cluster]
+                     .atomic_cache_backing_address,
+                 (unsigned long long)DAYAN_ATOMIC_CACHE_WINDOW_SIZE);
+    stage = "copying BL1 segments to Device memory";
+    firmware_log(cluster, "copying BL1 segments to Device memory");
     status = load_segments(device, cluster, image, segments, segment_count);
     if (status < 0) {
         release_atomic_cache_backing(device, cluster);
         rollback_reservations(device, previous_head);
         goto out;
     }
+    firmware_log(cluster, "BL1 segments copied");
     for (core = 0; core < device->hal_info.cores_per_cluster; ++core) {
         npu_hal_core_t target = { cluster, core };
 
         if (!(core_mask & (UINT32_C(1) << core)))
             continue;
+        stage = "booting a BL1 Core";
+        firmware_log(cluster, "Core %u: issuing BL1 boot at entry 0x%llx",
+                     core, (unsigned long long)entry);
         status = npu_hal_boot_core(device->hal, target, entry,
                                    device->options.default_timeout_ms);
         if (status < 0)
             goto out;
+        firmware_log(cluster, "Core %u: boot request completed", core);
     }
+    stage = "waiting for BL1 ready";
+    firmware_log(cluster,
+                 "waiting for BL1 ready: core_mask=0x%08x timeout=%u ms",
+                 core_mask, device->options.default_timeout_ms);
     status = wait_runtime_ready(device, cluster, core_mask);
     if (status < 0)
         goto out;
@@ -444,8 +491,12 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
     device->clusters[cluster].booted_cores = core_mask;
     device->clusters[cluster].firmware_loaded = 1;
     pthread_mutex_unlock(&device->mutex);
+    firmware_log(cluster, "BL1 ready: core_mask=0x%08x", core_mask);
 
 out:
+    if (status < 0)
+        firmware_log(cluster, "%s failed: %s (%d)", stage,
+                     strerror(-status), status);
     free(segments);
     return status;
 }

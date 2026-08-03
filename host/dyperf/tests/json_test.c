@@ -12,6 +12,13 @@ int main(int argc, char **argv)
         2, 3, 2, 0,
     };
     struct trace_writer writer;
+    char *command[] = {
+        "/bin/sh", "-c",
+        "test \"$DAYAN_SERVER_SOCKET\" = /tmp/dyperf-test.sock; exit 23",
+        0,
+    };
+    pid_t command_pid;
+    int command_status;
     int status;
 
     if (argc != 2)
@@ -21,6 +28,10 @@ int main(int argc, char **argv)
         return 1;
     status = trace_write_batch(&writer, &batch, events);
     if (trace_writer_close(&writer) < 0)
+        status = -EIO;
+    if (command_start(command, "/tmp/dyperf-test.sock", &command_pid) < 0 ||
+        command_wait(command_pid, 0, &command_status) < 0 ||
+        command_status != 23)
         status = -EIO;
     return status < 0;
 }

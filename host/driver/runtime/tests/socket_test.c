@@ -13,6 +13,7 @@
 
 #include "npu_package.h"
 #include "npu_runtime.h"
+#include "runtime_internal.h"
 #include "server_internal.h"
 
 struct run_state {
@@ -28,6 +29,12 @@ struct output_capture {
     uint32_t proc;
     uint32_t flags;
     unsigned calls;
+};
+
+struct profile_read_state {
+    npu_runtime_t *runtime;
+    uint64_t profile_id;
+    int status;
 };
 
 static void capture_output(void *context, uint32_t cluster, uint32_t core,
@@ -73,6 +80,35 @@ static void *run_server(void *argument)
     struct run_state *state = argument;
 
     state->status = dayan_server_run(state->server, 0);
+    return 0;
+}
+
+static void *run_blocking_profile_read(void *argument)
+{
+    struct profile_read_state *state = argument;
+    npu_ipc_profile_read_t request;
+    size_t response_size = 0;
+    void *response = 0;
+
+    memset(&request, 0, sizeof(request));
+    request.max_events = 1;
+    request.timeout_ms = 3000;
+    state->status = runtime_control_call_variable(
+        state->runtime, NPU_IPC_PROFILE_READ, state->profile_id, &request,
+        sizeof(request), &response, &response_size);
+    free(response);
+    return 0;
+}
+
+static struct server_session *runtime_session_locked(
+    dayan_server_t *server, const npu_runtime_t *runtime)
+{
+    struct server_session *session;
+
+    for (session = server->sessions; session; session = session->next) {
+        if (session->id == runtime->session_id)
+            return session;
+    }
     return 0;
 }
 
@@ -179,6 +215,60 @@ int main(void)
     runtime_options.output = capture_output;
     runtime_options.output_context = &output_capture;
     assert(npu_runtime_open(&runtime, &runtime_options) == 0);
+    {
+        struct profile_read_state profile_read;
+        struct server_session *profile_session;
+        npu_runtime_t *concurrent_runtime = 0;
+        npu_context_t *concurrent_context = 0;
+        pthread_t profile_thread;
+
+        memset(&profile_read, 0, sizeof(profile_read));
+        profile_read.runtime = runtime;
+        pthread_mutex_lock(&server->mutex);
+        profile_session = runtime_session_locked(server, runtime);
+        assert(profile_session);
+        assert(server->next_id != UINT64_MAX);
+        profile_read.profile_id = ++server->next_id;
+        server->profile_owner = profile_session;
+        server->profile_id = profile_read.profile_id;
+        server->profile_active = 1;
+        server->profile_stopping = 0;
+        server->profile_stopped = 0;
+        pthread_mutex_unlock(&server->mutex);
+
+        assert(pthread_create(&profile_thread, 0, run_blocking_profile_read,
+                              &profile_read) == 0);
+        pthread_mutex_lock(&server->mutex);
+        while (!server->profile_waiters)
+            assert(pthread_cond_wait(&server->condition,
+                                     &server->mutex) == 0);
+        pthread_mutex_unlock(&server->mutex);
+
+        assert(npu_runtime_open(&concurrent_runtime, &runtime_options) == 0);
+        assert(npu_context_create(concurrent_runtime, 0,
+                                  &concurrent_context) == 0);
+        pthread_mutex_lock(&server->mutex);
+        assert(server->profile_waiters == 1);
+        server->profile_stopped = 1;
+        pthread_cond_broadcast(&server->condition);
+        pthread_mutex_unlock(&server->mutex);
+
+        assert(pthread_join(profile_thread, 0) == 0);
+        assert(profile_read.status == 0);
+        assert(npu_context_destroy(concurrent_context) == 0);
+        assert(npu_runtime_close(concurrent_runtime) == 0);
+
+        pthread_mutex_lock(&server->mutex);
+        assert(server->profile_owner == profile_session);
+        assert(server->profile_id == profile_read.profile_id);
+        server->profile_owner = 0;
+        server->profile_id = 0;
+        server->profile_active = 0;
+        server->profile_stopping = 0;
+        server->profile_stopped = 0;
+        pthread_cond_broadcast(&server->condition);
+        pthread_mutex_unlock(&server->mutex);
+    }
     {
         npu_profile_options_t profile_options;
         npu_profile_t *profile = 0;

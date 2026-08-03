@@ -182,7 +182,12 @@ proc），之后每次 proc 状态实际变化只写一个事件。因此每 Har
 发送 `RPC_PROFILE_FLUSH`；Host response 的 `continue_profile` 决定该 Hart 是否继续记录。
 STOP 会关闭记录、等待正在进行的 flush，并把未满尾批次交给 Host。
 
-Server 只允许一个 Runtime 占用全局 profile。Runtime API 为：
+Server 可同时服务多个 Runtime Session；每个 Session 使用独立的 control/data socket，
+每条连接由独立线程处理。profile read 的条件变量等待会释放 Server mutex，因此
+`dyperf` 长轮询不会阻塞其它 Session 的算子提交和数据搬运。设备级 profile 资源本身
+只允许一个 Runtime 占用，第二个 profiler 会得到 `-EBUSY`。同一个 Runtime 句柄的
+control API 仍按单 socket 串行化；NPU Stream 命令提交到 Server 后，设备调度不受该
+socket 串行化限制。Runtime API 为：
 
 ```c
 npu_profile_options_t options;
@@ -201,7 +206,9 @@ npu_profile_destroy(profile);
 
 `batch.cluster/hart` 只描述观测数据来源，不参与 Runtime 的 kernel 调度接口。
 `host/dyperf` 封装上述流程并生成 Chrome Trace Viewer JSON；每个 Hart 是独立 pid，
-每个 proc ID 是独立 tid，各目标状态被展开为连续的状态区间。
+每个 proc ID 是独立 tid，各目标状态被展开为连续的状态区间。推荐使用
+`dyperf [OPTIONS] -- COMMAND [ARG...]`：工具先启动 profile，再以另一个 Runtime Session
+运行算子，并自动向子进程传递 `DAYAN_SERVER_SOCKET`。
 
 ## 构建与运行
 
@@ -265,6 +272,12 @@ NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 ```
 
 该脚本不启动具体后端，因此可连接 cmodel、`npu-cluster-sim` 的 RTL 模拟器或硬件。
+脚本和 Server 会把启动进度直接写到标准错误并立即刷新，包括等待 XDMA endpoint、打开
+HAL、识别 topology、加载 API ELF、为各 Cluster 配置 Atomic Cache backing、启动各
+Core、等待 BL1 ready，以及 Unix socket 就绪状态。若启动被阻塞，终端中的最后一条
+`[startup]` 或 `[firmware Cn]` 日志就是当前等待阶段；看到 `[ready]` 后 Runtime 才能连接。
+Server 还会记录 Runtime control/data 连接的建立与断开，以及停止过程。
+
 需要由脚本同时启动 cmodel 与 `dayan_server` 时运行：
 
 ```sh

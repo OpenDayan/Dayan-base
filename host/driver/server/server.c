@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,31 @@ struct server_connection {
     dayan_server_t *server;
     int fd;
 };
+
+static void server_log(const char *category, const char *format, ...)
+{
+    va_list arguments;
+
+    flockfile(stderr);
+    fprintf(stderr, "dayan_server: [%s] ", category);
+    va_start(arguments, format);
+    vfprintf(stderr, format, arguments);
+    va_end(arguments);
+    fputc('\n', stderr);
+    fflush(stderr);
+    funlockfile(stderr);
+}
+
+static const char *server_status_string(int status)
+{
+    return strerror(status < 0 ? -status : status);
+}
+
+static const char *connection_role_name(uint32_t role)
+{
+    return role == NPU_IPC_ROLE_CONTROL ? "control" :
+           role == NPU_IPC_ROLE_DATA ? "data" : "unknown";
+}
 
 static uint32_t all_mask(uint32_t count)
 {
@@ -520,6 +546,7 @@ int dayan_server_create(dayan_server_t **server_out,
     dayan_server_options_t defaults;
     dayan_server_t *server;
     uint32_t cluster;
+    const char *stage = "validating options";
     int mutex_initialized = 0;
     int condition_initialized = 0;
     int status;
@@ -551,47 +578,91 @@ int dayan_server_create(dayan_server_t **server_out,
     server->options.service.proc_exit = server_device_proc_exit;
     server->options.service.profile = server_device_profile;
     server->options.service.callback_context = server;
+    server_log("startup",
+               "configuration: socket=%s backend=%u device_prefix=%s "
+               "device_index=%u requested_clusters=%u cluster_stride=%u",
+               options->socket_path, options->hal.backend,
+               options->hal.device_prefix ? options->hal.device_prefix :
+                                            "<default>",
+               options->hal.device_index, options->hal.cluster_count,
+               options->hal.cluster_device_stride);
+    server_log("startup",
+               "requested masks: clusters=0x%08x cores=0x%08x; "
+               "firmware=%s; api_elf=%s",
+               options->enabled_cluster_mask, options->enabled_core_mask,
+               options->firmware_path ? options->firmware_path : "<none>",
+               options->api_elf_path ? options->api_elf_path : "<none>");
+    stage = "copying the socket path";
     server->socket_path = strdup(options->socket_path);
     if (!server->socket_path) {
         status = -ENOMEM;
         goto fail;
     }
     server->options.socket_path = server->socket_path;
+    stage = "initializing the server mutex";
     status = pthread_mutex_init(&server->mutex, 0);
     if (status) {
         status = -status;
         goto fail;
     }
     mutex_initialized = 1;
+    stage = "initializing the server condition variable";
     status = pthread_cond_init(&server->condition, 0);
     if (status) {
         status = -status;
         goto fail;
     }
     condition_initialized = 1;
+    stage = "opening the HAL";
+    server_log("startup", "opening HAL");
     status = npu_hal_open(&server->hal, &options->hal);
     if (status < 0)
         goto fail;
+    server_log("startup", "HAL opened");
+    stage = "starting the Device RPC service";
+    server_log("startup", "starting Device RPC service");
     status = npu_service_open(&server->device, server->hal,
                               &server->options.service);
     if (status < 0)
         goto fail;
+    server_log("startup", "Device RPC service started");
+    stage = "reading HAL topology";
+    server_log("startup", "reading HAL topology");
     status = npu_hal_get_info(server->hal, &server->hal_info);
     if (status < 0)
         goto fail;
+    server_log("startup",
+               "topology: clusters=%u cores_per_cluster=%u "
+               "memory_regions=%u max_transfer=%llu bytes",
+               server->hal_info.cluster_count,
+               server->hal_info.cores_per_cluster,
+               server->hal_info.memory_region_count,
+               (unsigned long long)server->hal_info.max_transfer_size);
     /* NPUTaskMode::kFourCore is defined by the current 4-core Cluster ABI. */
     if (server->hal_info.cores_per_cluster != 4U) {
         status = -ENOTSUP;
         goto fail;
     }
+    stage = "initializing Cluster/Core slots";
+    server_log("startup", "initializing Cluster/Core resource slots");
     status = initialize_slots(server);
     if (status < 0)
         goto fail;
+    server_log("startup",
+               "resource slots ready: total=%zu enabled_clusters=0x%08x "
+               "enabled_cores=0x%08x max_procs_per_hart=%u",
+               server->slot_count, server->options.enabled_cluster_mask,
+               server->options.enabled_core_mask,
+               server->options.max_procs_per_hart);
     if (options->api_elf_path) {
+        stage = "loading the Device API ELF";
+        server_log("startup", "loading Device API ELF: %s",
+                   options->api_elf_path);
         status = npu_service_set_api_elf_file(server->device,
                                                options->api_elf_path);
         if (status < 0)
             goto fail;
+        server_log("startup", "Device API ELF registered");
     }
     if (options->firmware_path) {
         for (cluster = 0; cluster < server->hal_info.cluster_count;
@@ -599,13 +670,22 @@ int dayan_server_create(dayan_server_t **server_out,
             if (!(server->options.enabled_cluster_mask &
                   (UINT32_C(1) << cluster)))
                 continue;
+            stage = "loading BL1 firmware";
+            server_log("startup",
+                       "Cluster %u: loading BL1 firmware on core mask "
+                       "0x%08x",
+                       cluster, server->options.enabled_core_mask);
             status = npu_service_load_bl1_file(
                 server->device, cluster, options->firmware_path,
                 server->options.enabled_core_mask);
             if (status < 0)
                 goto fail;
+            server_log("startup", "Cluster %u: BL1 is ready", cluster);
         }
     }
+    stage = "creating the Runtime Unix socket";
+    server_log("startup", "creating Runtime socket: %s",
+               server->socket_path);
     server->listen_fd = npu_ipc_listen(server->socket_path,
                                        DAYAN_SERVER_BACKLOG);
     if (server->listen_fd < 0) {
@@ -613,6 +693,9 @@ int dayan_server_create(dayan_server_t **server_out,
         server->listen_fd = -1;
         goto fail;
     }
+    server_log("startup", "Runtime socket is listening");
+    stage = "starting the scheduler";
+    server_log("startup", "starting command scheduler");
     status = pthread_create(&server->scheduler, 0, dayan_scheduler_main,
                             server);
     if (status) {
@@ -620,10 +703,13 @@ int dayan_server_create(dayan_server_t **server_out,
         goto fail;
     }
     server->scheduler_started = 1;
+    server_log("startup", "command scheduler started");
     *server_out = server;
     return 0;
 
 fail:
+    server_log("error", "startup failed while %s: %s (%d)", stage,
+               server_status_string(status), status);
     if (server->listen_fd >= 0)
         close(server->listen_fd);
     if (server->socket_path)
@@ -1624,8 +1710,12 @@ static int profile_read_locked(dayan_server_t *server,
         server->profile_id != profile_id)
         return -ENOENT;
     if (!server->profile_head && !server->profile_stopped) {
+        ++server->profile_waiters;
+        pthread_cond_broadcast(&server->condition);
         status = wait_with_timeout(server, request->timeout_ms,
                                    profile_read_ready, server);
+        --server->profile_waiters;
+        pthread_cond_broadcast(&server->condition);
         if (status < 0)
             return status;
         if (server->profile_owner != session ||
@@ -2237,8 +2327,15 @@ static void *connection_main(void *argument)
     dayan_server_t *server = connection->server;
     struct server_session *session = 0;
     uint32_t role = 0;
+    int hello_status;
 
-    if (connection_hello(connection, &session, &role) == 0) {
+    hello_status = connection_hello(connection, &session, &role);
+    if (hello_status == 0) {
+        uint64_t session_id = session->id;
+
+        server_log("connection", "session=%llu role=%s connected",
+                   (unsigned long long)session_id,
+                   connection_role_name(role));
         for (;;) {
             union {
                 npu_ipc_event_info_t event;
@@ -2284,6 +2381,12 @@ static void *connection_main(void *argument)
                 break;
         }
         connection_closed(server, session, role, connection->fd);
+        server_log("connection", "session=%llu role=%s disconnected",
+                   (unsigned long long)session_id,
+                   connection_role_name(role));
+    } else {
+        server_log("connection", "handshake rejected: %s (%d)",
+                   server_status_string(hello_status), hello_status);
     }
     close(connection->fd);
     pthread_mutex_lock(&server->mutex);

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef DAYAN_DEFAULT_FIRMWARE
 #define DAYAN_DEFAULT_FIRMWARE "build/device/npu-os.elf"
@@ -61,6 +62,7 @@ int main(int argc, char **argv)
     int index;
     int status;
 
+    (void)setvbuf(stderr, 0, _IONBF, 0);
     dayan_server_options_init(&options);
     options.firmware_path = DAYAN_DEFAULT_FIRMWARE;
     options.api_elf_path = DAYAN_DEFAULT_API_ELF;
@@ -113,15 +115,34 @@ int main(int argc, char **argv)
     sigemptyset(&action.sa_mask);
     (void)sigaction(SIGINT, &action, 0);
     (void)sigaction(SIGTERM, &action, 0);
+    fprintf(stderr, "dayan_server: [main] starting (pid=%ld)\n",
+            (long)getpid());
     status = dayan_server_create(&server, &options);
     if (status < 0) {
-        fprintf(stderr, "dayan_server: initialization failed: %d\n", status);
+        fprintf(stderr,
+                "dayan_server: [error] initialization failed: %s (%d)\n",
+                strerror(-status), status);
         return 1;
     }
+    fprintf(stderr,
+            "dayan_server: [ready] accepting Runtime connections on %s\n",
+            options.socket_path);
     status = dayan_server_run(server, (const volatile int *)&stop_requested);
-    dayan_server_destroy(server);
     if (status < 0) {
-        fprintf(stderr, "dayan_server: service failed: %d\n", status);
+        fprintf(stderr, "dayan_server: [error] service loop failed: %s (%d)\n",
+                strerror(-status), status);
+    } else if (stop_requested) {
+        fprintf(stderr,
+                "dayan_server: [shutdown] stop signal received; "
+                "releasing resources\n");
+    } else {
+        fprintf(stderr,
+                "dayan_server: [shutdown] service loop stopped; "
+                "releasing resources\n");
+    }
+    dayan_server_destroy(server);
+    fprintf(stderr, "dayan_server: [shutdown] stopped cleanly\n");
+    if (status < 0) {
         return 1;
     }
     return 0;

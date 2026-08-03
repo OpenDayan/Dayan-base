@@ -8,7 +8,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "npu_runtime.h"
 
@@ -37,11 +39,12 @@ struct trace_writer {
 };
 
 static volatile sig_atomic_t interrupted;
+static volatile sig_atomic_t interrupted_signal;
 
 static void handle_signal(int signal_number)
 {
-    (void)signal_number;
     interrupted = 1;
+    interrupted_signal = signal_number;
 }
 
 static uint64_t monotonic_ms(void)
@@ -87,14 +90,84 @@ static int parse_u64(const char *text, uint64_t *value_out)
 static void usage(FILE *file, const char *program)
 {
     fprintf(file,
-            "Usage: %s [OPTIONS]\n"
+            "Usage: %s [OPTIONS] [-- COMMAND [ARG...]]\n"
             "Capture Dayan proc state trace as Chrome Trace JSON.\n\n"
-            "  -s, --socket PATH       Dayan Server socket (default: %s)\n"
+            "  -s, --socket PATH       Server socket (env DAYAN_SERVER_SOCKET, else %s)\n"
             "  -o, --output FILE       output JSON (default: dayan-trace.json)\n"
-            "  -d, --duration-ms MS    capture duration; 0 waits for Ctrl-C\n"
+            "  -d, --duration-ms MS    capture duration; 0 waits for Ctrl-C or COMMAND\n"
             "  -b, --buffer-size SIZE  Device buffer bytes; K/M/G accepted\n"
+            "  -- COMMAND [ARG...]     profile while COMMAND uses the same Server\n"
             "  -h, --help              show this help\n",
             program, NPU_DEFAULT_SERVER_SOCKET);
+}
+
+static int command_status_code(int wait_status)
+{
+    if (WIFEXITED(wait_status))
+        return WEXITSTATUS(wait_status);
+    if (WIFSIGNALED(wait_status))
+        return 128 + WTERMSIG(wait_status);
+    return 1;
+}
+
+static int command_poll(pid_t command_pid, int *done_out,
+                        int *status_out)
+{
+    int wait_status;
+    pid_t result;
+
+    *done_out = 0;
+    do {
+        result = waitpid(command_pid, &wait_status, WNOHANG);
+    } while (result < 0 && errno == EINTR && !interrupted);
+    if (result < 0)
+        return -errno;
+    if (!result)
+        return 0;
+    *done_out = 1;
+    *status_out = command_status_code(wait_status);
+    return 0;
+}
+
+static int command_wait(pid_t command_pid, int forward_signal,
+                        int *status_out)
+{
+    int wait_status;
+    pid_t result;
+
+    if (forward_signal > 0)
+        (void)kill(command_pid, forward_signal);
+    do {
+        result = waitpid(command_pid, &wait_status, 0);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0)
+        return -errno;
+    *status_out = command_status_code(wait_status);
+    return 0;
+}
+
+static int command_start(char *const command[], const char *socket_path,
+                         pid_t *pid_out)
+{
+    pid_t pid = fork();
+
+    if (pid < 0)
+        return -errno;
+    if (!pid) {
+        (void)signal(SIGINT, SIG_DFL);
+        (void)signal(SIGTERM, SIG_DFL);
+        if (setenv("DAYAN_SERVER_SOCKET", socket_path, 1) < 0) {
+            fprintf(stderr, "dyperf: cannot set DAYAN_SERVER_SOCKET: %s\n",
+                    strerror(errno));
+            _exit(127);
+        }
+        execvp(command[0], command);
+        fprintf(stderr, "dyperf: cannot execute %s: %s\n", command[0],
+                strerror(errno));
+        _exit(127);
+    }
+    *pid_out = pid;
+    return 0;
 }
 
 static int trace_item_begin(struct trace_writer *writer)
@@ -357,22 +430,29 @@ int main(int argc, char **argv)
         { "help", no_argument, 0, 'h' },
         { 0, 0, 0, 0 },
     };
-    const char *socket_path = NPU_DEFAULT_SERVER_SOCKET;
+    const char *socket_path = getenv("DAYAN_SERVER_SOCKET");
     const char *output_path = "dayan-trace.json";
     uint64_t buffer_size = NPU_PROFILE_DEFAULT_BUFFER_SIZE;
     uint64_t duration_value = DYPERF_DEFAULT_DURATION_MS;
+    char **command = 0;
     npu_runtime_options_t runtime_options;
     npu_profile_options_t profile_options;
     struct trace_writer writer;
     npu_runtime_t *runtime = 0;
     npu_profile_t *profile = 0;
     uint64_t start_ms;
+    pid_t command_pid = -1;
+    int command_exit_status = 0;
+    int command_started = 0;
+    int duration_set = 0;
     int writer_open = 0;
     int profile_started = 0;
     int status = 0;
     int option;
 
-    while ((option = getopt_long(argc, argv, "s:o:d:b:h", long_options,
+    if (!socket_path || !*socket_path)
+        socket_path = NPU_DEFAULT_SERVER_SOCKET;
+    while ((option = getopt_long(argc, argv, "+s:o:d:b:h", long_options,
                                  0)) != -1) {
         uint64_t value;
 
@@ -390,6 +470,7 @@ int main(int argc, char **argv)
                 return 2;
             }
             duration_value = value;
+            duration_set = 1;
             break;
         case 'b':
             status = parse_u64(optarg, &value);
@@ -407,9 +488,14 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if (optind != argc || !*socket_path || !*output_path) {
+    if (!*socket_path || !*output_path) {
         usage(stderr, argv[0]);
         return 2;
+    }
+    if (optind < argc) {
+        command = &argv[optind];
+        if (!duration_set)
+            duration_value = 0;
     }
     if (signal(SIGINT, handle_signal) == SIG_ERR ||
         signal(SIGTERM, handle_signal) == SIG_ERR) {
@@ -440,12 +526,33 @@ int main(int argc, char **argv)
         goto out;
     }
     profile_started = 1;
+    if (command) {
+        status = command_start(command, socket_path, &command_pid);
+        if (status < 0) {
+            fprintf(stderr, "dyperf: cannot start %s: %s\n", command[0],
+                    strerror(-status));
+            goto stop;
+        }
+        command_started = 1;
+    }
     start_ms = monotonic_ms();
     while (!interrupted) {
         uint64_t elapsed = monotonic_ms() - start_ms;
         uint32_t timeout = DYPERF_READ_INTERVAL_MS;
         int end = 0;
 
+        if (command_pid > 0) {
+            int command_done;
+
+            status = command_poll(command_pid, &command_done,
+                                  &command_exit_status);
+            if (status < 0)
+                break;
+            if (command_done) {
+                command_pid = -1;
+                break;
+            }
+        }
         if (duration_value && elapsed >= duration_value)
             break;
         if (duration_value && duration_value - elapsed < timeout)
@@ -458,6 +565,7 @@ int main(int argc, char **argv)
         if (status < 0 || end)
             break;
     }
+stop:
     {
         int stop_status = npu_profile_stop(profile);
 
@@ -502,10 +610,18 @@ out:
         if (status == 0 && close_status < 0)
             status = close_status;
     }
+    if (command_pid > 0) {
+        int wait_status = command_wait(
+            command_pid, interrupted ? (int)interrupted_signal : 0,
+            &command_exit_status);
+
+        if (status == 0 && wait_status < 0)
+            status = wait_status;
+    }
     if (status < 0) {
         fprintf(stderr, "dyperf: capture failed: %s\n", strerror(-status));
         return 1;
     }
     fprintf(stderr, "dyperf: wrote %s\n", output_path);
-    return 0;
+    return command_started ? command_exit_status : 0;
 }
