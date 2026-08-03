@@ -30,7 +30,8 @@ register / IRQ / memory allocator              opaque export / token / handles
   kernel 重定位；`server.[ch]` 与 `scheduler.c` 提供 Unix socket daemon、会话隔离、
   Runtime 对象和 logical task 调度。
 - `runtime/`：实现 `host/include/npu_runtime.h`。它只看到逻辑 Context、Buffer、
-  Stream、Module、Kernel 和 Event，不向应用暴露 Cluster/Core 或 Device 地址；
+  Stream、Module、Kernel、Event 和设备级 profile 会话，不向 launch 接口暴露
+  Cluster/Core 或 Device 地址；
   对外动态符号均为 `npu_` 前缀。
 
 `dayan_server` 先打开具体 HAL backend，再把 opaque `npu_hal_t` 注入 Service；Service
@@ -132,13 +133,13 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
 后端优先等待 `_events_0`；事件接口缺失或不支持阻塞等待时，兼容轮询也只存在于 HAL
 内部。
 
-- Device→Host：输出、清屏、Device heap acquire/release、trap report 和 root proc
-  exit；退出通知携带返回值与 cookie，子 proc 不发送 Host 生命周期消息。子 proc 的
+- Device→Host：输出、清屏、Device heap acquire/release、trap report、root proc
+  exit 和 profile FIFO flush；退出通知携带返回值与 cookie，子 proc 不发送 Host 生命周期消息。子 proc 的
   独立 Device printf buffer 使用所属 Host root ID 输出；Cluster、Core 与 root proc ID
   由 Server 归属到发起任务的 Runtime Session。Runtime
   在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
-- Host→Device：`RPC_PROC_CREATE`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS` 与
-  `RPC_PROC_KILL_ALL`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
+- Host→Device：`RPC_PROC_CREATE`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS`、
+  `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
 create-proc ABI v3 使用 208-byte `rpc_proc_create_request`，包含 entry、栈、shared、
@@ -151,7 +152,7 @@ flush/CLEAR 输出；只有 root 主动向 Host 上报返回值。最后由 sche
 slot，并把描述符置为 `EXITED` 或 `FAILED`。
 
 `RPC_PROC_PS` 返回目标 Hart 的系统/算子 proc 快照。`RPC_PROC_KILL_ALL` 不碰 init 和
-两个 RPC proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
+三个系统 proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
 等待者标为 `KILL_WAIT_PRODUCE`，结果 token 到达后再释放。被 kill 的 root 以
 `-ECANCELED` 完成，子 proc 不单独通知 Host。
 Service 接受 create response 后已经快速进入终态仍是合法情况。
@@ -165,6 +166,43 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 未定义符号。代码写入某个 Cluster 后，会对该 Cluster 所有已启动 Core 分别执行
 `RPC_ICACHE_FLUSH`，再发布入口。
 
+## proc profile trace
+
+profile 是设备级、单会话能力。`npu_profile_start()` 默认通过 HAL 分配 16 MiB 普通
+Device RAM；Service 根据已启动 Hart 数量把它均分为独立 FIFO，避免多个 Hart 写同一
+write index，也不改变 8-byte 原始事件 ABI。容量可通过
+`npu_profile_options_t.buffer_size` 配置。
+
+每个原始事件由两个 32-bit word 组成：低 32 bit 是 `cycle`，中间 16 bit 是
+proc ID，最高 16 bit 是状态变化后的目标状态，数值与 Device 的 `THREAD_*` 状态一致：
+0/1 分别为 RUNNING/READY，2--7 为各种等待、退出与 kill-wait-produce 状态。START 会先
+写入该 Hart 所有现存 proc 的初始状态（receive、send、profile 以及最多 16 个算子
+proc），之后每次 proc 状态实际变化只写一个事件。因此每 Hart FIFO 至少要容纳完整的
+19 项初始快照，事件数不要求成对。FIFO 写满时，专用 profile 系统 proc 清理 cache 并
+发送 `RPC_PROFILE_FLUSH`；Host response 的 `continue_profile` 决定该 Hart 是否继续记录。
+STOP 会关闭记录、等待正在进行的 flush，并把未满尾批次交给 Host。
+
+Server 只允许一个 Runtime 占用全局 profile。Runtime API 为：
+
+```c
+npu_profile_options_t options;
+npu_profile_t *profile;
+npu_profile_event_t events[NPU_PROFILE_MAX_BATCH_EVENTS];
+npu_profile_batch_info_t batch;
+
+npu_profile_options_init(&options);
+npu_profile_start(runtime, &options, &profile);
+npu_profile_read(profile, events, NPU_PROFILE_MAX_BATCH_EVENTS,
+                 1000, &batch);
+npu_profile_stop(profile);       /* flush 每个 Hart 的尾批次 */
+/* 继续 read，直到 batch.flags 含 NPU_PROFILE_BATCH_END */
+npu_profile_destroy(profile);
+```
+
+`batch.cluster/hart` 只描述观测数据来源，不参与 Runtime 的 kernel 调度接口。
+`host/dyperf` 封装上述流程并生成 Chrome Trace Viewer JSON；每个 Hart 是独立 pid，
+每个 proc ID 是独立 tid，各目标状态被展开为连续的状态区间。
+
 ## 构建与运行
 
 从仓库根目录构建全部内容，或只构建 Host 驱动：
@@ -177,6 +215,7 @@ make -C host/driver
 主要产物位于 `build/host/driver/`：
 
 - `dayan_server`；
+- `dyperf`（由 `make -C host/dyperf` 生成到 `build/host/dyperf/`）；
 - `libDayanRuntime.a`、`libDayanRuntime.so` 和兼容名 `libnpu_runtime.a`；
 - `libDayanHal.a`、`libDayanService.a`。
 
@@ -235,4 +274,4 @@ NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 可用 `RVTNG_CMODEL_DIR`、`RVTNG_QEMU`、`NPU_DEVICE_PREFIX` 和
 `NPU_CMODEL_HARTS=1..4` 覆盖。4-core smoke 同时验证 BL0/BL1 启动、API ELF 动态
 重定位、socket/token H2D/D2H、`kSingleCore` grid、`kFourCore` Cluster grid，以及
-`kFourCore` 对 `task_dim.x == 4` 的约束。
+`kFourCore` 对 `task_dim.x == 4` 的约束，以及 profile 满缓冲/尾批次的端到端传输。

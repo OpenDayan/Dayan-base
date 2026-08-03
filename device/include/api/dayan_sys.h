@@ -32,7 +32,10 @@ typedef void (*dayan_proc_entry_t)(void *argument);
 
 /* Zero-initialized storage in the allocation rooted at shared. */
 typedef struct dayan_cluster_barrier {
-    uint64_t state;
+    uint32_t lock;
+    uint32_t count;
+    uint32_t generation;
+    uint32_t reserved;
 } dayan_cluster_barrier_t;
 
 enum dayan_resource_state {

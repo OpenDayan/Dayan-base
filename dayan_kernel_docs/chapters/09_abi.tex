@@ -60,7 +60,12 @@ bootstrap 入口为 \code{proc_bootstrap + (8 - argc) * 4}，只执行所需的�
 字段布局属于 ABI；resource 状态只能通过 DAPI 修改。
 
 每个 Hart 的算子 proc ABI 上限为 16 个 slot，root 占一个，因此
-\code{DAYAN\_KERNEL\_MAX\_CHILD\_PROCS} 为 15。init 和 RPC proc 不从该池分配。
+\code{DAYAN\_KERNEL\_MAX\_CHILD\_PROCS} 为 15。init、RPC 与 profile proc 不从该池分配。
+
+proc profile event 固定为 8 bytes：\code{cycle} 位于 offset 0，16-bit event ID 位于
+offset 4，16-bit 目标 proc 状态位于 offset 6。Host 与 Device 当前均为 little-endian；
+把事件视为 64-bit 数值时，cycle 位于最低 32 bit，状态位于最高 16 bit。profile v2 的
+状态编码与 \code{THREAD_RUNNING--THREAD_KILL_WAIT_PRODUCE} 的 0--7 一致。
 
 \subsection{目标文件与符号解析}
 

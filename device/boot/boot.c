@@ -5,6 +5,7 @@
 #include "config.h"
 #include "mem.h"
 #include "platform.h"
+#include "profile.h"
 #include "rpc.h"
 #include "sche.h"
 
@@ -20,5 +21,7 @@ void init(void)
     if (mem_init(heap, CONFIG_HEAP_SIZE) < 0)
         platform_halt();
     if (rpc_init() < 0)
+        platform_halt();
+    if (profile_init() < 0)
         platform_halt();
 }

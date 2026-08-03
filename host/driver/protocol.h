@@ -7,7 +7,7 @@
 #include "hal/dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
-#define NPU_IPC_VERSION           4U
+#define NPU_IPC_VERSION           6U
 #define NPU_IPC_HEADER_SIZE       40U
 #define NPU_IPC_MAX_PAYLOAD       (64U * 1024U * 1024U)
 #define NPU_IPC_RESPONSE          (1U << 0)
@@ -16,10 +16,13 @@
 #define NPU_IPC_ROLE_DATA         2U
 #define NPU_IPC_CAP_DIRECT_TRANSFER (1U << 0)
 #define NPU_IPC_CAP_DEVICE_OUTPUT   (1U << 1)
+#define NPU_IPC_CAP_PROFILE         (1U << 2)
 
 #define NPU_IPC_OUTPUT_CLEAR        (1U << 0)
 #define NPU_IPC_OUTPUT_CONTINUED    (1U << 1)
 #define NPU_IPC_OUTPUT_CHUNK_SIZE   4096U
+#define NPU_IPC_PROFILE_CHUNK_EVENTS 4096U
+#define NPU_IPC_PROFILE_END          (1U << 0)
 
 typedef enum npu_ipc_opcode {
     NPU_IPC_HELLO = 1,
@@ -45,6 +48,10 @@ typedef enum npu_ipc_opcode {
     NPU_IPC_EVENT_WAIT,
     NPU_IPC_EVENT_DESTROY,
     NPU_IPC_OUTPUT_READ = 0x0700,
+    NPU_IPC_PROFILE_START = 0x0800,
+    NPU_IPC_PROFILE_STOP,
+    NPU_IPC_PROFILE_READ,
+    NPU_IPC_PROFILE_DESTROY,
 } npu_ipc_opcode_t;
 
 typedef struct npu_ipc_header {
@@ -203,6 +210,30 @@ typedef struct npu_ipc_output {
     uint32_t reserved;
 } npu_ipc_output_t;
 
+typedef struct npu_ipc_profile_start {
+    uint64_t buffer_size;
+    uint32_t flags;
+    uint32_t reserved;
+} npu_ipc_profile_start_t;
+
+typedef struct npu_ipc_profile_read {
+    uint32_t max_events;
+    uint32_t timeout_ms;
+} npu_ipc_profile_read_t;
+
+typedef struct npu_ipc_profile_batch {
+    uint32_t cluster;
+    uint32_t hart;
+    uint32_t count;
+    uint32_t flags;
+} npu_ipc_profile_batch_t;
+
+typedef struct npu_ipc_profile_event {
+    uint32_t cycle;
+    uint16_t event_id;
+    uint16_t state;
+} npu_ipc_profile_event_t;
+
 #ifdef __cplusplus
 static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
               "Dayan socket header ABI");
@@ -214,6 +245,14 @@ static_assert(sizeof(npu_ipc_output_t) == 24,
               "Dayan Device output header ABI");
 static_assert(sizeof(npu_ipc_kernel_info_t) == 56,
               "Dayan kernel info IPC ABI");
+static_assert(sizeof(npu_ipc_profile_start_t) == 16,
+              "Dayan profile start IPC ABI");
+static_assert(sizeof(npu_ipc_profile_batch_t) == 16,
+              "Dayan profile batch IPC ABI");
+static_assert(sizeof(npu_ipc_profile_event_t) == 8,
+              "Dayan profile event IPC ABI");
+static_assert(offsetof(npu_ipc_profile_event_t, state) == 6,
+              "Dayan profile state IPC offset");
 #else
 _Static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
                "Dayan socket header ABI");
@@ -225,6 +264,14 @@ _Static_assert(sizeof(npu_ipc_output_t) == 24,
                "Dayan Device output header ABI");
 _Static_assert(sizeof(npu_ipc_kernel_info_t) == 56,
                "Dayan kernel info IPC ABI");
+_Static_assert(sizeof(npu_ipc_profile_start_t) == 16,
+               "Dayan profile start IPC ABI");
+_Static_assert(sizeof(npu_ipc_profile_batch_t) == 16,
+               "Dayan profile batch IPC ABI");
+_Static_assert(sizeof(npu_ipc_profile_event_t) == 8,
+               "Dayan profile event IPC ABI");
+_Static_assert(offsetof(npu_ipc_profile_event_t, state) == 6,
+               "Dayan profile state IPC offset");
 #endif
 
 void npu_ipc_header_init(npu_ipc_header_t *header, uint16_t opcode,

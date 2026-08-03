@@ -16,7 +16,7 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
    thread，清零该区，将 `gp/shared` 置空，配置独立 trap 栈与 `mtvec`，屏蔽功能
    中断并初始化浮点状态。
 3. `device/boot/boot.c:init()` 初始化平台、调度器、该 hart 的链接期初始堆，以及 RPC
-   收发 proc。
+   收发 proc 和 profile proc。
 4. BL1 调用 `device/sche/sche.c:scheduler()`，此后不再返回。
 
 默认构建假设四个 hart 运行四份相互独立的 OS 状态：
@@ -27,6 +27,7 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
 | CPU-local | 4 KiB / hart | 每核 scheduler、allocator、RPC、trap 状态与 init thread |
 | init 栈 | 64 KiB / hart | BL1、初始化和 scheduler 的每核栈 |
 | RPC 栈 | 4 KiB × 2 / hart | RPC receive proc 和 send proc 的私有栈 |
+| profile 栈 | 4 KiB / hart | proc profile 满缓冲上报 proc 的私有栈 |
 | trap 栈 | 4 KiB / hart | 同步异常入口使用的独立栈 |
 | 初始堆 | 1 MiB / hart | 红黑树分配器的第一个 region |
 | Host coherent window | `0x00400000`, 4 MiB | Host 按 proc 动态切分，基址由 `gp/shared` 访问 |
@@ -49,8 +50,9 @@ TP-relative/TLS relocation，链接脚本也会拒绝 `.tdata` 和 `.tbss`。
 thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始，其余值
 表示不同等待原因。`thread_init()` 构造期间短暂使用 `THREAD_WAIT_START`；proc 初始化
 完成后直接进入 `THREAD_READY`，运行期使用 `THREAD_WAIT_POLL`、
-`THREAD_WAIT_EVENT` 和 `THREAD_WAIT_EXIT`。CPU 私有结构聚合 scheduler、allocator、
-RPC 和 trap 状态；hart ID 由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
+`THREAD_WAIT_EVENT`、`THREAD_WAIT_PRODUCE`、`THREAD_KILL_WAIT_PRODUCE` 和
+`THREAD_WAIT_EXIT`。CPU 私有结构聚合 scheduler、allocator、RPC 和 trap 状态；hart ID
+由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
 
 普通 `.data`/`.bss` 会被链接脚本拒绝，以免不一致缓存下多个 hart 意外共享
 可变状态。每核状态应放入 `struct cpu`。固件侧同样拒绝 `.coherent` section；跨核
@@ -110,6 +112,7 @@ make install PREFIX=/usr DESTDIR="$PWD/package-root"
 | 内容 | 默认路径 |
 | --- | --- |
 | `dycc` driver | `/usr/local/bin/dycc` |
+| `dyperf` profiler | `/usr/local/bin/dyperf` |
 | Host 公共头文件 | `/usr/local/include/{dayan_*,npu_*}.h` |
 | Host runtime 静态/动态库 | `/usr/local/lib/libDayanRuntime.{a,so}` |
 | `pkg-config` 元数据 | `/usr/local/lib/pkgconfig/dayan-runtime.pc` |
@@ -153,6 +156,23 @@ socket 提交 package 与 logical task，不接触固件符号表或物理拓扑
 - `host/driver/server/`：BL1/RPC Service、socket daemon 与 logical grid scheduler；
 - `host/driver/runtime/`：不暴露物理拓扑的应用对象接口；
 - `build/host/driver/`：`dayan_server`、Dayan Runtime/HAL/Service 库。
+
+### dyperf proc profile
+
+`host/dyperf` 通过 Runtime 开启 Device proc 状态 trace，并输出 Chrome Trace Viewer
+JSON。默认申请一个 16 MiB 的全局 profile allocation，Service 按已启动 Hart 切成互不
+覆盖的 FIFO；原始事件保持 8 bytes，不在事件中附加物理拓扑。采集时 Cluster/Hart 只在
+Runtime 的批次头中返回，用来为每个 Hart 建立独立时间线：
+
+```sh
+make dyperf
+build/host/dyperf/dyperf --duration-ms 1000 -o trace.json
+```
+
+每个 Hart 映射为 Trace Viewer 的独立 pid，每个 Device proc ID 映射为 tid；时间线直接
+展示 RUNNING、READY 和各种等待/退出状态区间。profile 启动时先记录所有现存 proc 的
+初始状态，随后每次状态变化写入目标状态。
+详细选项见 [`host/dyperf/README.md`](host/dyperf/README.md)。
 
 ### Kernel demos
 
@@ -234,7 +254,7 @@ Device 发送前后都轮询 `IRQ_STATUS` (`0x2000`) 中自己的 bit，只有 H
 (`0x2010`) 使能对应的 Host IRQ 输出。上述 doorbell 只用于握手，不会触发 NPU 上的
 抢占：BL1 将 `mie` 清零并清除 `mstatus.MIE`。
 
-每个 hart 有两个内核 proc。receive proc 以 `proc_wait_poll()` 等待本核 `msip`，读取
+每个 hart 有三个内核 proc。receive proc 以 `proc_wait_poll()` 等待本核 `msip`，读取
 Host 命令，调用弱的 `rpc_receive(opcode, arg, &response)` 分派接口，并在需要回复时
 把响应加入发送队列，最后清除 `msip`。send proc 独占本核发送队列；队列为空时使用
 `proc_wait_event()`，有事务时写 Device → Host mailbox，等待 Host 清除状态位，再执行
@@ -246,8 +266,8 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
-有符号 status。当前 opcode 1–6 分别为字符串输出、清空输出缓冲、申请堆 region、
-归还堆 region、异常报告和 root proc 退出通知。除异常报告外均使用 packet；异常报告的低 48 位参数直接指向一份
+有符号 status。当前 opcode 1–7 分别为字符串输出、清空输出缓冲、申请堆 region、
+归还堆 region、异常报告、root proc 退出通知和 profile 满缓冲上报。除异常报告外均使用 packet；异常报告的低 48 位参数直接指向一份
 稳定的 320-byte `struct trap_record`。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
@@ -265,8 +285,9 @@ scheduler 在自己的栈上调用 cleanup，把描述符从 `RUNNING` 更新为
 `FAILED`。因此 Host 必须保留描述符直到终态，不能只把 create response 当作执行完成。
 
 Host 管理目标 Hart 使用 `RPC_PROC_PS` (`0x0102`) 和 `RPC_PROC_KILL_ALL` (`0x0103`)，
-响应分别为 `0x8102`、`0x8103`。PS 固定返回两个系统 RPC proc 和至多 16 个算子 proc
-的状态、父 ID、直属子计数、logical task、返回值与 cookie。kill-all 保留 init/RPC
+响应分别为 `0x8102`、`0x8103`。PS 固定返回三个系统 proc（RPC receive/send 与
+profile）和至多 16 个算子 proc
+的状态、父 ID、直属子计数、logical task、返回值与 cookie。kill-all 保留 init/RPC/profile
 proc，摘除其它 proc 的 ready/poll/event/system-wait 节点；非 Produce slot 立即释放，
 等待 Produce 的 slot 进入 `THREAD_KILL_WAIT_PRODUCE`，收到硬件 token 后才释放。
 
@@ -320,8 +341,8 @@ scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队
 `proc_wake()` 将等待者移回 ready queue。传入空指针会使用 scheduler 的默认外部事件
 链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。普通 proc 仍由
 所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留 `1 + max_children`
-个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init 和两个 RPC
-proc 不计入，因此单个 kernel 最多声明 15 个子 proc。
+个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init、两个 RPC
+proc 和 profile proc 不计入，因此单个 kernel 最多声明 15 个子 proc。
 `dayan_create_proc()` 创建的子 proc 保持在同一 hart，继承 logical task、`gp/shared`
 与 URAM，并返回正的 proc ID。`dayan_join(id, &result)` 精确等待直属子 proc，
 `dayan_join_all()` 等待全部直属子 proc；每个 proc 退出前都会隐式 join-all，因此 root

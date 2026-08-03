@@ -29,6 +29,7 @@ struct server_command;
 struct server_launch_group;
 struct server_invocation;
 struct server_output;
+struct server_profile_chunk;
 
 enum server_command_kind {
     SERVER_COMMAND_EVENT = 1,
@@ -138,6 +139,15 @@ struct server_output {
     unsigned char data[];
 };
 
+struct server_profile_chunk {
+    struct server_profile_chunk *next;
+    size_t count;
+    size_t offset;
+    uint32_t cluster;
+    uint32_t hart;
+    npu_ipc_profile_event_t events[];
+};
+
 struct server_launch_group {
     npu_hal_allocation_t *shared_allocation;
     uint32_t expected;
@@ -245,10 +255,19 @@ struct dayan_server {
     struct server_package_cache *packages;
     npu_service_trap_fn service_trap;
     npu_service_proc_exit_fn service_proc_exit;
+    npu_service_profile_fn service_profile;
     void *service_callback_context;
     size_t pending_output_bytes;
     struct server_output *pending_outputs;
     struct server_output *pending_output_tail;
+    struct server_session *profile_owner;
+    uint64_t profile_id;
+    uint32_t profile_active;
+    uint32_t profile_stopping;
+    uint32_t profile_stopped;
+    size_t profile_bytes;
+    struct server_profile_chunk *profile_head;
+    struct server_profile_chunk *profile_tail;
 };
 
 int server_enqueue_locked(dayan_server_t *server,

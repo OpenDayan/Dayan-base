@@ -10,16 +10,16 @@ BUILD := $(ROOT)/build/host/driver
 CFLAGS ?= -O2 -g -std=c11 -Wall -Wextra -Werror -fPIC
 CXXFLAGS ?= -O2 -g -std=c++17 -Wall -Wextra -Werror -fPIC
 CPPFLAGS += -I$(ROOT)/host/include -I. -Ihal -Iserver -Iruntime \
-	-idirafter $(ROOT)/device/include
+	-iquote $(ROOT)/device/include
 
 PROTOCOL_SOURCE := protocol.c
 HAL_CONTROL_SOURCES := hal/hal.c hal/memory.c hal/fuse.c
 HAL_CLIENT_SOURCES := hal/client.c hal/fuse_client.c
 SERVICE_SOURCES := server/device.c server/elf.c server/rpc.c \
-	server/kernel.c server/package.c
+	server/kernel.c server/package.c server/profile.c
 SERVER_SOURCES := server/scheduler.c server/server.c
 RUNTIME_SOURCES := runtime/client.c runtime/objects.c runtime/transfer.c \
-	runtime/kernel.c runtime/dayan_kernel.c runtime/package.c
+	runtime/kernel.c runtime/dayan_kernel.c runtime/package.c runtime/profile.c
 
 PROTOCOL_OBJECT := $(BUILD)/protocol.o
 HAL_CONTROL_OBJECTS := $(patsubst %.c,$(BUILD)/%.o,$(HAL_CONTROL_SOURCES))

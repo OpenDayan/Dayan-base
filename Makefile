@@ -10,9 +10,10 @@ DAYAN_SDKDIR ?= $(LIBDIR)/dayan
 DAYAN_FIRMWAREDIR ?= $(DAYAN_SDKDIR)/firmware
 
 .PHONY: all clean check install device device-check docs docs-check \
-	host-driver host-driver-check dycc dycc-check demo demo-check
+	host-driver host-driver-check dycc dycc-check dyperf dyperf-check \
+	demo demo-check
 
-all: device host-driver dycc
+all: device host-driver dycc dyperf
 
 device:
 	$(MAKE) -C device all
@@ -32,6 +33,12 @@ dycc:
 dycc-check:
 	$(MAKE) -C host/dycc check
 
+dyperf: host-driver
+	$(MAKE) -C host/dyperf all
+
+dyperf-check: host-driver-check
+	$(MAKE) -C host/dyperf check
+
 demo:
 	$(MAKE) -C demo all
 
@@ -44,7 +51,7 @@ docs:
 docs-check:
 	$(MAKE) -C dayan_kernel_docs check
 
-check: device-check host-driver-check dycc-check
+check: device-check host-driver-check dycc-check dyperf-check
 
 install: all
 	PREFIX="$(PREFIX)" DESTDIR="$(DESTDIR)" BINDIR="$(BINDIR)" \

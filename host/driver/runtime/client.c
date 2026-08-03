@@ -255,6 +255,69 @@ int runtime_control_call(npu_runtime_t *runtime, uint16_t opcode,
     return status == 0 && output_status < 0 ? output_status : status;
 }
 
+int runtime_control_call_variable(npu_runtime_t *runtime, uint16_t opcode,
+                                  uint64_t object_id, const void *request,
+                                  size_t request_size, void **response_out,
+                                  size_t *response_size_out)
+{
+    int handles[NPU_HAL_DATA_MAX_HANDLES];
+    npu_ipc_header_t request_header;
+    npu_ipc_header_t response_header;
+    uint64_t request_id;
+    size_t handle_count = 0;
+    void *payload = 0;
+    int status;
+
+    if (!runtime || runtime->control_fd < 0 || !response_out ||
+        !response_size_out || request_size > UINT32_MAX ||
+        (request_size && !request))
+        return -EINVAL;
+    *response_out = 0;
+    *response_size_out = 0;
+    pthread_mutex_lock(&runtime->control_mutex);
+    request_id = __atomic_add_fetch(&runtime->next_request_id, 1,
+                                    __ATOMIC_RELAXED);
+    if (!request_id) {
+        status = -EOVERFLOW;
+        goto out;
+    }
+    npu_ipc_header_init(&request_header, opcode, request_id, object_id,
+                        (uint32_t)request_size);
+    status = npu_ipc_send(runtime->control_fd, &request_header, request,
+                          0, 0);
+    if (status < 0)
+        goto out;
+    status = npu_ipc_receive(runtime->control_fd, &response_header, &payload,
+                             handles, &handle_count);
+    if (status < 0)
+        goto out;
+    if (handle_count || response_header.opcode != opcode ||
+        response_header.flags != NPU_IPC_RESPONSE ||
+        response_header.request_id != request_id) {
+        status = -EPROTO;
+        goto out;
+    }
+    if (response_header.status < 0) {
+        status = response_header.payload_size ? -EPROTO :
+                                                response_header.status;
+        goto out;
+    }
+    if (response_header.status) {
+        status = -EPROTO;
+        goto out;
+    }
+    *response_out = payload;
+    *response_size_out = response_header.payload_size;
+    payload = 0;
+    status = 0;
+
+out:
+    close_handles(handles, handle_count);
+    free(payload);
+    pthread_mutex_unlock(&runtime->control_mutex);
+    return status;
+}
+
 int runtime_data_call(npu_runtime_t *runtime, uint16_t opcode,
                       uint64_t object_id, const void *request,
                       size_t request_size, void *response,
@@ -314,8 +377,10 @@ static int hello(int fd, npu_runtime_t *runtime, uint32_t role,
         (session_id && hello_out->session_id != session_id) ||
         hello_out->service_version != NPU_IPC_VERSION ||
         (hello_out->capabilities & (NPU_IPC_CAP_DIRECT_TRANSFER |
-                                    NPU_IPC_CAP_DEVICE_OUTPUT)) !=
-            (NPU_IPC_CAP_DIRECT_TRANSFER | NPU_IPC_CAP_DEVICE_OUTPUT)) {
+                                    NPU_IPC_CAP_DEVICE_OUTPUT |
+                                    NPU_IPC_CAP_PROFILE)) !=
+            (NPU_IPC_CAP_DIRECT_TRANSFER | NPU_IPC_CAP_DEVICE_OUTPUT |
+             NPU_IPC_CAP_PROFILE)) {
         status = -EPROTO;
         goto fail;
     }

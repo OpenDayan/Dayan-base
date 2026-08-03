@@ -179,6 +179,18 @@ int main(void)
     runtime_options.output = capture_output;
     runtime_options.output_context = &output_capture;
     assert(npu_runtime_open(&runtime, &runtime_options) == 0);
+    {
+        npu_profile_options_t profile_options;
+        npu_profile_t *profile = 0;
+
+        npu_profile_options_init(&profile_options);
+        assert(profile_options.version == NPU_PROFILE_OPTIONS_VERSION);
+        assert(profile_options.buffer_size ==
+               NPU_PROFILE_DEFAULT_BUFFER_SIZE);
+        assert(npu_profile_start(runtime, &profile_options, &profile) ==
+               -ENODEV);
+        assert(!profile);
+    }
     assert(npu_context_create(runtime, 0, &context) == 0);
     {
         npu_buffer_desc_t desc;

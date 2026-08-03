@@ -222,6 +222,12 @@ int npu_runtime_close(npu_runtime_t *runtime)
     }
     runtime->closing = 1;
     pthread_mutex_unlock(&runtime->mutex);
+    {
+        int status = runtime_profile_close_all(runtime);
+
+        if (status < 0)
+            first_status = status;
+    }
     for (;;) {
         struct npu_context *context;
         int status;

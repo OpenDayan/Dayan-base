@@ -10,12 +10,13 @@
 extern "C" {
 #endif
 
-#define NPU_SERVICE_OPTIONS_VERSION 4U
+#define NPU_SERVICE_OPTIONS_VERSION 5U
 #define NPU_SERVICE_LAUNCH_DESC_VERSION 3U
 #define NPU_SERVICE_TIMEOUT_INFINITE UINT32_MAX
 #define NPU_SERVICE_LAUNCH_MAX_ARGS 8U
 #define NPU_SERVICE_OUTPUT_CLEAR (1U << 0)
-#define NPU_SERVICE_PROC_MAX_RECORDS 18U
+#define NPU_SERVICE_PROC_MAX_RECORDS 19U
+#define NPU_SERVICE_PROFILE_DEFAULT_BUFFER_SIZE (16U * 1024U * 1024U)
 
 #define NPU_SERVICE_PROC_SYSTEM            (1U << 0)
 #define NPU_SERVICE_PROC_HOST_ROOT         (1U << 1)
@@ -45,6 +46,28 @@ typedef void (*npu_service_proc_exit_fn)(void *context, uint32_t cluster,
                                          uint32_t core, uint32_t proc,
                                          int64_t result, uint64_t cookie);
 
+typedef struct npu_service_profile_event {
+    uint32_t cycle;
+    uint16_t event_id;
+    uint16_t state;
+} npu_service_profile_event_t;
+
+#ifdef __cplusplus
+static_assert(sizeof(npu_service_profile_event_t) == 8,
+              "Service profile event ABI");
+static_assert(offsetof(npu_service_profile_event_t, state) == 6,
+              "Service profile state offset");
+#else
+_Static_assert(sizeof(npu_service_profile_event_t) == 8,
+               "Service profile event ABI");
+_Static_assert(offsetof(npu_service_profile_event_t, state) == 6,
+               "Service profile state offset");
+#endif
+
+typedef int (*npu_service_profile_fn)(
+    void *context, uint32_t cluster, uint32_t core,
+    const npu_service_profile_event_t *events, size_t count);
+
 typedef struct npu_service_options {
     uint32_t version;
     uint32_t rpc_poll_interval_us;
@@ -53,6 +76,7 @@ typedef struct npu_service_options {
     npu_service_output_fn output;
     npu_service_trap_fn trap;
     npu_service_proc_exit_fn proc_exit;
+    npu_service_profile_fn profile;
     void *callback_context;
 } npu_service_options_t;
 
@@ -166,6 +190,11 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
 int npu_service_rpc_kill_all(npu_service_device_t *device,
                              npu_hal_core_t target,
                              npu_service_kill_result_t *result);
+
+/* One global allocation is partitioned into one FIFO per booted Hart. */
+int npu_service_profile_start(npu_service_device_t *device,
+                              uint64_t buffer_size);
+int npu_service_profile_stop(npu_service_device_t *device);
 
 const npu_service_options_t *npu_service_get_options(
     const npu_service_device_t *device);

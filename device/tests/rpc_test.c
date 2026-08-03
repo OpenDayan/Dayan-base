@@ -19,8 +19,12 @@ int main(void)
     assert(sizeof(struct rpc_proc_exit_request) == 40);
     assert(sizeof(struct rpc_proc_create_request) == 208);
     assert(sizeof(struct rpc_proc_info) == 80);
-    assert(sizeof(struct rpc_proc_ps_snapshot) == 1488);
+    assert(sizeof(struct rpc_proc_ps_snapshot) == 1568);
     assert(sizeof(struct rpc_proc_kill_result) == 48);
+    assert(sizeof(struct rpc_profile_event) == 8);
+    assert(sizeof(struct rpc_profile_config) == 64);
+    assert(sizeof(struct rpc_profile_flush_request) == 40);
+    assert(sizeof(struct rpc_profile_flush_response) == 32);
     assert(offsetof(struct rpc_proc_create_request, args) == 64);
     assert(offsetof(struct rpc_proc_create_request, status) == 128);
     assert(offsetof(struct rpc_proc_create_request, task_id) == 152);
@@ -39,6 +43,14 @@ int main(void)
     assert(RPC_PROC_KILL_ALL == 0x0103);
     assert(RPC_PROC_KILL_ALL_RESPONSE ==
            (RPC_PROC_KILL_ALL | 0x8000));
+    assert(RPC_PROFILE_FLUSH == 7);
+    assert(RPC_PROFILE_CONFIG == 0x0104);
+    assert(RPC_PROFILE_CONFIG_RESPONSE ==
+           (RPC_PROFILE_CONFIG | 0x8000));
+    assert(RPC_PROFILE_VERSION == 2U);
+    assert(RPC_PROFILE_PROC_RUNNING == 0U);
+    assert(RPC_PROFILE_PROC_KILL_WAIT_PRODUCE == 7U);
+    assert(RPC_PROC_PS_VERSION == 2U);
     assert(sizeof(struct trap_record) == 320);
     assert(DAYAN_DEVICE_MAILBOX(3) == 0x1018U);
     assert(DAYAN_IRQ_MAILBOX(3) == 0x2038U);

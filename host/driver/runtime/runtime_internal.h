@@ -35,6 +35,7 @@ struct npu_runtime {
     struct runtime_transfer_job *job_head;
     struct runtime_transfer_job *job_tail;
     struct npu_context *contexts;
+    struct npu_profile *profiles;
 };
 
 struct npu_context {
@@ -94,6 +95,15 @@ struct runtime_transfer_job {
     struct runtime_transfer_job *next;
 };
 
+struct npu_profile {
+    npu_runtime_t *runtime;
+    uint64_t id;
+    uint32_t stopped;
+    uint32_t stopping;
+    uint32_t destroying;
+    struct npu_profile *next;
+};
+
 int runtime_control_call(npu_runtime_t *runtime, uint16_t opcode,
                          uint64_t object_id, const void *request,
                          size_t request_size, void *response,
@@ -103,6 +113,10 @@ int runtime_data_call(npu_runtime_t *runtime, uint16_t opcode,
                       uint64_t object_id, const void *request,
                       size_t request_size, void *response,
                       size_t expected_response_size);
+int runtime_control_call_variable(npu_runtime_t *runtime, uint16_t opcode,
+                                  uint64_t object_id, const void *request,
+                                  size_t request_size, void **response_out,
+                                  size_t *response_size_out);
 int runtime_event_adopt(struct npu_context *context, uint64_t id,
                         struct npu_event *event,
                         struct npu_event **event_out);
@@ -112,5 +126,6 @@ void *runtime_data_worker(void *argument);
 int runtime_context_valid(const struct npu_context *context);
 int runtime_stream_valid(const struct npu_stream *stream);
 void runtime_kernel_descriptors_forget_context(struct npu_context *context);
+int runtime_profile_close_all(npu_runtime_t *runtime);
 
 #endif

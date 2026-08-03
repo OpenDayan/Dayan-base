@@ -10,7 +10,7 @@ _Static_assert(sizeof(dayan_resource_t) == 64,
                "dayan resource ABI must stay fixed");
 _Static_assert(sizeof(dayan_shared_resource_t) == 16,
                "dayan shared resource ABI must stay fixed");
-_Static_assert(sizeof(dayan_cluster_barrier_t) == 8,
+_Static_assert(sizeof(dayan_cluster_barrier_t) == 16,
                "dayan cluster barrier ABI must stay fixed");
 _Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
                "dayan kernel resource descriptor ABI must stay fixed");
@@ -173,11 +173,23 @@ struct barrier_wait {
 static int barrier_advanced(struct proc *proc, void *arg)
 {
     const struct barrier_wait *wait = arg;
-    uint64_t state;
 
     (void)proc;
-    state = __atomic_load_n(&wait->barrier->state, __ATOMIC_ACQUIRE);
-    return (uint32_t)(state >> 32) != wait->generation;
+    return __atomic_load_n(&wait->barrier->generation,
+                           __ATOMIC_ACQUIRE) != wait->generation;
+}
+
+static void barrier_lock(dayan_cluster_barrier_t *barrier)
+{
+    while (__atomic_exchange_n(&barrier->lock, 1U, __ATOMIC_ACQUIRE)) {
+        while (__atomic_load_n(&barrier->lock, __ATOMIC_RELAXED))
+            proc_yield();
+    }
+}
+
+static void barrier_unlock(dayan_cluster_barrier_t *barrier)
+{
+    __atomic_store_n(&barrier->lock, 0U, __ATOMIC_RELEASE);
 }
 
 int dayan_cluster_barrier(uint32_t participants,
@@ -185,32 +197,30 @@ int dayan_cluster_barrier(uint32_t participants,
 {
     struct proc *proc = proc_self();
     struct barrier_wait wait;
-    uint64_t observed;
-    uint64_t desired;
     uint32_t count;
 
     if (!proc || participants != 4U || proc->task_mode != 4U ||
         !shared_range_valid(barrier, sizeof(*barrier),
                             _Alignof(dayan_cluster_barrier_t)))
         return -EINVAL;
-    observed = __atomic_load_n(&barrier->state, __ATOMIC_ACQUIRE);
-    for (;;) {
-        count = (uint32_t)observed;
-        if (count >= participants)
-            return -EBUSY;
-        desired = observed + 1U;
-        if (__atomic_compare_exchange_n(&barrier->state, &observed, desired,
-                                        0, __ATOMIC_ACQ_REL,
-                                        __ATOMIC_ACQUIRE))
-            break;
+    /* LR/SC is unsupported; serialize the state update with AXI AMOSWAP. */
+    barrier_lock(barrier);
+    count = barrier->count;
+    if (count >= participants) {
+        barrier_unlock(barrier);
+        return -EBUSY;
     }
     wait.barrier = barrier;
-    wait.generation = (uint32_t)(observed >> 32);
+    wait.generation = barrier->generation;
+    barrier->count = count + 1U;
     if (count + 1U == participants) {
-        desired = (uint64_t)(wait.generation + 1U) << 32;
-        __atomic_store_n(&barrier->state, desired, __ATOMIC_RELEASE);
+        barrier->count = 0;
+        __atomic_store_n(&barrier->generation, wait.generation + 1U,
+                         __ATOMIC_RELEASE);
+        barrier_unlock(barrier);
         return 0;
     }
+    barrier_unlock(barrier);
     while (!barrier_advanced(proc, &wait)) {
         int status = proc_wait_poll(barrier_advanced, &wait);
 

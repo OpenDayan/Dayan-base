@@ -17,6 +17,7 @@ readelf=${READELF:-llvm-readelf}
 harts=${HARTS:-4}
 stack_size=${STACK_SIZE:-0x10000}
 rpc_stack_size=${RPC_STACK_SIZE:-0x1000}
+profile_stack_size=${PROFILE_STACK_SIZE:-0x1000}
 trap_stack_size=${TRAP_STACK_SIZE:-0x1000}
 proc_slot_count=${PROC_SLOT_COUNT:-16}
 proc_stack_size=${PROC_STACK_SIZE:-0x10000}
@@ -43,6 +44,11 @@ relocation_objects=("${objects[@]}" "$api_compile" "$api_cxx_compile")
 
 undefined=$($nm --undefined-only "$elf")
 [ -z "$undefined" ] || fail "firmware contains undefined symbols: $undefined"
+firmware_dump=$($objdump --disassemble --no-show-raw-insn "$elf")
+if grep -Eq '(^|[[:space:]])(lr\.[wd]|sc\.[wd])([.[:space:]]|$)' \
+        <<<"$firmware_dump"; then
+    fail "firmware must not use unsupported LR/SC instructions"
+fi
 
 if $readelf --relocations "${relocation_objects[@]}" | \
         grep -q 'R_RISCV_GPREL'; then
@@ -96,8 +102,8 @@ grep -Eq 'frcsr[[:space:]]+t0' <<<"$trap_dump" ||
     fail "trap entry does not save fcsr"
 
 stack_sections=$($readelf --sections --wide "$elf" | \
-    grep -Ec '\.(stack|rpc_stack|trap_stack|proc_stack)[[:space:]]+NOBITS')
-[ "$stack_sections" -eq 4 ] ||
+    grep -Ec '\.(stack|rpc_stack|profile_stack|trap_stack|proc_stack)[[:space:]]+NOBITS')
+[ "$stack_sections" -eq 5 ] ||
     fail "per-hart stacks must be NOBITS sections"
 for section in proc_slots proc_printf; do
     $readelf --sections --wide "$elf" | \
@@ -115,6 +121,8 @@ stack_start=$(symbol_address __stack_start)
 stack_end=$(symbol_address __stack_end)
 rpc_start=$(symbol_address __rpc_stack_start)
 rpc_end=$(symbol_address __rpc_stack_end)
+profile_start=$(symbol_address __profile_stack_start)
+profile_end=$(symbol_address __profile_stack_end)
 trap_start=$(symbol_address __trap_stack_start)
 trap_end=$(symbol_address __trap_stack_end)
 proc_stack_start=$(symbol_address __proc_stack_start)
@@ -123,6 +131,8 @@ proc_printf_start=$(symbol_address __proc_printf_start)
 proc_printf_end=$(symbol_address __proc_printf_end)
 [ $((stack_end - stack_start)) -eq $((harts * stack_size)) ] &&
     [ $((rpc_end - rpc_start)) -eq $((harts * 2 * rpc_stack_size)) ] &&
+    [ $((profile_end - profile_start)) -eq \
+        $((harts * profile_stack_size)) ] &&
     [ $((trap_end - trap_start)) -eq $((harts * trap_stack_size)) ] &&
     [ $((proc_stack_end - proc_stack_start)) -eq \
         $((harts * proc_slot_count * proc_stack_size)) ] &&
@@ -150,6 +160,13 @@ if ! $objdump --no-show-raw-insn \
         --disassemble-symbols="$shared_resource_mutators" \
         "$build/sche/dapi.o" | grep -Fq 'amoswap.w.aq'; then
     fail "shared resource API must use an atomic lock"
+fi
+barrier_dump=$($objdump --no-show-raw-insn \
+    --disassemble-symbols=dayan_cluster_barrier "$build/sche/dapi.o")
+grep -Fq 'amoswap.w.aq' <<<"$barrier_dump" ||
+    fail "cluster barrier must use a coherent atomic lock"
+if grep -Eq '(^|[[:space:]])(lr\.[wd]|sc\.[wd])' <<<"$barrier_dump"; then
+    fail "cluster barrier must not use per-core LR/SC reservations"
 fi
 
 LC_ALL=C sort -u "$api_symbols" > "$build/.api-symbols.expected"

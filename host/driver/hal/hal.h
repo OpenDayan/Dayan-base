@@ -49,6 +49,8 @@ typedef enum npu_hal_memory_usage {
     NPU_HAL_MEMORY_LAUNCH,
     NPU_HAL_MEMORY_SHARED,
     NPU_HAL_MEMORY_KERNEL_URAM,
+    NPU_HAL_MEMORY_PROFILE,
+    NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING,
 } npu_hal_memory_usage_t;
 
 /* A backend may expose multiple regions with different visibility scopes. */

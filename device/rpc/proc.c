@@ -4,6 +4,7 @@
 #include "config.h"
 #include "errno.h"
 #include "platform.h"
+#include "profile.h"
 #include "rpc.h"
 #include "sche.h"
 #include "stdlib.h"
@@ -33,6 +34,13 @@ static int proc_kill_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
            range_inside(address, sizeof(struct rpc_proc_kill_result),
+                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+}
+
+static int profile_config_address_valid(uint64_t address)
+{
+    return !(address & 7U) &&
+           range_inside(address, sizeof(struct rpc_profile_config),
                         CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
 }
 
@@ -207,6 +215,25 @@ static int rpc_proc_kill_all(uint64_t arg, uint64_t *response_command)
     return 1;
 }
 
+static int rpc_profile_config(uint64_t arg, uint64_t *response_command)
+{
+    struct rpc_profile_config *config;
+    int status;
+
+    *response_command = rpc_command_pack(RPC_PROFILE_CONFIG_RESPONSE, arg);
+    if (!profile_config_address_valid(arg))
+        return 1;
+    config = (struct rpc_profile_config *)(uintptr_t)arg;
+    platform_cache_invalidate(config, sizeof(*config));
+    status = profile_configure(config);
+    if (status < 0) {
+        config->hart_id = (uint32_t)platform_hart_id();
+        config->status = status;
+    }
+    platform_cache_clean(config, sizeof(*config));
+    return 1;
+}
+
 int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
 {
     if (!response_command)
@@ -219,5 +246,7 @@ int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
         return rpc_proc_ps(arg, response_command);
     if (opcode == RPC_PROC_KILL_ALL)
         return rpc_proc_kill_all(arg, response_command);
+    if (opcode == RPC_PROFILE_CONFIG)
+        return rpc_profile_config(arg, response_command);
     return -ENOSYS;
 }

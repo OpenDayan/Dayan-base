@@ -47,6 +47,8 @@ struct npu_service_cluster {
     uint32_t firmware_loaded;
     uint32_t booted_cores;
     uint64_t firmware_entry;
+    npu_hal_allocation_t *atomic_cache_backing;
+    uint64_t atomic_cache_backing_address;
 };
 
 struct npu_service_heap_allocation {
@@ -66,6 +68,14 @@ struct npu_service_firmware_allocation {
     struct npu_service_firmware_allocation *next;
 };
 
+struct npu_service_profile_core {
+    npu_hal_core_t target;
+    uint64_t address;
+    uint64_t offset;
+    uint32_t capacity;
+    uint32_t configured;
+};
+
 struct npu_service_device {
     npu_hal_t *hal;
     npu_hal_info_t hal_info;
@@ -78,6 +88,15 @@ struct npu_service_device {
     struct npu_service_cluster *clusters;
     struct npu_service_heap_allocation *heap_allocations;
     struct npu_service_firmware_allocation *firmware_allocations;
+    npu_hal_allocation_t *profile_allocation;
+    struct npu_service_profile_core *profile_cores;
+    size_t profile_core_count;
+    uint64_t profile_buffer_size;
+    uint64_t profile_generation;
+    uint64_t profile_next_generation;
+    uint32_t profile_active;
+    uint32_t profile_transition;
+    uint32_t profile_readers;
     uint32_t worker_started;
     uint32_t worker_stop;
     uint32_t active_launches;
@@ -116,5 +135,9 @@ void npu_service_kernel_state_destroy(npu_service_device_t *device);
 void *npu_rpc_worker(void *arg);
 int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
                      uint64_t command);
+int npu_service_profile_copy(npu_service_device_t *device,
+                             npu_hal_core_t target, uint64_t generation,
+                             uint64_t address, uint32_t capacity,
+                             uint32_t count, int *continue_out);
 
 #endif

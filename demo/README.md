@@ -1,7 +1,7 @@
 # Dayan kernel demos
 
-该目录放置最小、可独立构建的 Dayan kernel 示例。目前包含 Device `printf` 和
-单 Core BF16 矩阵乘两个例子。
+该目录放置最小、可独立构建的 Dayan kernel 示例。目前包含 Device `printf`、
+单 Core BF16 矩阵乘和四 Core 协作 BF16 矩阵乘。
 
 ## 目录
 
@@ -10,7 +10,9 @@ demo/
 ├── Makefile
 ├── device_include/cstdint       # freestanding Device 指令头兼容层
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
+├── matmul_bf16_4c.cpp           # 2x2 Cluster 协作与跨 Core A/B 广播
 ├── run_matmul_cmodel.sh
+├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
 └── print_demo.cpp   # __kernel__ Device 实现与 Runtime Host launcher
 ```
@@ -25,7 +27,8 @@ Core。
 make -C demo
 ```
 
-产物为 `build/demo/print_demo` 和 `build/demo/matmul_bf16_1c`。矩阵指令定义来自相邻的
+产物为 `build/demo/print_demo`、`build/demo/matmul_bf16_1c` 和
+`build/demo/matmul_bf16_4c`。矩阵指令定义来自相邻的
 `npu-kernels` 仓库，默认路径是 `../npu-kernels`，也可显式覆盖：
 
 ```sh
@@ -104,3 +107,21 @@ bash demo/run_matmul_cmodel.sh 384 64 256
 
 对应日志为 `build/demo/matmul_cmodel.log`、
 `build/demo/matmul_dayan_server.log` 和 `build/demo/matmul_bf16_1c.log`。
+
+四 Core 版本固定启动 4 个 Hart，并以 Cluster mode 提交 `task_dim={4,1,1}`：
+
+```sh
+make -C demo run-matmul-4c
+bash demo/run_matmul_4c_cmodel.sh 2048 2048 2048
+```
+
+默认 case 为 `M=2048, N=2048, K=2048`。每个 Core 使用
+`tileM=512`、`tileN=256`、`tileK=256`；三个 M slice 按 32 行对齐为
+`160/192/160`，A、双缓冲 B 和常驻 C 合计正好占用 1MB URAM。一个 2x2
+Cluster tile 覆盖 `1024x512` 的输出，因此默认 case 对应 `2x4` 个 Cluster
+tile 和 8 个 K tile，不包含边缘分块。
+每对 Core 只从 DRAM 读取一份 A 或 B tile，另一方经映射到
+`0x800000`--`0xffffff` 的远端 URAM window 做 DMA；跨 Core 生命周期由
+Coherent Memory 中的 `dayan_shared_resource_t` 管理。对应日志为
+`build/demo/matmul_4c_cmodel.log`、`build/demo/matmul_4c_dayan_server.log` 和
+`build/demo/matmul_bf16_4c.log`。

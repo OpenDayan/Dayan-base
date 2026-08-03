@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -16,6 +17,7 @@
 #define DAYAN_SERVER_DEFAULT_RESIDENT (64U * 1024U * 1024U)
 #define DAYAN_SERVER_DEFAULT_PROCS_PER_HART 16U
 #define DAYAN_SERVER_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
+#define DAYAN_SERVER_MAX_PROFILE_BYTES (64U * 1024U * 1024U)
 
 struct server_connection {
     dayan_server_t *server;
@@ -64,6 +66,34 @@ static void output_list_free(struct server_output *output)
         free(output);
         output = next;
     }
+}
+
+static size_t profile_chunk_charge(const struct server_profile_chunk *chunk)
+{
+    return sizeof(*chunk) + chunk->count * sizeof(chunk->events[0]);
+}
+
+static void profile_chunk_list_free(struct server_profile_chunk *chunk)
+{
+    while (chunk) {
+        struct server_profile_chunk *next = chunk->next;
+
+        free(chunk);
+        chunk = next;
+    }
+}
+
+static void profile_clear_locked(dayan_server_t *server)
+{
+    profile_chunk_list_free(server->profile_head);
+    server->profile_head = 0;
+    server->profile_tail = 0;
+    server->profile_bytes = 0;
+    server->profile_owner = 0;
+    server->profile_id = 0;
+    server->profile_active = 0;
+    server->profile_stopping = 0;
+    server->profile_stopped = 0;
 }
 
 static int session_append_output_locked(struct server_session *session,
@@ -231,6 +261,58 @@ static void server_device_proc_exit(void *context, uint32_t cluster,
                                   cluster, core, proc, result, cookie);
 }
 
+static int server_device_profile(void *context, uint32_t cluster,
+                                 uint32_t core,
+                                 const npu_service_profile_event_t *events,
+                                 size_t count)
+{
+    dayan_server_t *server = context;
+    struct server_profile_chunk *chunk;
+    size_t charge;
+    int status = 0;
+    int callback_status = 0;
+
+    _Static_assert(sizeof(npu_service_profile_event_t) ==
+                   sizeof(npu_ipc_profile_event_t),
+                   "Service and socket profile event ABI");
+    if (!server || !events || !count ||
+        count > (SIZE_MAX - sizeof(*chunk)) / sizeof(chunk->events[0]))
+        return -EINVAL;
+    chunk = malloc(sizeof(*chunk) + count * sizeof(chunk->events[0]));
+    if (!chunk)
+        return -ENOMEM;
+    memset(chunk, 0, sizeof(*chunk));
+    chunk->count = count;
+    chunk->cluster = cluster;
+    chunk->hart = core;
+    memcpy(chunk->events, events, count * sizeof(chunk->events[0]));
+    charge = profile_chunk_charge(chunk);
+
+    pthread_mutex_lock(&server->mutex);
+    if (!server->profile_owner || !server->profile_active ||
+        server->profile_owner->closing) {
+        status = -ECANCELED;
+    } else if (charge > DAYAN_SERVER_MAX_PROFILE_BYTES -
+                        server->profile_bytes) {
+        status = -ENOSPC;
+    } else {
+        if (server->profile_tail)
+            server->profile_tail->next = chunk;
+        else
+            server->profile_head = chunk;
+        server->profile_tail = chunk;
+        server->profile_bytes += charge;
+        chunk = 0;
+        pthread_cond_broadcast(&server->condition);
+    }
+    pthread_mutex_unlock(&server->mutex);
+    free(chunk);
+    if (server->service_profile)
+        callback_status = server->service_profile(
+            server->service_callback_context, cluster, core, events, count);
+    return status < 0 ? status : callback_status;
+}
+
 void dayan_server_options_init(dayan_server_options_t *options)
 {
     if (!options)
@@ -360,6 +442,7 @@ void server_collect_contexts_locked(dayan_server_t *server)
             free_context_locked(server, context);
         }
         if (session->closing && !session->contexts &&
+            server->profile_owner != session &&
             session->control_fd < 0 && session->data_fd < 0) {
             *session_link = session->next;
             output_list_free(session->output_head);
@@ -461,10 +544,12 @@ int dayan_server_create(dayan_server_t **server_out,
     server->options = *options;
     server->service_trap = options->service.trap;
     server->service_proc_exit = options->service.proc_exit;
+    server->service_profile = options->service.profile;
     server->service_callback_context = options->service.callback_context;
     server->options.service.output = server_device_output;
     server->options.service.trap = server_device_trap;
     server->options.service.proc_exit = server_device_proc_exit;
+    server->options.service.profile = server_device_profile;
     server->options.service.callback_context = server;
     server->socket_path = strdup(options->socket_path);
     if (!server->socket_path) {
@@ -1440,6 +1525,160 @@ static int output_read_locked(struct server_session *session,
     return 0;
 }
 
+static int profile_read_ready(void *object)
+{
+    const dayan_server_t *server = object;
+
+    return server->profile_head || server->profile_stopped ||
+           !server->profile_owner;
+}
+
+static int profile_start_locked(dayan_server_t *server,
+                                struct server_session *session,
+                                const npu_ipc_profile_start_t *request,
+                                uint64_t *object_out)
+{
+    uint64_t profile_id;
+    int status;
+
+    if (!request->buffer_size || request->flags || request->reserved ||
+        session->closing)
+        return -EINVAL;
+    if (server->profile_owner)
+        return -EBUSY;
+    status = next_id_locked(server, &profile_id);
+    if (status < 0)
+        return status;
+    server->profile_owner = session;
+    server->profile_id = profile_id;
+    server->profile_active = 1;
+    server->profile_stopping = 0;
+    server->profile_stopped = 0;
+    pthread_mutex_unlock(&server->mutex);
+    status = npu_service_profile_start(server->device,
+                                       request->buffer_size);
+    if (status < 0) {
+        int cleanup_status = npu_service_profile_stop(server->device);
+
+        if (cleanup_status < 0 && cleanup_status != -ENOENT)
+            (void)npu_service_profile_stop(server->device);
+    }
+    pthread_mutex_lock(&server->mutex);
+    if (status < 0) {
+        if (server->profile_owner == session &&
+            server->profile_id == profile_id)
+            profile_clear_locked(server);
+        pthread_cond_broadcast(&server->condition);
+        return status;
+    }
+    *object_out = profile_id;
+    return 0;
+}
+
+static int profile_stop_locked(dayan_server_t *server,
+                               struct server_session *session,
+                               uint64_t profile_id)
+{
+    int status;
+
+    if (server->profile_owner != session ||
+        server->profile_id != profile_id)
+        return -ENOENT;
+    if (server->profile_stopped)
+        return 0;
+    if (!server->profile_active || server->profile_stopping)
+        return -EBUSY;
+    server->profile_stopping = 1;
+    pthread_mutex_unlock(&server->mutex);
+    status = npu_service_profile_stop(server->device);
+    pthread_mutex_lock(&server->mutex);
+    if (server->profile_owner != session ||
+        server->profile_id != profile_id)
+        return status < 0 ? status : -ECANCELED;
+    server->profile_stopping = 0;
+    if (status == 0 || status == -ENOENT) {
+        server->profile_active = 0;
+        server->profile_stopped = 1;
+        status = 0;
+    }
+    pthread_cond_broadcast(&server->condition);
+    return status;
+}
+
+static int profile_read_locked(dayan_server_t *server,
+                               struct server_session *session,
+                               uint64_t profile_id,
+                               const npu_ipc_profile_read_t *request,
+                               npu_ipc_profile_batch_t *response,
+                               size_t *response_size)
+{
+    struct server_profile_chunk *chunk;
+    size_t remaining;
+    size_t count;
+    int status;
+
+    if (!request->max_events ||
+        request->max_events > NPU_IPC_PROFILE_CHUNK_EVENTS)
+        return -EINVAL;
+    if (server->profile_owner != session ||
+        server->profile_id != profile_id)
+        return -ENOENT;
+    if (!server->profile_head && !server->profile_stopped) {
+        status = wait_with_timeout(server, request->timeout_ms,
+                                   profile_read_ready, server);
+        if (status < 0)
+            return status;
+        if (server->profile_owner != session ||
+            server->profile_id != profile_id)
+            return -ECANCELED;
+    }
+    memset(response, 0, sizeof(*response));
+    chunk = server->profile_head;
+    if (!chunk) {
+        if (!server->profile_stopped)
+            return -EAGAIN;
+        response->flags = NPU_IPC_PROFILE_END;
+        *response_size = sizeof(*response);
+        return 0;
+    }
+    remaining = chunk->count - chunk->offset;
+    count = remaining < request->max_events ? remaining :
+                                               request->max_events;
+    response->cluster = chunk->cluster;
+    response->hart = chunk->hart;
+    response->count = (uint32_t)count;
+    memcpy(response + 1, chunk->events + chunk->offset,
+           count * sizeof(chunk->events[0]));
+    chunk->offset += count;
+    if (chunk->offset == chunk->count) {
+        size_t charge = profile_chunk_charge(chunk);
+
+        server->profile_head = chunk->next;
+        if (!server->profile_head)
+            server->profile_tail = 0;
+        server->profile_bytes -= charge;
+        free(chunk);
+    }
+    *response_size = sizeof(*response) +
+                     count * sizeof(npu_ipc_profile_event_t);
+    return 0;
+}
+
+static int profile_destroy_locked(dayan_server_t *server,
+                                  struct server_session *session,
+                                  uint64_t profile_id)
+{
+    if (server->profile_owner != session ||
+        server->profile_id != profile_id)
+        return -ENOENT;
+    if (server->profile_active || server->profile_stopping ||
+        !server->profile_stopped)
+        return -EBUSY;
+    profile_clear_locked(server);
+    pthread_cond_broadcast(&server->condition);
+    return 0;
+}
+
 static int dispatch_control(dayan_server_t *server,
                             struct server_session *session,
                             const npu_ipc_header_t *header,
@@ -1647,6 +1886,30 @@ static int dispatch_control(dayan_server_t *server,
         else
             status = output_read_locked(session, response, response_size);
         break;
+    case NPU_IPC_PROFILE_START:
+        if (payload_exact(header, sizeof(npu_ipc_profile_start_t)))
+            status = profile_start_locked(server, session, payload,
+                                          object_out);
+        else
+            status = -EMSGSIZE;
+        break;
+    case NPU_IPC_PROFILE_STOP:
+        status = payload_exact(header, 0) ?
+            profile_stop_locked(server, session, header->object_id) :
+            -EMSGSIZE;
+        break;
+    case NPU_IPC_PROFILE_READ:
+        if (payload_exact(header, sizeof(npu_ipc_profile_read_t)))
+            status = profile_read_locked(server, session, header->object_id,
+                                         payload, response, response_size);
+        else
+            status = -EMSGSIZE;
+        break;
+    case NPU_IPC_PROFILE_DESTROY:
+        status = payload_exact(header, 0) ?
+            profile_destroy_locked(server, session, header->object_id) :
+            -EMSGSIZE;
+        break;
     default:
         status = -ENOSYS;
         break;
@@ -1842,7 +2105,8 @@ static int connection_hello(struct server_connection *connection,
     memset(&response, 0, sizeof(response));
     response.service_version = NPU_IPC_VERSION;
     response.capabilities = NPU_IPC_CAP_DIRECT_TRANSFER |
-                            NPU_IPC_CAP_DEVICE_OUTPUT;
+                            NPU_IPC_CAP_DEVICE_OUTPUT |
+                            NPU_IPC_CAP_PROFILE;
     pthread_mutex_lock(&server->mutex);
     if (hello->role == NPU_IPC_ROLE_CONTROL && !hello->session_id) {
         session = create_control_session_locked(server, connection->fd,
@@ -1904,6 +2168,8 @@ static void connection_closed(dayan_server_t *server,
                               struct server_session *session,
                               uint32_t role, int fd)
 {
+    int stop_profile = 0;
+
     pthread_mutex_lock(&server->mutex);
     if (role == NPU_IPC_ROLE_CONTROL && session->control_fd == fd) {
         struct server_context *context;
@@ -1912,6 +2178,14 @@ static void connection_closed(dayan_server_t *server,
         session->closing = 1;
         for (context = session->contexts; context; context = context->next)
             server_cancel_context_locked(server, context);
+        if (server->profile_owner == session) {
+            if (server->profile_active && !server->profile_stopping) {
+                server->profile_stopping = 1;
+                stop_profile = 1;
+            } else if (!server->profile_active) {
+                profile_clear_locked(server);
+            }
+        }
     } else if (role == NPU_IPC_ROLE_DATA && session->data_fd == fd) {
         struct server_context *context;
 
@@ -1943,6 +2217,18 @@ static void connection_closed(dayan_server_t *server,
     server_collect_contexts_locked(server);
     pthread_cond_broadcast(&server->condition);
     pthread_mutex_unlock(&server->mutex);
+    if (stop_profile) {
+        int status = npu_service_profile_stop(server->device);
+
+        if (status < 0 && status != -ENOENT)
+            (void)npu_service_profile_stop(server->device);
+        pthread_mutex_lock(&server->mutex);
+        if (server->profile_owner == session)
+            profile_clear_locked(server);
+        server_collect_contexts_locked(server);
+        pthread_cond_broadcast(&server->condition);
+        pthread_mutex_unlock(&server->mutex);
+    }
 }
 
 static void *connection_main(void *argument)
@@ -1962,6 +2248,11 @@ static void *connection_main(void *argument)
                     npu_ipc_output_t header;
                     unsigned char data[NPU_IPC_OUTPUT_CHUNK_SIZE];
                 } output;
+                struct {
+                    npu_ipc_profile_batch_t header;
+                    npu_ipc_profile_event_t
+                        events[NPU_IPC_PROFILE_CHUNK_EVENTS];
+                } profile;
             } response;
             int handles[NPU_HAL_DATA_MAX_HANDLES];
             npu_ipc_header_t header;
@@ -2134,6 +2425,7 @@ void dayan_server_destroy(dayan_server_t *server)
         package = next;
     }
     output_list_free(server->pending_outputs);
+    profile_chunk_list_free(server->profile_head);
     (void)npu_service_close(server->device);
     npu_hal_close(server->hal);
     free(server->slots);

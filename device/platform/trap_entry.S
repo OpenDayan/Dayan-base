@@ -54,6 +54,11 @@ trap_entry:
     sd      t0, TRAP_FRAME_FCSR(sp)
     sd      zero, TRAP_FRAME_RESERVED(sp)
 
+    /* RPC uses MSIP as a polled doorbell. Resume any stale latched IRQ. */
+    ld      t0, TRAP_FRAME_MCAUSE(sp)
+    li      t1, 0x8000000000000003
+    beq     t0, t1, .Ltrap_resume_msip
+
     /* Rearm the dedicated stack before C switches away from this proc. */
     addi    t0, sp, TRAP_FRAME_SIZE
     csrw    mscratch, t0
@@ -63,6 +68,48 @@ trap_entry:
 .Ltrap_halt:
     wfi
     j       .Ltrap_halt
+
+.Ltrap_resume_msip:
+    /* The receive thread already consumed this polled doorbell. */
+    call    platform_rpc_receive_ack
+
+    /* mret copies MPIE to MIE, so clear both bits before resuming. */
+    li      t0, 0x88
+    csrc    mstatus, t0
+
+    ld      ra, TRAP_FRAME_X1(sp)
+    ld      gp, TRAP_FRAME_X3(sp)
+    ld      tp, TRAP_FRAME_X4(sp)
+    ld      t2, TRAP_FRAME_X7(sp)
+    ld      s0, TRAP_FRAME_X8(sp)
+    ld      s1, TRAP_FRAME_X9(sp)
+    ld      a0, TRAP_FRAME_X10(sp)
+    ld      a1, TRAP_FRAME_X11(sp)
+    ld      a2, TRAP_FRAME_X12(sp)
+    ld      a3, TRAP_FRAME_X13(sp)
+    ld      a4, TRAP_FRAME_X14(sp)
+    ld      a5, TRAP_FRAME_X15(sp)
+    ld      a6, TRAP_FRAME_X16(sp)
+    ld      a7, TRAP_FRAME_X17(sp)
+    ld      s2, TRAP_FRAME_X18(sp)
+    ld      s3, TRAP_FRAME_X19(sp)
+    ld      s4, TRAP_FRAME_X20(sp)
+    ld      s5, TRAP_FRAME_X21(sp)
+    ld      s6, TRAP_FRAME_X22(sp)
+    ld      s7, TRAP_FRAME_X23(sp)
+    ld      s8, TRAP_FRAME_X24(sp)
+    ld      s9, TRAP_FRAME_X25(sp)
+    ld      s10, TRAP_FRAME_X26(sp)
+    ld      s11, TRAP_FRAME_X27(sp)
+    ld      t3, TRAP_FRAME_X28(sp)
+    ld      t4, TRAP_FRAME_X29(sp)
+    ld      t5, TRAP_FRAME_X30(sp)
+    ld      t6, TRAP_FRAME_X31(sp)
+    ld      t0, TRAP_FRAME_X5(sp)
+    ld      t1, TRAP_FRAME_X6(sp)
+    addi    sp, sp, TRAP_FRAME_SIZE
+    csrrw   sp, mscratch, sp
+    mret
 .size trap_entry, . - trap_entry
 
 .section .note.GNU-stack, "", @progbits

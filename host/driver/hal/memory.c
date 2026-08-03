@@ -167,9 +167,10 @@ static int request_valid(const npu_hal_t *hal,
     return request && request->version == NPU_HAL_MEMORY_REQUEST_VERSION &&
            (request->memory_class == NPU_HAL_MEMORY_NORMAL ||
             request->memory_class == NPU_HAL_MEMORY_COHERENT ||
-            request->memory_class == NPU_HAL_MEMORY_URAM) &&
+           request->memory_class == NPU_HAL_MEMORY_URAM) &&
            request->usage >= NPU_HAL_MEMORY_BUFFER &&
-           request->usage <= NPU_HAL_MEMORY_KERNEL_URAM && !request->flags &&
+           request->usage <= NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING &&
+           !request->flags &&
            request->size && power_of_two(request->alignment) &&
            request_location_valid(hal, request) &&
            (request->memory_class == NPU_HAL_MEMORY_URAM ?

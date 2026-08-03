@@ -18,6 +18,10 @@ extern "C" {
 #define NPU_DEFAULT_SERVER_SOCKET   "/tmp/dayan-server.sock"
 #define NPU_RUNTIME_OUTPUT_CLEAR    (1U << 0)
 #define NPU_RUNTIME_OUTPUT_CONTINUED (1U << 1)
+#define NPU_PROFILE_OPTIONS_VERSION 1U
+#define NPU_PROFILE_DEFAULT_BUFFER_SIZE (16ULL * 1024ULL * 1024ULL)
+#define NPU_PROFILE_BATCH_END       (1U << 0)
+#define NPU_PROFILE_MAX_BATCH_EVENTS 4096U
 
 typedef struct NPUTaskDim3 {
     uint32_t x;
@@ -50,6 +54,7 @@ typedef struct npu_stream npu_stream_t;
 typedef struct npu_module npu_module_t;
 typedef struct npu_kernel npu_kernel_t;
 typedef struct npu_event npu_event_t;
+typedef struct npu_profile npu_profile_t;
 
 typedef void (*npu_runtime_output_fn)(void *context, uint32_t cluster,
                                       uint32_t core, uint32_t proc,
@@ -163,12 +168,44 @@ typedef struct npu_kernel_info {
     uint64_t uram_size;
 } npu_kernel_info_t;
 
+typedef struct npu_profile_options {
+    uint32_t version;
+    uint32_t flags;
+    uint64_t buffer_size;
+} npu_profile_options_t;
+
+/* Raw Device event: cycle[31:0], proc ID[47:32], target state[63:48]. */
+typedef struct npu_profile_event {
+    uint32_t cycle;
+    uint16_t event_id;
+    uint16_t state;
+} npu_profile_event_t;
+
+typedef enum npu_profile_proc_state {
+    NPU_PROFILE_PROC_RUNNING = 0,
+    NPU_PROFILE_PROC_READY = 1,
+    NPU_PROFILE_PROC_WAIT_POLL = 2,
+    NPU_PROFILE_PROC_WAIT_EVENT = 3,
+    NPU_PROFILE_PROC_WAIT_START = 4,
+    NPU_PROFILE_PROC_WAIT_EXIT = 5,
+    NPU_PROFILE_PROC_WAIT_PRODUCE = 6,
+    NPU_PROFILE_PROC_KILL_WAIT_PRODUCE = 7,
+} npu_profile_proc_state_t;
+
+typedef struct npu_profile_batch_info {
+    uint32_t cluster;
+    uint32_t hart;
+    uint32_t count;
+    uint32_t flags;
+} npu_profile_batch_info_t;
+
 void npu_runtime_options_init(npu_runtime_options_t *options);
 void npu_context_desc_init(npu_context_desc_t *desc);
 void npu_buffer_desc_init(npu_buffer_desc_t *desc, uint64_t size);
 void npu_stream_desc_init(npu_stream_desc_t *desc);
 void npu_launch_config_init(NPULaunchConfig *config);
 void npu_launch_desc_init(npu_launch_desc_t *desc);
+void npu_profile_options_init(npu_profile_options_t *options);
 void npu_kernel_arg_value(npu_kernel_arg_t *arg, uint64_t value,
                           uint32_t size);
 void npu_kernel_arg_buffer(npu_kernel_arg_t *arg, npu_buffer_t *buffer,
@@ -231,14 +268,34 @@ int npu_event_wait(npu_event_t *event, uint32_t timeout_ms,
                    npu_event_info_t *info);
 int npu_event_destroy(npu_event_t *event);
 
+/* Only one Device-wide proc profile session may be active at a time. */
+int npu_profile_start(npu_runtime_t *runtime,
+                      const npu_profile_options_t *options,
+                      npu_profile_t **profile_out);
+int npu_profile_read(npu_profile_t *profile, npu_profile_event_t *events,
+                     uint32_t capacity, uint32_t timeout_ms,
+                     npu_profile_batch_info_t *batch_out);
+int npu_profile_stop(npu_profile_t *profile);
+int npu_profile_destroy(npu_profile_t *profile);
+
 #ifdef __cplusplus
 static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
 static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
+static_assert(sizeof(npu_profile_event_t) == 8, "NPU profile event ABI");
+static_assert(offsetof(npu_profile_event_t, state) == 6,
+              "NPU profile state offset");
+static_assert(sizeof(npu_profile_batch_info_t) == 16,
+              "NPU profile batch ABI");
 #else
 _Static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 _Static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
 _Static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
+_Static_assert(sizeof(npu_profile_event_t) == 8, "NPU profile event ABI");
+_Static_assert(offsetof(npu_profile_event_t, state) == 6,
+               "NPU profile state offset");
+_Static_assert(sizeof(npu_profile_batch_info_t) == 16,
+               "NPU profile batch ABI");
 #endif
 
 #ifdef __cplusplus

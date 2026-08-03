@@ -8,6 +8,7 @@
 #include "context.h"
 #include "errno.h"
 #include "platform.h"
+#include "profile.h"
 #include "rpc.h"
 #include "sche.h"
 #include "stdlib.h"
@@ -85,6 +86,17 @@ struct proc *proc_self(void)
     if (!thread || thread->type != THREAD_TYPE_PROC)
         return 0;
     return container_of(thread, struct proc, thread);
+}
+
+static void proc_state_set(struct proc *proc, uint32_t state)
+{
+    if (!proc || proc->thread.type != THREAD_TYPE_PROC ||
+        state > THREAD_KILL_WAIT_PRODUCE)
+        platform_halt();
+    if (proc->thread.state == state)
+        return;
+    proc->thread.state = state;
+    profile_record_proc_state(proc);
 }
 
 static void switch_to_scheduler(struct thread *thread)
@@ -238,11 +250,13 @@ int thread_init(struct thread *thread, uint32_t type)
         return -EOVERFLOW;
 
     thread->id = sche->next_id++;
-    thread->state = THREAD_WAIT_START;
     thread->cpu = cpu;
     thread->sp = 0;
     thread->pc = 0;
     thread->type = type;
+    thread->state = THREAD_WAIT_START;
+    if (type == THREAD_TYPE_PROC)
+        profile_record_proc_state(container_of(thread, struct proc, thread));
     return 0;
 }
 
@@ -316,7 +330,7 @@ int proc_init_args(struct proc *proc, proc_fn entry,
     proc->shared_size = 0;
     proc->uram_base = 0;
     proc->uram_size = 0;
-    proc->thread.state = THREAD_READY;
+    proc_state_set(proc, THREAD_READY);
     list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
     return 0;
 }
@@ -732,6 +746,31 @@ static void snapshot_proc(struct rpc_proc_info *record,
     record->cookie = proc->cookie;
 }
 
+static int snapshot_slot_flags(const struct proc_slot *slot,
+                               uint32_t *flags_out)
+{
+    uint32_t flags;
+
+    if (slot->state == PROC_SLOT_ROOT) {
+        if (!slot->proc.family)
+            return 0;
+        flags = RPC_PROC_INFO_HOST_ROOT;
+    } else if (slot->state == PROC_SLOT_CHILD) {
+        flags = RPC_PROC_INFO_CHILD;
+    } else if (slot->state == PROC_SLOT_ZOMBIE) {
+        flags = RPC_PROC_INFO_CHILD | RPC_PROC_INFO_ZOMBIE;
+    } else if (slot->state == PROC_SLOT_KILL_WAIT_PRODUCE) {
+        flags = slot->proc.parent_id ? RPC_PROC_INFO_CHILD :
+                                       RPC_PROC_INFO_HOST_ROOT;
+        flags |= RPC_PROC_INFO_KILL_WAIT_PRODUCE;
+    } else {
+        return 0;
+    }
+    if (flags_out)
+        *flags_out = flags;
+    return 1;
+}
+
 int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot)
 {
     struct cpu *cpu = cpu_self();
@@ -749,25 +788,14 @@ int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot)
                   RPC_PROC_INFO_SYSTEM, UINT32_MAX);
     snapshot_proc(&snapshot->records[count++], &cpu->rpc.send,
                   RPC_PROC_INFO_SYSTEM, UINT32_MAX);
+    snapshot_proc(&snapshot->records[count++], profile_proc(),
+                  RPC_PROC_INFO_SYSTEM, UINT32_MAX);
     for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
         struct proc_slot *slot = &hart_proc_slots[hart][index];
         uint32_t flags;
 
-        if (slot->state == PROC_SLOT_ROOT) {
-            if (!slot->proc.family)
-                continue;
-            flags = RPC_PROC_INFO_HOST_ROOT;
-        } else if (slot->state == PROC_SLOT_CHILD) {
-            flags = RPC_PROC_INFO_CHILD;
-        } else if (slot->state == PROC_SLOT_ZOMBIE) {
-            flags = RPC_PROC_INFO_CHILD | RPC_PROC_INFO_ZOMBIE;
-        } else if (slot->state == PROC_SLOT_KILL_WAIT_PRODUCE) {
-            flags = (slot->proc.parent_id ? RPC_PROC_INFO_CHILD :
-                                                   RPC_PROC_INFO_HOST_ROOT) |
-                    RPC_PROC_INFO_KILL_WAIT_PRODUCE;
-        } else {
+        if (!snapshot_slot_flags(slot, &flags))
             continue;
-        }
         if (count >= RPC_PROC_PS_MAX_RECORDS)
             platform_halt();
         snapshot_proc(&snapshot->records[count++], &slot->proc,
@@ -779,6 +807,23 @@ int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot)
     snapshot->reserved_slots = cpu->sche.reserved_proc_slot_count;
     snapshot->status = 0;
     return 0;
+}
+
+void proc_profile_snapshot(void)
+{
+    struct cpu *cpu = cpu_self();
+    uintptr_t hart = platform_hart_id();
+    uint32_t index;
+
+    profile_record_proc_state(&cpu->rpc.receive);
+    profile_record_proc_state(&cpu->rpc.send);
+    profile_record_proc_state(profile_proc());
+    for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
+        struct proc_slot *slot = &hart_proc_slots[hart][index];
+
+        if (snapshot_slot_flags(slot, 0))
+            profile_record_proc_state(&slot->proc);
+    }
 }
 
 static void kill_unlink_proc(struct proc *proc)
@@ -835,11 +880,11 @@ static void kill_mark_slot(struct proc_family *family,
         proc->cleanup = 0;
     proc->cleanup_arg = proc->parent_id ? 0 : proc->cleanup_arg;
     if (waiting_produce) {
-        proc->thread.state = THREAD_KILL_WAIT_PRODUCE;
+        proc_state_set(proc, THREAD_KILL_WAIT_PRODUCE);
         slot->state = PROC_SLOT_KILL_WAIT_PRODUCE;
         ++family->pending_produce;
     } else {
-        proc->thread.state = THREAD_WAIT_EXIT;
+        proc_state_set(proc, THREAD_WAIT_EXIT);
         slot->state = PROC_SLOT_KILLED;
         if (proc->parent_id) {
             if (!family->active_child_procs)
@@ -1056,7 +1101,7 @@ static void kill_complete_produce(struct proc *proc)
         !family->killed || !family->pending_produce)
         platform_halt();
     slot->state = PROC_SLOT_KILLED;
-    proc->thread.state = THREAD_WAIT_EXIT;
+    proc_state_set(proc, THREAD_WAIT_EXIT);
     --family->pending_produce;
     if (child) {
         if (!family->active_child_procs)
@@ -1104,7 +1149,7 @@ int proc_wake(struct proc *proc)
         return -EINVAL;
     proc->poll = 0;
     proc->poll_arg = 0;
-    proc->thread.state = THREAD_READY;
+    proc_state_set(proc, THREAD_READY);
     --sche->event_waiters;
     list_move_tail(&proc->node, &sche->ready);
     return 0;
@@ -1139,7 +1184,7 @@ int proc_wait_poll(proc_poll_fn poll, void *arg)
         return -EPERM;
     proc->poll = poll;
     proc->poll_arg = arg;
-    proc->thread.state = THREAD_WAIT_POLL;
+    proc_state_set(proc, THREAD_WAIT_POLL);
     switch_to_scheduler(&proc->thread);
     return 0;
 }
@@ -1158,7 +1203,7 @@ int proc_wait_event(struct list_head *event)
         event = &sche->wait_event;
     proc->poll = 0;
     proc->poll_arg = 0;
-    proc->thread.state = THREAD_WAIT_EVENT;
+    proc_state_set(proc, THREAD_WAIT_EVENT);
     ++sche->event_waiters;
     list_add_tail(&proc->node, event);
     switch_to_scheduler(&proc->thread);
@@ -1177,7 +1222,7 @@ int proc_wait_produce(void)
     sche = &proc->thread.cpu->sche;
     proc->poll = 0;
     proc->poll_arg = 0;
-    proc->thread.state = THREAD_WAIT_PRODUCE;
+    proc_state_set(proc, THREAD_WAIT_PRODUCE);
     ++sche->event_waiters;
     list_add_tail(&proc->node, &sche->wait_event);
     switch_to_scheduler(&proc->thread);
@@ -1192,7 +1237,7 @@ void proc_yield(void)
         return;
     proc->poll = 0;
     proc->poll_arg = 0;
-    proc->thread.state = THREAD_READY;
+    proc_state_set(proc, THREAD_READY);
     switch_to_scheduler(&proc->thread);
 }
 
@@ -1213,7 +1258,7 @@ _Noreturn void proc_exit_status(int64_t status)
         if (!proc->parent && proc->family)
             (void)rpc_proc_exit(proc->thread.id, 0, proc->exit_status,
                                 proc->cookie, RPC_PROC_EXIT_ROOT);
-        proc->thread.state = THREAD_WAIT_EXIT;
+        proc_state_set(proc, THREAD_WAIT_EXIT);
         switch_to_scheduler(&proc->thread);
     }
     platform_halt();
@@ -1243,7 +1288,7 @@ _Noreturn void scheduler(void)
                 continue;
             waiting->poll = 0;
             waiting->poll_arg = 0;
-            waiting->thread.state = THREAD_READY;
+            proc_state_set(waiting, THREAD_READY);
             list_move_tail(node, &sche->ready);
         }
 
@@ -1257,7 +1302,7 @@ _Noreturn void scheduler(void)
         list_del_init(&proc->node);
 
         init->state = THREAD_READY;
-        proc->thread.state = THREAD_RUNNING;
+        proc_state_set(proc, THREAD_RUNNING);
         switch_context(init, &proc->thread);
 
         if (proc->thread.state == THREAD_READY) {

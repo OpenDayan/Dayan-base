@@ -32,7 +32,8 @@ Device 地址；发送前必须确认高 16 位为 0。
 
 \subsection{Device 侧处理}
 
-每个 hart 有 receive 和 send 两个内部 proc，各使用独立的 4 KiB 栈。
+每个 hart 有 receive、send 和 profile 三个内部 proc，各使用独立的 4 KiB 栈；profile
+proc 不参与普通 mailbox 收发，只在 trace FIFO 满时发起 \code{RPC_PROFILE_FLUSH}。
 
 receive proc 轮询 \code{msip}，读取 Host command，调用
 \code{rpc_receive(opcode,arg,response)}。handler 返回值的含义为：正数表示发送
@@ -84,6 +85,7 @@ Host 发布算子模块的顺序是：完成 text 搬运，向每个已启动 ha
   trap record & Device 复制到稳定槽并 clean & Host 读取并清 bit；确认前槽不可复用。 \\
   proc create 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate 后读取，更新并 clean；Host 查询时重新读取。 \\
   PS/kill 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate、填充结果并 clean；Host 收到 response 后读取。 \\
+  profile FIFO & Device 写 proc 初始状态与目标状态变化，满/STOP 时 clean & Host 读取后用 response 决定是否继续。 \\
 \end{dayantable}
 
 一致性窗口不需要上述普通 RAM 交接；resource 同步仍遵守 acquire/release 语义。

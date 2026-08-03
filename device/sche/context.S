@@ -54,6 +54,13 @@ switch_context_restore:
     ld      t0, SWITCH_FRAME_FCSR(sp)
     csrw    fcsr, t0
     addi    sp, sp, SWITCH_FRAME_SIZE
+    /* FCSR dirties mstatus.FS; confirm it did not revive functional IRQs. */
+    li      t6, 0x8
+.Lrestore_mask_irqs:
+    csrc    mstatus, t6
+    csrr    t5, mstatus
+    andi    t5, t5, 0x8
+    bnez    t5, .Lrestore_mask_irqs
     ret
 .size switch_context_restore, . - switch_context_restore
 
@@ -82,6 +89,13 @@ proc_bootstrap:
     ld      t0, PROC_FRAME_ENTRY(sp)
     ld      ra, PROC_FRAME_RA(sp)
     addi    sp, sp, PROC_FRAME_SIZE
+    /* FCSR dirties mstatus.FS; confirm it did not revive functional IRQs. */
+    li      t6, 0x8
+.Lbootstrap_mask_irqs:
+    csrc    mstatus, t6
+    csrr    t5, mstatus
+    andi    t5, t5, 0x8
+    bnez    t5, .Lbootstrap_mask_irqs
     jr      t0
 .size proc_bootstrap, . - proc_bootstrap
 .option pop

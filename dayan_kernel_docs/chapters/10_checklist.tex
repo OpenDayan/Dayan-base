@@ -32,6 +32,7 @@
   \code{[ ]} & 堆 region 的地址、大小、类型和 hart owner 在申请与归还时一致。 \\
   \code{[ ]} & proc create 描述符保持到 EXITED/FAILED；shared allocation 保持到所有使用者结束。 \\
   \code{[ ]} & 按 Hart 累加 \code{1 + max\_child\_procs}，保证不超过 16，并按 Core 限制 atomic cache 与 URAM；invocation 终态后释放 reservation 与 URAM。 \\
+  \code{[ ]} & profile allocation 按已启动 Hart 分成独立 FIFO，每份至少容纳 19 项初始 proc 状态；满缓冲先读数据再回复 continue，STOP 排空尾批次后再释放 allocation。 \\
 \end{dayantable}
 
 \subsection{验证命令}

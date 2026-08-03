@@ -43,7 +43,7 @@ wait 接口把当前 \code{tp} 作为 Produce token 写入对应硬件队列，�
 \code{dayan_join} 只接受直属子 proc ID；子 proc 退出会减少父 proc 的未结束计数，只有
 匹配的 join 或计数归零的 join-all 才会被唤醒。proc 正常返回等价于返回值为 0；退出前
 隐式执行 join-all，因此 Host 观察到 root 终态时整棵子树都已退出。每个 Hart 有 16 个
-算子 proc slot，root 计入、init/RPC proc 不计入，所以描述符最多声明 15 个子 proc。
+算子 proc slot，root 计入、init/RPC/profile proc 不计入，所以描述符最多声明 15 个子 proc。
 URAM 基址和分配/释放均按 1 KiB 对齐。
 
 cluster barrier 的参与者参数当前只能为 4，且 launch 必须为 mode 4。对象为零初始化的

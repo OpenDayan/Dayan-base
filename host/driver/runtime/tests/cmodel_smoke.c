@@ -120,7 +120,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         killed.released_slots != 1U || killed.waiting_produce)
         return -EIO;
     status = npu_service_rpc_ps(server->device, target, &snapshot);
-    if (status < 0 || snapshot.count != 2U ||
+    if (status < 0 || snapshot.count != 3U ||
         snapshot.global_free_slots != 16U || snapshot.reserved_slots)
         return status < 0 ? status : -EIO;
     status = npu_event_wait(event, 10000, &info);
@@ -249,6 +249,76 @@ static int run_grid(npu_stream_t *stream, npu_kernel_t *kernel,
     return 0;
 }
 
+static int finish_profile(npu_profile_t *profile, unsigned core_count)
+{
+    npu_profile_event_t events[NPU_PROFILE_MAX_BATCH_EVENTS];
+    uint64_t event_count = 0;
+    uint32_t first_hart_mask = 0;
+    unsigned first_hart_count = 0;
+    int saw_running = 0;
+    int saw_ready = 0;
+    int saw_wait = 0;
+    int saw_exit = 0;
+    int saw_full = 0;
+    int end = 0;
+    int status;
+
+    status = npu_profile_stop(profile);
+    if (status < 0)
+        return status;
+    while (!end) {
+        npu_profile_batch_info_t batch;
+        uint32_t index;
+
+        status = npu_profile_read(profile, events,
+                                  NPU_PROFILE_MAX_BATCH_EVENTS, 10000,
+                                  &batch);
+        if (status < 0)
+            return status;
+        if (batch.cluster || batch.hart >= core_count ||
+            (batch.flags & ~NPU_PROFILE_BATCH_END))
+            return -EIO;
+        if (batch.count == 128U)
+            saw_full = 1;
+        if (batch.count && !(first_hart_mask & (UINT32_C(1) << batch.hart))) {
+            if (batch.count < 3U || events[0].event_id != 1U ||
+                events[0].state != NPU_PROFILE_PROC_RUNNING ||
+                events[1].event_id != 2U || events[2].event_id != 3U)
+                return -EIO;
+            first_hart_mask |= UINT32_C(1) << batch.hart;
+            ++first_hart_count;
+        }
+        for (index = 0; index < batch.count; ++index) {
+            switch (events[index].state) {
+            case NPU_PROFILE_PROC_RUNNING:
+                saw_running = 1;
+                break;
+            case NPU_PROFILE_PROC_READY:
+                saw_ready = 1;
+                break;
+            case NPU_PROFILE_PROC_WAIT_POLL:
+            case NPU_PROFILE_PROC_WAIT_EVENT:
+            case NPU_PROFILE_PROC_WAIT_START:
+            case NPU_PROFILE_PROC_WAIT_PRODUCE:
+            case NPU_PROFILE_PROC_KILL_WAIT_PRODUCE:
+                saw_wait = 1;
+                break;
+            case NPU_PROFILE_PROC_WAIT_EXIT:
+                saw_exit = 1;
+                break;
+            default:
+                return -EIO;
+            }
+        }
+        event_count += batch.count;
+        end = !!(batch.flags & NPU_PROFILE_BATCH_END);
+    }
+    if (!event_count || first_hart_count != core_count || !saw_running ||
+        !saw_ready || !saw_wait || !saw_exit || !saw_full)
+        return -EIO;
+    return npu_profile_destroy(profile);
+}
+
 int main(int argc, char **argv)
 {
     npu_package_argument_t arguments[2];
@@ -262,6 +332,7 @@ int main(int argc, char **argv)
     npu_kernel_t *kernel = 0;
     npu_kernel_t *killable_kernel = 0;
     npu_runtime_t *runtime = 0;
+    npu_profile_t *profile = 0;
     dayan_server_t *server = 0;
     struct run_state run;
     struct proc_exit_capture exits = { 0, 0, 0, 0 };
@@ -339,7 +410,7 @@ int main(int argc, char **argv)
 
         status = npu_service_rpc_ps(server->device, target, &snapshot);
         if (status == 0 &&
-            (snapshot.count != 2U || snapshot.global_free_slots != 16U ||
+            (snapshot.count != 3U || snapshot.global_free_slots != 16U ||
              snapshot.reserved_slots))
             status = -EIO;
         if (status == 0)
@@ -362,6 +433,15 @@ int main(int argc, char **argv)
     npu_runtime_options_init(&runtime_options);
     runtime_options.server_socket = socket_path;
     status = npu_runtime_open(&runtime, &runtime_options);
+    if (status == 0) {
+        npu_profile_options_t options;
+
+        stage = "profile start";
+        npu_profile_options_init(&options);
+        /* 1 KiB/Hart fits the snapshot and still forces a full flush. */
+        options.buffer_size = (uint64_t)core_count * 1024U;
+        status = npu_profile_start(runtime, &options, &profile);
+    }
     if (status == 0) {
         stage = "context create";
         status = npu_context_create(runtime, 0, &context);
@@ -417,6 +497,12 @@ int main(int argc, char **argv)
     if (status == 0) {
         stage = "rpc kill all";
         status = run_kill_test(server, stream, killable_kernel, buffer);
+    }
+    if (status == 0) {
+        stage = "profile stop and drain";
+        status = finish_profile(profile, core_count);
+        if (status == 0)
+            profile = 0;
     }
     if (status == 0 &&
         (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||

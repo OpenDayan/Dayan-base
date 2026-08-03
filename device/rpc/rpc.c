@@ -40,7 +40,10 @@ static int rpc_transaction_submit(struct rpc_transaction *transaction)
     if (!transaction || !list_empty(&transaction->node))
         return -EBUSY;
     list_add_tail(&transaction->node, &rpc->send_queue);
-    (void)proc_event_wake_one(&rpc->send_event);
+    if (proc_event_wake_one(&rpc->send_event)) {
+        /* Publish RPC responses before a newly-created proc can block. */
+        list_move(&rpc->send.node, &rpc->send.thread.cpu->sche.ready);
+    }
     return 0;
 }
 
@@ -344,6 +347,15 @@ long rpc_proc_exit(uint32_t proc_id, uint32_t parent_proc_id,
     request.result = result;
     request.cookie = cookie;
     return rpc_call(RPC_PROC_EXIT, &request, sizeof(request), 0, 0);
+}
+
+long rpc_profile_flush(const struct rpc_profile_flush_request *request,
+                       struct rpc_profile_flush_response *response)
+{
+    if (!request || !response)
+        return -EINVAL;
+    return rpc_call(RPC_PROFILE_FLUSH, request, sizeof(*request),
+                    response, sizeof(*response));
 }
 
 static void rpc_trap_cleanup(struct rpc_transaction *transaction, void *arg)

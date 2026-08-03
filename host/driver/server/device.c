@@ -11,7 +11,7 @@
 #include "trap.h"
 
 #define NPU_DEFAULT_RPC_POLL_US 1000U
-#define NPU_DEFAULT_TIMEOUT_MS  5000U
+#define NPU_DEFAULT_TIMEOUT_MS  60000U
 #define NPU_DEFAULT_STACK_SIZE  UINT64_C(0x10000)
 #define NPU_DEFAULT_PRINTF_SIZE UINT64_C(0x1000)
 
@@ -97,6 +97,18 @@ static void default_proc_exit(void *context, uint32_t cluster,
     (void)cookie;
 }
 
+static int default_profile(void *context, uint32_t cluster, uint32_t core,
+                           const npu_service_profile_event_t *events,
+                           size_t count)
+{
+    (void)context;
+    (void)cluster;
+    (void)core;
+    (void)events;
+    (void)count;
+    return 0;
+}
+
 void npu_service_options_init(npu_service_options_t *options)
 {
     if (!options)
@@ -108,6 +120,7 @@ void npu_service_options_init(npu_service_options_t *options)
     options->output = default_output;
     options->trap = default_trap;
     options->proc_exit = default_proc_exit;
+    options->profile = default_profile;
 }
 
 void npu_service_launch_desc_init(npu_service_launch_desc_t *desc)
@@ -129,7 +142,7 @@ static int options_valid(const npu_service_options_t *options)
     return options && options->version == NPU_SERVICE_OPTIONS_VERSION &&
            options->rpc_poll_interval_us && options->default_timeout_ms &&
            !options->reserved && options->output && options->trap &&
-           options->proc_exit;
+           options->proc_exit && options->profile;
 }
 
 int npu_service_open(npu_service_device_t **device_out,
@@ -239,10 +252,39 @@ static void free_firmware_allocations(npu_service_device_t *device)
     device->firmware_allocations = 0;
 }
 
+static void free_atomic_cache_backing(npu_service_device_t *device)
+{
+    uint32_t cluster;
+
+    for (cluster = 0; cluster < device->hal_info.cluster_count; ++cluster) {
+        struct npu_service_cluster *state = &device->clusters[cluster];
+
+        if (state->atomic_cache_backing)
+            (void)npu_hal_memory_free(device->hal,
+                                      state->atomic_cache_backing);
+        state->atomic_cache_backing = 0;
+        state->atomic_cache_backing_address = 0;
+    }
+}
+
 int npu_service_close(npu_service_device_t *device)
 {
+    int profile_status = 0;
+    int status;
+
     if (!device)
         return -EINVAL;
+    pthread_mutex_lock(&device->mutex);
+    status = !!device->profile_allocation;
+    pthread_mutex_unlock(&device->mutex);
+    if (status) {
+        profile_status = npu_service_profile_stop(device);
+        pthread_mutex_lock(&device->mutex);
+        status = !!device->profile_allocation;
+        pthread_mutex_unlock(&device->mutex);
+        if (profile_status < 0 && status)
+            return profile_status;
+    }
     pthread_mutex_lock(&device->mutex);
     if (device->active_launches) {
         pthread_mutex_unlock(&device->mutex);
@@ -255,6 +297,7 @@ int npu_service_close(npu_service_device_t *device)
         (void)pthread_join(device->worker, 0);
     npu_service_kernel_state_destroy(device);
     free_heap_allocations(device);
+    free_atomic_cache_backing(device);
     free_firmware_allocations(device);
     pthread_cond_destroy(&device->condition);
     pthread_mutex_destroy(&device->kernel_mutex);
@@ -262,7 +305,7 @@ int npu_service_close(npu_service_device_t *device)
     free(device->clusters);
     free(device->calls);
     free(device);
-    return 0;
+    return profile_status;
 }
 
 const npu_service_options_t *npu_service_get_options(

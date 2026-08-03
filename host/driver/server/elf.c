@@ -5,8 +5,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "platform_regs.h"
+
 #define ELF_ZERO_CHUNK   (64U * 1024U)
 #define IRQ_ENABLE_OFFSET 0x04U
+#define ATOMIC_CACHE_STATUS_OFFSET \
+    (DAYAN_ATOMIC_CACHE_STATUS - DAYAN_IRQ_STATUS)
+#define ATOMIC_CACHE_BACKING_OFFSET \
+    (DAYAN_ATOMIC_CACHE_BACKING_BASE - DAYAN_IRQ_STATUS)
+#define ATOMIC_CACHE_BUSY            (UINT64_C(1) << 0)
+#define ATOMIC_CACHE_DONE            (UINT64_C(1) << 1)
+#define ATOMIC_CACHE_WRITEBACK_ERROR (UINT64_C(1) << 2)
+#define ATOMIC_CACHE_COMMAND_ERROR   (UINT64_C(1) << 3)
+#define ATOMIC_CACHE_ERROR_MASK \
+    (ATOMIC_CACHE_WRITEBACK_ERROR | ATOMIC_CACHE_COMMAND_ERROR)
+#define ATOMIC_CACHE_BACKING_ALIGNMENT DAYAN_ATOMIC_CACHE_WINDOW_SIZE
 
 struct load_segment {
     uint64_t address;
@@ -258,6 +271,111 @@ static int wait_runtime_ready(npu_service_device_t *device, uint32_t cluster,
     }
 }
 
+static int wait_atomic_cache(npu_service_device_t *device, uint32_t cluster,
+                             int require_done)
+{
+    uint64_t deadline = npu_now_ms() + device->options.default_timeout_ms;
+
+    for (;;) {
+        uint64_t status = 0;
+        int result = npu_hal_register_read(
+            device->hal, cluster, ATOMIC_CACHE_STATUS_OFFSET,
+            &status, sizeof(status));
+
+        if (result < 0)
+            return result;
+        if (status & ATOMIC_CACHE_ERROR_MASK)
+            return -EIO;
+        if (!(status & ATOMIC_CACHE_BUSY) &&
+            (!require_done || (status & ATOMIC_CACHE_DONE)))
+            return 0;
+        if (npu_now_ms() >= deadline)
+            return -ETIMEDOUT;
+        npu_delay_us(device->options.rpc_poll_interval_us);
+    }
+}
+
+static int allocate_atomic_cache_backing(
+    npu_service_device_t *device, uint32_t cluster,
+    npu_hal_allocation_t **allocation_out)
+{
+    static const npu_hal_memory_scope_t scopes[] = {
+        NPU_HAL_MEMORY_CLUSTER,
+        NPU_HAL_MEMORY_DEVICE,
+    };
+    npu_hal_memory_request_t request;
+    size_t index;
+    int status = -ENOMEM;
+
+    npu_hal_memory_request_init(&request);
+    request.memory_class = NPU_HAL_MEMORY_NORMAL;
+    request.usage = NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING;
+    request.owner = UINT32_MAX;
+    request.size = DAYAN_ATOMIC_CACHE_WINDOW_SIZE;
+    request.alignment = ATOMIC_CACHE_BACKING_ALIGNMENT;
+    for (index = 0; index < sizeof(scopes) / sizeof(scopes[0]); ++index) {
+        request.scope = scopes[index];
+        request.location.cluster = scopes[index] == NPU_HAL_MEMORY_CLUSTER ?
+            cluster : NPU_HAL_ANY_CLUSTER;
+        request.location.core = NPU_HAL_ANY_CORE;
+        status = npu_hal_memory_alloc(device->hal, &request,
+                                      allocation_out);
+        if (status == 0 || status != -ENOMEM)
+            return status;
+    }
+    return status;
+}
+
+static int configure_atomic_cache(npu_service_device_t *device,
+                                  uint32_t cluster)
+{
+    struct npu_service_cluster *state = &device->clusters[cluster];
+    npu_hal_allocation_t *allocation = 0;
+    npu_hal_core_t viewer = { cluster, 0 };
+    uint64_t backing_address = 0;
+    int status;
+
+    if (state->atomic_cache_backing)
+        return -EBUSY;
+    status = allocate_atomic_cache_backing(device, cluster, &allocation);
+    if (status < 0)
+        return status;
+    status = npu_hal_memory_address(device->hal, allocation, viewer,
+                                    &backing_address);
+    if (status < 0)
+        goto fail;
+    status = wait_atomic_cache(device, cluster, 0);
+    if (status < 0)
+        goto fail;
+    status = npu_hal_register_write(
+        device->hal, cluster, ATOMIC_CACHE_BACKING_OFFSET,
+        &backing_address, sizeof(backing_address));
+    if (status < 0)
+        goto fail;
+    status = wait_atomic_cache(device, cluster, 1);
+    if (status < 0)
+        goto fail;
+    state->atomic_cache_backing = allocation;
+    state->atomic_cache_backing_address = backing_address;
+    return 0;
+
+fail:
+    (void)npu_hal_memory_free(device->hal, allocation);
+    return status;
+}
+
+static void release_atomic_cache_backing(npu_service_device_t *device,
+                                         uint32_t cluster)
+{
+    struct npu_service_cluster *state = &device->clusters[cluster];
+
+    if (state->atomic_cache_backing)
+        (void)npu_hal_memory_free(device->hal,
+                                  state->atomic_cache_backing);
+    state->atomic_cache_backing = 0;
+    state->atomic_cache_backing_address = 0;
+}
+
 int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
                              const void *image_data, size_t size,
                              uint32_t core_mask)
@@ -297,8 +415,14 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
             goto out;
         }
     }
+    status = configure_atomic_cache(device, cluster);
+    if (status < 0) {
+        rollback_reservations(device, previous_head);
+        goto out;
+    }
     status = load_segments(device, cluster, image, segments, segment_count);
     if (status < 0) {
+        release_atomic_cache_backing(device, cluster);
         rollback_reservations(device, previous_head);
         goto out;
     }

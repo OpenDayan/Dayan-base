@@ -43,14 +43,21 @@ _start:
     csrw    mscratch, t0
     la      t0, trap_entry
     csrw    mtvec, t0
-    csrw    mie, zero
-    li      t0, 0x8
-    csrc    mstatus, t0
-
     /* Enable and reset the single-precision floating-point context. */
     li      t0, 0x6000
     csrs    mstatus, t0
     csrw    fcsr, zero
+
+    /* Drain the CSR pipeline before entering code that polls RPC interrupts. */
+.Lmask_irqs:
+    csrw    mie, zero
+    li      t0, 0x8
+    csrc    mstatus, t0
+    csrr    t1, mie
+    bnez    t1, .Lmask_irqs
+    csrr    t1, mstatus
+    andi    t1, t1, 0x8
+    bnez    t1, .Lmask_irqs
 
     call    init
     call    scheduler

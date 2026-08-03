@@ -33,6 +33,7 @@ done
 
 required=(
     "$root/build/host/dycc/dycc-bin"
+    "$root/build/host/dyperf/dyperf"
     "$root/build/host/driver/libDayanRuntime.a"
     "$root/build/host/driver/libDayanRuntime.so"
     "$root/build/host/driver/libnpu_runtime.a"
@@ -65,6 +66,8 @@ documentation_target="$destdir$datadir/doc/dayan"
 
 "$install_tool" -m 0755 "$root/build/host/dycc/dycc-bin" \
     "$destdir$bindir/dycc"
+"$install_tool" -m 0755 "$root/build/host/dyperf/dyperf" \
+    "$destdir$bindir/dyperf"
 "$install_tool" -m 0755 "$root/build/host/driver/dayan_server" \
     "$destdir$bindir/"
 "$install_tool" -m 0644 "$root/build/host/driver/libDayanRuntime.a" \
@@ -102,8 +105,11 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$documentation_target/dycc.md"
 "$install_tool" -m 0644 "$root/host/driver/README.md" \
     "$documentation_target/driver.md"
+"$install_tool" -m 0644 "$root/host/dyperf/README.md" \
+    "$documentation_target/dyperf.md"
 
 echo "install-dayan: dycc       -> $bindir/dycc"
+echo "install-dayan: dyperf     -> $bindir/dyperf"
 echo "install-dayan: server     -> $bindir/dayan_server"
 echo "install-dayan: Host SDK   -> $includedir, $libdir"
 echo "install-dayan: Device SDK -> $sdkdir"

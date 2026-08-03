@@ -305,6 +305,55 @@ finish:
     return status;
 }
 
+static int service_profile_flush(npu_service_device_t *device,
+                                 npu_hal_core_t core, uint64_t argument)
+{
+    struct rpc_profile_flush_response response;
+    struct rpc_profile_flush_request request;
+    struct rpc_packet packet;
+    int continue_profile = 0;
+    int status;
+
+    status = read_packet(device, core, argument, &packet);
+    if (status < 0)
+        return status;
+    if (!packet_layout_valid(device, core, &packet, sizeof(request),
+                             sizeof(response))) {
+        status = -EPROTO;
+        goto finish;
+    }
+    status = copy_from_device(device, core, &request, packet.request_addr,
+                              sizeof(request));
+    if (status < 0)
+        goto finish;
+    if (request.version != RPC_PROFILE_VERSION ||
+        request.size != sizeof(request) || request.hart_id != core.core ||
+        request.flags || !request.count ||
+        request.count > request.capacity || !request.generation) {
+        status = -EPROTO;
+        goto finish;
+    }
+
+    memset(&response, 0, sizeof(response));
+    response.version = RPC_PROFILE_VERSION;
+    response.size = sizeof(response);
+    response.generation = request.generation;
+    response.status = npu_service_profile_copy(
+        device, core, request.generation, request.buffer_addr,
+        request.capacity, request.count, &continue_profile);
+    response.continue_profile = response.status == 0 && continue_profile;
+    status = copy_to_device(device, core, packet.response_addr, &response,
+                            sizeof(response));
+    if (status == 0)
+        status = finish_packet(device, core, argument, 0);
+    return status;
+
+finish:
+    if (finish_packet(device, core, argument, status) < 0 && status == 0)
+        status = -EIO;
+    return status;
+}
+
 int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
                      uint64_t command)
 {
@@ -325,6 +374,8 @@ int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
         return service_trap(device, core, argument);
     case RPC_PROC_EXIT:
         return service_proc_exit(device, core, argument);
+    case RPC_PROFILE_FLUSH:
+        return service_profile_flush(device, core, argument);
     default:
         return -ENOSYS;
     }
