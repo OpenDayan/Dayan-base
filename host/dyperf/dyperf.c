@@ -18,6 +18,7 @@
 #define DYPERF_READ_INTERVAL_MS    100U
 #define DYPERF_DRAIN_TIMEOUT_MS    5000U
 #define DYPERF_EVENT_ID_COUNT      65536U
+#define DYPERF_TRACE_PID_BASE      UINT64_C(0x10000)
 
 struct trace_target {
     struct trace_target *next;
@@ -220,12 +221,20 @@ static int trace_json_string(FILE *file, const char *text, size_t capacity)
 
 static uint64_t trace_pid(uint32_t cluster, uint32_t hart)
 {
-    return UINT64_C(1) + ((uint64_t)cluster << 32) + hart;
+    /* Keep process IDs outside the uint16_t Device event-ID namespace. */
+    return DYPERF_TRACE_PID_BASE + ((uint64_t)cluster << 32) + hart;
 }
 
 static uint64_t trace_process_sort_index(uint32_t cluster, uint32_t hart)
 {
     return ((uint64_t)cluster << 32) + hart;
+}
+
+static uint64_t trace_thread_id(const struct trace_target *target,
+                                uint16_t event_id)
+{
+    /* Perfetto identifies tid == pid as the process main thread. */
+    return event_id ? event_id : trace_pid(target->cluster, target->hart);
 }
 
 static int trace_proc_metadata(struct trace_writer *writer,
@@ -244,9 +253,10 @@ static int trace_proc_metadata(struct trace_writer *writer,
     if (trace_item_begin(writer) < 0 ||
         fprintf(writer->file,
                 "{\"name\":\"thread_name\",\"ph\":\"M\","
-                "\"pid\":%" PRIu64 ",\"tid\":%u,\"args\":{"
+                "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ",\"args\":{"
                 "\"name\":",
-                trace_pid(target->cluster, target->hart), event_id) < 0 ||
+                trace_pid(target->cluster, target->hart),
+                trace_thread_id(target, event_id)) < 0 ||
         trace_json_string(writer->file, name, name_length) < 0 ||
         fputs("}}", writer->file) == EOF)
         return -EIO;
@@ -361,10 +371,11 @@ static int trace_state_event(struct trace_writer *writer,
         fprintf(writer->file,
                 "{\"name\":\"%s\",\"cat\":\"proc_state\","
                 "\"ph\":\"%s\",\"pid\":%" PRIu64 ","
-                "\"tid\":%u,\"ts\":%s,\"args\":{"
+                "\"tid\":%" PRIu64 ",\"ts\":%s,\"args\":{"
                 "\"cycle\":%u,\"state\":%u}}",
                 name, phase, trace_pid(target->cluster, target->hart),
-                event_id, timestamp, raw_cycle, state) < 0)
+                trace_thread_id(target, event_id), timestamp, raw_cycle,
+                state) < 0)
         return -EIO;
     return 0;
 }
@@ -512,10 +523,11 @@ static int trace_thread_sort_metadata(struct trace_writer *writer,
         if (trace_item_begin(writer) < 0 ||
             fprintf(writer->file,
                     "{\"name\":\"thread_sort_index\",\"ph\":\"M\","
-                    "\"pid\":%" PRIu64 ",\"tid\":%u,\"args\":{"
+                    "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ",\"args\":{"
                     "\"sort_index\":%zu}}",
                     trace_pid(target->cluster, target->hart),
-                    threads[index].event_id, index) < 0) {
+                    trace_thread_id(target, threads[index].event_id),
+                    index) < 0) {
             free(threads);
             return -EIO;
         }

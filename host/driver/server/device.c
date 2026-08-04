@@ -174,6 +174,7 @@ int npu_service_open(npu_service_device_t **device_out,
         return -ENOMEM;
     device->options = *options;
     device->hal = hal;
+    device->rpc_queue_capacity = NPU_SERVICE_RPC_QUEUE_CAPACITY;
     status = npu_hal_get_info(device->hal, &device->hal_info);
     if (status < 0)
         goto fail;
@@ -568,11 +569,8 @@ static int uram_address(npu_service_device_t *device,
 }
 
 static int wait_command_consumed(npu_service_device_t *device,
-                                 npu_hal_core_t core, uint32_t timeout_ms)
+                                 npu_hal_core_t core, uint64_t deadline)
 {
-    uint64_t deadline = timeout_ms == NPU_SERVICE_TIMEOUT_INFINITE ?
-        UINT64_MAX : npu_now_ms() + timeout_ms;
-
     for (;;) {
         uint64_t now;
         uint32_t slice = NPU_RPC_CANCEL_POLL_MS;
@@ -596,13 +594,91 @@ static int wait_command_consumed(npu_service_device_t *device,
     }
 }
 
+static int rpc_shutdown_status_locked(const npu_service_device_t *device)
+{
+    if (device->abort_status)
+        return device->abort_status;
+    return device->worker_stop ? -ESHUTDOWN : 0;
+}
+
+static int rpc_condition_wait_locked(npu_service_device_t *device,
+                                     uint32_t timeout_ms,
+                                     const struct timespec *deadline)
+{
+    int status;
+
+    if (timeout_ms == NPU_SERVICE_TIMEOUT_INFINITE)
+        status = pthread_cond_wait(&device->condition, &device->mutex);
+    else
+        status = pthread_cond_timedwait(&device->condition, &device->mutex,
+                                        deadline);
+    if (!status)
+        return 0;
+    return status == ETIMEDOUT ? -ETIMEDOUT : -status;
+}
+
+static int rpc_queue_first_for_core_locked(
+    const npu_service_device_t *device,
+    const struct npu_rpc_queue_entry *entry)
+{
+    const struct npu_rpc_queue_entry *item;
+
+    for (item = device->rpc_queue_head; item && item != entry;
+         item = item->next) {
+        if (item->core_index == entry->core_index)
+            return 0;
+    }
+    return item == entry;
+}
+
+static void rpc_queue_push_locked(npu_service_device_t *device,
+                                  struct npu_rpc_queue_entry *entry)
+{
+    entry->next = 0;
+    entry->queued = 1;
+    if (device->rpc_queue_tail)
+        device->rpc_queue_tail->next = entry;
+    else
+        device->rpc_queue_head = entry;
+    device->rpc_queue_tail = entry;
+    ++device->rpc_queue_count;
+}
+
+static void rpc_queue_remove_locked(npu_service_device_t *device,
+                                    struct npu_rpc_queue_entry *entry)
+{
+    struct npu_rpc_queue_entry *previous = 0;
+    struct npu_rpc_queue_entry *item;
+
+    if (!entry->queued)
+        return;
+    for (item = device->rpc_queue_head; item && item != entry;
+         item = item->next)
+        previous = item;
+    if (!item)
+        return;
+    if (previous)
+        previous->next = item->next;
+    else
+        device->rpc_queue_head = item->next;
+    if (device->rpc_queue_tail == item)
+        device->rpc_queue_tail = previous;
+    item->next = 0;
+    item->queued = 0;
+    --device->rpc_queue_count;
+}
+
 int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
                          uint64_t *response_out, uint32_t timeout_ms)
 {
+    struct npu_rpc_queue_entry entry;
     struct npu_pending_call *call;
     struct timespec deadline;
+    uint64_t monotonic_deadline;
+    size_t core_index;
     uint16_t expected;
+    int queue_space_waiter = 0;
     int status;
 
     if (!device || !response_out || !npu_hal_core_valid(device->hal, core) ||
@@ -610,31 +686,62 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
         return -EINVAL;
     if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
         return -EIO;
-    deadline.tv_sec += timeout_ms / 1000U;
-    deadline.tv_nsec += (long)(timeout_ms % 1000U) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        ++deadline.tv_sec;
-        deadline.tv_nsec -= 1000000000L;
+    monotonic_deadline = UINT64_MAX;
+    if (timeout_ms != NPU_SERVICE_TIMEOUT_INFINITE) {
+        monotonic_deadline = npu_now_ms() + timeout_ms;
+        deadline.tv_sec += timeout_ms / 1000U;
+        deadline.tv_nsec += (long)(timeout_ms % 1000U) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            ++deadline.tv_sec;
+            deadline.tv_nsec -= 1000000000L;
+        }
     }
     expected = (uint16_t)(opcode | UINT16_C(0x8000));
-    call = &device->calls[npu_service_core_index(device, core)];
+    core_index = npu_service_core_index(device, core);
+    call = &device->calls[core_index];
+    memset(&entry, 0, sizeof(entry));
+    entry.core_index = core_index;
+    entry.opcode = opcode;
+    entry.argument = argument;
     pthread_mutex_lock(&device->mutex);
-    if (device->abort_status) {
-        status = device->abort_status;
-        pthread_mutex_unlock(&device->mutex);
-        return status;
+    if (device->rpc_queue_count >= device->rpc_queue_capacity) {
+        ++device->rpc_queue_waiters;
+        queue_space_waiter = 1;
     }
-    if (call->pending) {
-        pthread_mutex_unlock(&device->mutex);
-        return -EBUSY;
+    for (;;) {
+        status = rpc_shutdown_status_locked(device);
+        if (status < 0)
+            goto space_wait_done;
+        if (device->rpc_queue_count < device->rpc_queue_capacity)
+            break;
+        status = rpc_condition_wait_locked(device, timeout_ms, &deadline);
+        if (status < 0)
+            goto space_wait_done;
     }
+    if (queue_space_waiter)
+        --device->rpc_queue_waiters;
+    rpc_queue_push_locked(device, &entry);
+    for (;;) {
+        status = rpc_shutdown_status_locked(device);
+        if (status < 0)
+            goto queue_fail;
+        if (!call->active &&
+            rpc_queue_first_for_core_locked(device, &entry))
+            break;
+        status = rpc_condition_wait_locked(device, timeout_ms, &deadline);
+        if (status < 0)
+            goto queue_fail;
+    }
+    rpc_queue_remove_locked(device, &entry);
     call->expected_opcode = expected;
     call->expected_argument = argument;
     call->pending = 1;
+    call->active = 1;
     call->status = -EINPROGRESS;
+    pthread_cond_broadcast(&device->condition);
     pthread_mutex_unlock(&device->mutex);
 
-    status = wait_command_consumed(device, core, timeout_ms);
+    status = wait_command_consumed(device, core, monotonic_deadline);
     if (status == 0)
         status = npu_service_status(device);
     if (status == 0)
@@ -643,27 +750,38 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
     if (status < 0) {
         pthread_mutex_lock(&device->mutex);
         call->pending = 0;
+        call->active = 0;
         call->status = status;
+        pthread_cond_broadcast(&device->condition);
         pthread_mutex_unlock(&device->mutex);
         return status;
     }
     pthread_mutex_lock(&device->mutex);
     while (call->pending) {
-        status = pthread_cond_timedwait(&device->condition, &device->mutex,
-                                        &deadline);
-        if (status == ETIMEDOUT) {
+        status = rpc_shutdown_status_locked(device);
+        if (!status)
+            status = rpc_condition_wait_locked(device, timeout_ms,
+                                               &deadline);
+        if (status < 0) {
             call->pending = 0;
-            call->status = -ETIMEDOUT;
-            break;
-        }
-        if (status) {
-            call->pending = 0;
-            call->status = -status;
+            call->status = status;
+            pthread_cond_broadcast(&device->condition);
             break;
         }
     }
     status = call->status;
     *response_out = call->response;
+    call->active = 0;
+    pthread_cond_broadcast(&device->condition);
+    pthread_mutex_unlock(&device->mutex);
+    return status;
+
+space_wait_done:
+    if (queue_space_waiter)
+        --device->rpc_queue_waiters;
+queue_fail:
+    rpc_queue_remove_locked(device, &entry);
+    pthread_cond_broadcast(&device->condition);
     pthread_mutex_unlock(&device->mutex);
     return status;
 }

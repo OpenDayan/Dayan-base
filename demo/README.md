@@ -9,8 +9,9 @@
 demo/
 ├── Makefile
 ├── device_include/cstdint       # freestanding Device 指令头兼容层
+├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
-├── matmul_bf16_4c.cpp           # 2x2 Cluster 协作与跨 Core A/B 广播
+├── matmul_bf16_4c.cpp           # 2x2 Cluster OS 流水与源端推送 A/B 广播
 ├── run_matmul_cmodel.sh
 ├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
@@ -27,8 +28,8 @@ Core。
 make -C demo
 ```
 
-产物为 `build/demo/print_demo`、`build/demo/matmul_bf16_1c` 和
-`build/demo/matmul_bf16_4c`。矩阵指令定义来自相邻的
+产物为 `build/demo/print_demo`、`build/demo/lsu_bandwidth`、
+`build/demo/matmul_bf16_1c` 和 `build/demo/matmul_bf16_4c`。矩阵指令定义来自相邻的
 `npu-kernels` 仓库，默认路径是 `../npu-kernels`，也可显式覆盖：
 
 ```sh
@@ -41,6 +42,20 @@ make -C demo NPU_KERNELS_DIR=/path/to/npu-kernels
 ```sh
 DAYAN_SERVER_SOCKET=/tmp/my-dayan.sock \
   build/demo/print_demo 1 2 3 4 5 6 7
+```
+
+## LSU 单核带宽微基准
+
+`lsu_bandwidth` 隔离测试一个 Core 发射的连续 D2U，以及从本 Core URAM 到相邻 Core
+URAM 地址窗的 U2D。四个 Core 仅用于建立 Cluster URAM 映射；测量区间内只有 lane 0
+发射 DMA。每个尺寸都严格采用“发射一条 DMA、立即 `dayan_wait_lsu()`”的顺序，并用
+Device `mcycle` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期。测试结束
+后另行回读 64 KiB 做数据校验，回读不计入带宽：
+
+```sh
+build/demo/lsu_bandwidth       # 依次测试 D2U 和远端 U2D
+build/demo/lsu_bandwidth d2u
+build/demo/lsu_bandwidth u2d
 ```
 
 参数省略时使用 `11 22 33 44 55 66 77`。示例采用
@@ -116,12 +131,18 @@ bash demo/run_matmul_4c_cmodel.sh 2048 2048 2048
 ```
 
 默认 case 为 `M=2048, N=2048, K=2048`。每个 Core 使用
-`tileM=512`、`tileN=256`、`tileK=256`；三个 M slice 按 32 行对齐为
-`160/192/160`，A、双缓冲 B 和常驻 C 合计正好占用 1MB URAM。一个 2x2
-Cluster tile 覆盖 `1024x512` 的输出，因此默认 case 对应 `2x4` 个 Cluster
-tile 和 8 个 K tile，不包含边缘分块。
-每对 Core 只从 DRAM 读取一份 A 或 B tile，另一方经映射到
-`0x800000`--`0xffffff` 的远端 URAM window 做 DMA；跨 Core 生命周期由
-Coherent Memory 中的 `dayan_shared_resource_t` 管理。对应日志为
+`tileM=384`、`tileN=256`、`tileK=256`，与单 Core 版本严格相同；三个
+consumer 分别处理一个 `128x256x256` MAT slice。A、双缓冲 B 和常驻 C
+合计占用 832KiB URAM。M 维在两行 Core 之间连续等分，每行再按 384 行推进，
+避免 M tile 数为奇数时的负载不均；N 维仍按 256 列 tile 交错分给两列 Core。
+每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 横向推送 A，core 01/10
+纵向推送 B。A 不再由根线程串行生产：三个 consumer 各自使用 LSU group
+`0/4/2` 发射本 slice 的 D2U。源端在 A 和 B 均就绪后连续发射 A U2D 与本地
+MAT，再等待 U2D 完成并发布对应的 `dayan_shared_resource_t`；因此广播可以与
+源端 MAT 重叠，任一 slice 完成 MAT 后也可以独立进入下一代。接收端直接等待
+描述符并使用已经落入本地 URAM 的数据，不再发起拉取 DMA。描述符一直占用到
+远端 MAT 完成，避免源端过早覆盖远端 A。B 继续用双缓冲，C store 的 wait 延后
+到下一块 C 被覆盖之前。
+对应日志为
 `build/demo/matmul_4c_cmodel.log`、`build/demo/matmul_4c_dayan_server.log` 和
 `build/demo/matmul_bf16_4c.log`。

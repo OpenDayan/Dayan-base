@@ -14,8 +14,8 @@ int main(int argc, char **argv)
         0, 3, 3, 0,
     };
     const npu_profile_event_t hart0_events[] = {
-        { UINT32_C(100), 4, NPU_PROFILE_PROC_RUNNING, "zeta" },
-        { UINT32_C(120), 4, NPU_PROFILE_PROC_WAIT_EVENT, "zeta" },
+        { UINT32_C(100), 1, NPU_PROFILE_PROC_RUNNING, "zeta" },
+        { UINT32_C(120), 1, NPU_PROFILE_PROC_WAIT_EVENT, "zeta" },
     };
     const npu_profile_batch_info_t hart0_batch = {
         0, 0, 2, 0,

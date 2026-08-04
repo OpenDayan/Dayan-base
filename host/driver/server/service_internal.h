@@ -12,6 +12,9 @@
 #include "rpc.h"
 #include "service.h"
 
+/* Shared admission capacity for queued Host-to-Device RPC calls. */
+#define NPU_SERVICE_RPC_QUEUE_CAPACITY 1024U
+
 struct npu_api_symbol {
     char *name;
     uint64_t value;
@@ -37,10 +40,21 @@ struct npu_kernel_module {
 struct npu_pending_call {
     uint16_t expected_opcode;
     uint16_t reserved;
+    /* pending tracks the mailbox response; active protects result pickup. */
     uint32_t pending;
+    uint32_t active;
     uint64_t expected_argument;
     uint64_t response;
     int status;
+};
+
+struct npu_rpc_queue_entry {
+    struct npu_rpc_queue_entry *next;
+    size_t core_index;
+    uint16_t opcode;
+    uint16_t reserved;
+    uint32_t queued;
+    uint64_t argument;
 };
 
 struct npu_service_cluster {
@@ -85,6 +99,11 @@ struct npu_service_device {
     pthread_cond_t condition;
     pthread_t worker;
     struct npu_pending_call *calls;
+    struct npu_rpc_queue_entry *rpc_queue_head;
+    struct npu_rpc_queue_entry *rpc_queue_tail;
+    size_t rpc_queue_count;
+    size_t rpc_queue_capacity;
+    size_t rpc_queue_waiters;
     struct npu_service_cluster *clusters;
     struct npu_service_heap_allocation *heap_allocations;
     struct npu_service_firmware_allocation *firmware_allocations;

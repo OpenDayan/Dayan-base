@@ -43,8 +43,13 @@ struct profile_read_state {
 struct rpc_call_state {
     npu_service_device_t *device;
     npu_hal_core_t target;
+    uint16_t opcode;
+    uint32_t timeout_ms;
+    uint64_t argument;
     uint64_t response;
     int status;
+    int started;
+    int finished;
 };
 
 static void capture_output(void *context, uint32_t cluster, uint32_t core,
@@ -114,9 +119,11 @@ static void *run_blocking_rpc(void *argument)
 {
     struct rpc_call_state *state = argument;
 
+    __atomic_store_n(&state->started, 1, __ATOMIC_RELEASE);
     state->status = npu_service_rpc_call(
-        state->device, state->target, RPC_ICACHE_FLUSH, 0,
-        &state->response, 60000);
+        state->device, state->target, state->opcode, state->argument,
+        &state->response, state->timeout_ms);
+    __atomic_store_n(&state->finished, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -527,39 +534,256 @@ int main(void)
     assert(run.status == 0);
     dayan_server_destroy(server);
 
-    /* Service abort must interrupt an RPC waiting for Device consumption. */
+    /*
+     * The shared RPC FIFO must preserve per-Hart order, allow independent
+     * Harts to run concurrently, and block producers instead of returning
+     * EBUSY when the FIFO is full.  Service abort must wake every stage.
+     */
     server = 0;
     assert(dayan_server_create(&server, &server_options) == 0);
     {
-        struct rpc_call_state rpc_call;
-        pthread_t rpc_thread;
-        uint32_t msip = 1;
+        struct rpc_call_state rpc_calls[2];
+        pthread_t rpc_threads[2];
+        unsigned attempt;
+
+        memset(rpc_calls, 0, sizeof(rpc_calls));
+        rpc_calls[0].device = server->device;
+        rpc_calls[0].opcode = RPC_ICACHE_FLUSH;
+        rpc_calls[0].argument = 0x31;
+        rpc_calls[0].timeout_ms = 60000;
+        rpc_calls[0].status = -EINPROGRESS;
+        rpc_calls[1] = rpc_calls[0];
+        rpc_calls[1].argument = 0x32;
+        assert(pthread_create(&rpc_threads[0], 0, run_blocking_rpc,
+                              &rpc_calls[0]) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            int active;
+
+            pthread_mutex_lock(&server->device->mutex);
+            active = server->device->calls[0].active &&
+                     server->device->calls[0].pending;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (active)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        assert(pthread_create(&rpc_threads[1], 0, run_blocking_rpc,
+                              &rpc_calls[1]) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            size_t queued;
+
+            pthread_mutex_lock(&server->device->mutex);
+            queued = server->device->rpc_queue_count;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (queued == 1)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        pthread_mutex_lock(&server->device->mutex);
+        assert(server->device->calls[0].active);
+        assert(server->device->calls[0].pending);
+        assert(server->device->calls[0].expected_argument ==
+               rpc_calls[0].argument);
+        server->device->calls[0].response = rpc_command_pack(
+            server->device->calls[0].expected_opcode,
+            server->device->calls[0].expected_argument);
+        server->device->calls[0].status = 0;
+        server->device->calls[0].pending = 0;
+        assert(server->device->calls[0].active);
+        pthread_cond_broadcast(&server->device->condition);
+        pthread_mutex_unlock(&server->device->mutex);
+        assert(pthread_join(rpc_threads[0], 0) == 0);
+        assert(rpc_calls[0].status == 0);
+        assert(rpc_calls[0].response == rpc_command_pack(
+            RPC_ICACHE_FLUSH_RESPONSE, rpc_calls[0].argument));
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            int second_pending;
+
+            pthread_mutex_lock(&server->device->mutex);
+            second_pending = server->device->calls[0].active &&
+                server->device->calls[0].pending &&
+                server->device->calls[0].expected_argument ==
+                    rpc_calls[1].argument;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (second_pending)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        pthread_mutex_lock(&server->device->mutex);
+        server->device->calls[0].response = rpc_command_pack(
+            server->device->calls[0].expected_opcode,
+            server->device->calls[0].expected_argument);
+        server->device->calls[0].status = 0;
+        server->device->calls[0].pending = 0;
+        pthread_cond_broadcast(&server->device->condition);
+        pthread_mutex_unlock(&server->device->mutex);
+        assert(pthread_join(rpc_threads[1], 0) == 0);
+        assert(rpc_calls[1].status == 0);
+        assert(rpc_calls[1].response == rpc_command_pack(
+            RPC_ICACHE_FLUSH_RESPONSE, rpc_calls[1].argument));
+        pthread_mutex_lock(&server->device->mutex);
+        assert(!server->device->calls[0].active);
+        assert(!server->device->calls[0].pending);
+        assert(server->device->rpc_queue_count == 0);
+        pthread_mutex_unlock(&server->device->mutex);
+    }
+    {
+        struct rpc_call_state rpc_calls[5];
+        pthread_t rpc_threads[5];
+        uint32_t msip = 0;
+        size_t index;
         unsigned attempt;
 
         fd = open_file(directory, "xdma0_c2h_0", O_RDWR);
         assert(fd >= 0);
         assert(pwrite(fd, &msip, sizeof(msip), DAYAN_CLINT_MSIP(0)) ==
                (ssize_t)sizeof(msip));
-        memset(&rpc_call, 0, sizeof(rpc_call));
-        rpc_call.device = server->device;
-        assert(pthread_create(&rpc_thread, 0, run_blocking_rpc,
-                              &rpc_call) == 0);
+        msip = 1;
+        assert(pwrite(fd, &msip, sizeof(msip), DAYAN_CLINT_MSIP(1)) ==
+               (ssize_t)sizeof(msip));
+        pthread_mutex_lock(&server->device->mutex);
+        assert(server->device->rpc_queue_count == 0);
+        assert(server->device->rpc_queue_capacity ==
+               NPU_SERVICE_RPC_QUEUE_CAPACITY);
+        server->device->rpc_queue_capacity = 2;
+        pthread_mutex_unlock(&server->device->mutex);
+        memset(rpc_calls, 0, sizeof(rpc_calls));
+        for (index = 0; index < sizeof(rpc_calls) / sizeof(rpc_calls[0]);
+             ++index) {
+            rpc_calls[index].device = server->device;
+            rpc_calls[index].target.cluster = 0;
+            rpc_calls[index].target.core = index == 1 ? 1 : 0;
+            rpc_calls[index].opcode = RPC_ICACHE_FLUSH;
+            rpc_calls[index].argument = 0x10U + index;
+            rpc_calls[index].timeout_ms = 60000;
+            rpc_calls[index].status = -EINPROGRESS;
+        }
+        assert(pthread_create(&rpc_threads[0], 0, run_blocking_rpc,
+                              &rpc_calls[0]) == 0);
+        assert(pthread_create(&rpc_threads[1], 0, run_blocking_rpc,
+                              &rpc_calls[1]) == 0);
         for (attempt = 0; attempt < 1000; ++attempt) {
             int pending;
 
             pthread_mutex_lock(&server->device->mutex);
-            pending = server->device->calls[0].pending;
+            pending = server->device->calls[0].pending &&
+                      server->device->calls[1].pending;
             pthread_mutex_unlock(&server->device->mutex);
             if (pending)
                 break;
             npu_delay_us(1000);
         }
         assert(attempt < 1000);
+
+        assert(pthread_create(&rpc_threads[2], 0, run_blocking_rpc,
+                              &rpc_calls[2]) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            size_t queued;
+
+            pthread_mutex_lock(&server->device->mutex);
+            queued = server->device->rpc_queue_count;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (queued == 1)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        assert(pthread_create(&rpc_threads[3], 0, run_blocking_rpc,
+                              &rpc_calls[3]) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            size_t queued;
+
+            pthread_mutex_lock(&server->device->mutex);
+            queued = server->device->rpc_queue_count;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (queued == 2)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        pthread_mutex_lock(&server->device->mutex);
+        assert(server->device->rpc_queue_head);
+        assert(server->device->rpc_queue_head->argument ==
+               rpc_calls[2].argument);
+        assert(server->device->rpc_queue_head->next);
+        assert(server->device->rpc_queue_head->next->argument ==
+               rpc_calls[3].argument);
+        assert(!server->device->rpc_queue_head->next->next);
+        pthread_mutex_unlock(&server->device->mutex);
+
+        assert(pthread_create(&rpc_threads[4], 0, run_blocking_rpc,
+                              &rpc_calls[4]) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            size_t waiters;
+
+            pthread_mutex_lock(&server->device->mutex);
+            waiters = server->device->rpc_queue_waiters;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (waiters == 1)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        assert(__atomic_load_n(&rpc_calls[4].started, __ATOMIC_ACQUIRE));
+        assert(!__atomic_load_n(&rpc_calls[4].finished, __ATOMIC_ACQUIRE));
+        pthread_mutex_lock(&server->device->mutex);
+        assert(server->device->calls[0].active);
+        assert(server->device->calls[0].pending);
+        assert(server->device->calls[0].expected_argument ==
+               rpc_calls[0].argument);
+        server->device->calls[0].response = rpc_command_pack(
+            server->device->calls[0].expected_opcode,
+            server->device->calls[0].expected_argument);
+        server->device->calls[0].status = 0;
+        server->device->calls[0].pending = 0;
+        pthread_cond_broadcast(&server->device->condition);
+        pthread_mutex_unlock(&server->device->mutex);
+        assert(pthread_join(rpc_threads[0], 0) == 0);
+        assert(rpc_calls[0].status == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            int space_reused;
+
+            pthread_mutex_lock(&server->device->mutex);
+            space_reused = server->device->calls[0].active &&
+                server->device->calls[0].pending &&
+                server->device->calls[0].expected_argument ==
+                    rpc_calls[2].argument &&
+                server->device->rpc_queue_count == 2 &&
+                server->device->rpc_queue_waiters == 0;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (space_reused)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        pthread_mutex_lock(&server->device->mutex);
+        assert(server->device->rpc_queue_head);
+        assert(server->device->rpc_queue_head->argument ==
+               rpc_calls[3].argument);
+        assert(server->device->rpc_queue_head->next);
+        assert(server->device->rpc_queue_head->next->argument ==
+               rpc_calls[4].argument);
+        assert(!server->device->rpc_queue_head->next->next);
+        pthread_mutex_unlock(&server->device->mutex);
         npu_service_abort(server->device, -ESHUTDOWN);
-        assert(pthread_join(rpc_thread, 0) == 0);
-        assert(rpc_call.status == -ESHUTDOWN);
+        for (index = 1; index < sizeof(rpc_calls) / sizeof(rpc_calls[0]);
+             ++index) {
+            assert(pthread_join(rpc_threads[index], 0) == 0);
+            assert(rpc_calls[index].status == -ESHUTDOWN);
+        }
+        pthread_mutex_lock(&server->device->mutex);
+        assert(server->device->rpc_queue_count == 0);
+        assert(server->device->rpc_queue_waiters == 0);
+        assert(!server->device->rpc_queue_head);
+        assert(!server->device->rpc_queue_tail);
+        pthread_mutex_unlock(&server->device->mutex);
         msip = 0;
         assert(pwrite(fd, &msip, sizeof(msip), DAYAN_CLINT_MSIP(0)) ==
+               (ssize_t)sizeof(msip));
+        assert(pwrite(fd, &msip, sizeof(msip), DAYAN_CLINT_MSIP(1)) ==
                (ssize_t)sizeof(msip));
         close(fd);
     }

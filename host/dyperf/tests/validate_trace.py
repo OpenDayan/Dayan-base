@@ -10,36 +10,45 @@ events = trace["traceEvents"]
 assert trace["displayTimeUnit"] == "ns"
 assert trace["metadata"]["cycle_ns"] == 1
 
+hart0_pid = 0x10000
+hart3_pid = 0x10003
+
 process_sort = {
     event["pid"]: event["args"]["sort_index"]
     for event in events
     if event["name"] == "process_sort_index"
 }
-assert process_sort[1] == 0
-assert process_sort[4] == 3
+assert process_sort[hart0_pid] == 0
+assert process_sort[hart3_pid] == 3
 
 thread_names = {
     (event["pid"], event["tid"]): event["args"]["name"]
     for event in events
     if event["name"] == "thread_name"
 }
-assert thread_names[(4, 0)] == "scheduler"
-assert thread_names[(4, 7)] == "worker"
-assert thread_names[(4, 9)] == 'late"child'
+assert thread_names[(hart0_pid, hart0_pid)] == "scheduler"
+assert thread_names[(hart0_pid, 1)] == "zeta"
+assert thread_names[(hart3_pid, hart3_pid)] == "scheduler"
+assert thread_names[(hart3_pid, 7)] == "worker"
+assert thread_names[(hart3_pid, 9)] == 'late"child'
+assert all(
+    (tid == pid) == (name == "scheduler")
+    for (pid, tid), name in thread_names.items()
+)
 
 thread_sort = {
     (event["pid"], event["tid"]): event["args"]["sort_index"]
     for event in events
     if event["name"] == "thread_sort_index"
 }
-assert thread_sort[(4, 9)] == 0
-assert thread_sort[(4, 0)] == 1
-assert thread_sort[(4, 7)] == 2
+assert thread_sort[(hart3_pid, 9)] == 0
+assert thread_sort[(hart3_pid, hart3_pid)] == 1
+assert thread_sort[(hart3_pid, 7)] == 2
 
 worker_wait = next(
     event
     for event in events
-    if event.get("pid") == 4
+    if event.get("pid") == hart3_pid
     and event.get("tid") == 7
     and event["name"] == "WAIT_EVENT"
     and event["ph"] == "B"
@@ -47,7 +56,7 @@ worker_wait = next(
 worker_wait_end = next(
     event
     for event in events
-    if event.get("pid") == 4
+    if event.get("pid") == hart3_pid
     and event.get("tid") == 7
     and event["name"] == "WAIT_EVENT"
     and event["ph"] == "E"
@@ -55,8 +64,8 @@ worker_wait_end = next(
 assert math.isclose(worker_wait["ts"], 4294967.280, abs_tol=1e-9)
 assert math.isclose(worker_wait_end["ts"], 4294967.312, abs_tol=1e-9)
 assert any(
-    event.get("pid") == 4
-    and event.get("tid") == 0
+    event.get("pid") == hart3_pid
+    and event.get("tid") == hart3_pid
     and event["name"] == "RUNNING"
     and event["ph"] == "B"
     for event in events
