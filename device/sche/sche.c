@@ -95,16 +95,13 @@ struct proc *proc_self(void)
 static inline void proc_state_set(struct proc *proc, uint32_t state)
 {
     proc->thread.state = state;
-    if (proc->thread.cpu->sche.profile_enabled)
+    if (__builtin_expect(proc->thread.cpu->sche.profile_enabled, 0))
         profile_record_proc_state(proc);
 }
 
 static inline void switch_to_scheduler(struct thread *thread)
 {
-    struct sche_state *sche = &thread->cpu->sche;
-
-    sche->stopped = thread;
-    switch_context(thread, &sche->init);
+    switch_context(thread, &thread->cpu->sche.init);
 }
 
 void sche_init(void)
@@ -125,7 +122,7 @@ void sche_init(void)
     INIT_LIST_HEAD(&sche->active);
     INIT_LIST_HEAD(&sche->wait_poll);
     INIT_LIST_HEAD(&sche->wait_event);
-    sche->stopped = 0;
+    sche->active_dirty = 0;
     sche->profile_enabled = 0;
     sche->next_id = 1;
     sche->free_proc_slots = 0;
@@ -1181,62 +1178,67 @@ size_t proc_event_wake_all(struct list_head *event)
 static inline void switch_to_next_or_scheduler(struct proc *proc)
 {
     struct sche_state *sche = &proc->thread.cpu->sche;
+    struct list_head *next = proc->node.next;
 
-    if (list_empty(&sche->active)) {
+    if (next == &sche->active) {
         switch_to_scheduler(&proc->thread);
     } else {
-        struct proc *next = list_first_entry(&sche->active,
-                                             struct proc, node);
+        struct proc *next_proc = list_entry(next, struct proc, node);
 
-        list_del_init(&next->node);
-        proc_state_set(next, THREAD_RUNNING);
-        switch_context(&proc->thread, &next->thread);
+        proc_state_set(next_proc, THREAD_RUNNING);
+        switch_context(&proc->thread, &next_proc->thread);
     }
 }
 
 void proc_wait_poll(proc_poll_fn poll, void *arg)
 {
     struct proc *proc = (struct proc *)current;
-    struct sche_state *sche = &proc->thread.cpu->sche;
 
     proc->poll = poll;
     proc->poll_arg = arg;
     proc_state_set(proc, THREAD_WAIT_POLL);
-    list_add_tail(&proc->node, &sche->wait_poll);
+    proc->thread.cpu->sche.active_dirty = 1;
     switch_to_next_or_scheduler(proc);
 }
 
 void proc_wait_event(struct list_head *event)
 {
     struct proc *proc = (struct proc *)current;
-    struct sche_state *sche;
+    struct sche_state *sche = &proc->thread.cpu->sche;
 
-    sche = &proc->thread.cpu->sche;
-    if (!event)
-        event = &sche->wait_event;
     proc_state_set(proc, THREAD_WAIT_EVENT);
-    list_add_tail(&proc->node, event);
-    switch_to_next_or_scheduler(proc);
+    if (!event) {
+        sche->active_dirty = 1;
+        switch_to_next_or_scheduler(proc);
+    } else {
+        struct list_head *next = proc->node.next;
+
+        list_move_tail(&proc->node, event);
+        if (next == &sche->active) {
+            switch_to_scheduler(&proc->thread);
+        } else {
+            struct proc *next_proc = list_entry(next, struct proc, node);
+
+            proc_state_set(next_proc, THREAD_RUNNING);
+            switch_context(&proc->thread, &next_proc->thread);
+        }
+    }
 }
 
 void proc_wait_produce(void)
 {
     struct proc *proc = (struct proc *)current;
-    struct sche_state *sche;
 
-    sche = &proc->thread.cpu->sche;
     proc_state_set(proc, THREAD_WAIT_PRODUCE);
-    list_add_tail(&proc->node, &sche->wait_event);
+    proc->thread.cpu->sche.active_dirty = 1;
     switch_to_next_or_scheduler(proc);
 }
 
 void proc_yield(void)
 {
     struct proc *proc = (struct proc *)current;
-    struct sche_state *sche = &proc->thread.cpu->sche;
 
     proc_state_set(proc, THREAD_READY);
-    list_add_tail(&proc->node, &sche->ready);
     switch_to_next_or_scheduler(proc);
 }
 
@@ -1258,6 +1260,7 @@ _Noreturn void proc_exit_status(int64_t status)
             (void)rpc_proc_exit(proc->thread.id, 0, proc->exit_status,
                                 proc->cookie, RPC_PROC_EXIT_ROOT);
         proc_state_set(proc, THREAD_WAIT_EXIT);
+        proc->thread.cpu->sche.active_dirty = 1;
         switch_to_scheduler(&proc->thread);
     }
     platform_halt();
@@ -1285,14 +1288,43 @@ static void scheduler_cleanup_proc(struct proc *proc)
     }
 }
 
-static inline void scheduler_take_ready_batch(struct list_head *ready,
-                                              struct list_head *batch)
+static inline void scheduler_activate_ready(struct list_head *ready,
+                                            struct list_head *active)
 {
-    batch->next = ready->next;
-    batch->prev = ready->prev;
-    batch->next->prev = batch;
-    batch->prev->next = batch;
+    active->prev->next = ready->next;
+    ready->next->prev = active->prev;
+    ready->prev->next = active;
+    active->prev = ready->prev;
     INIT_LIST_HEAD(ready);
+}
+
+static inline void scheduler_finish_active_batch(struct sche_state *sche)
+{
+    struct list_head *node;
+    struct list_head *next;
+
+    list_for_each_safe(node, next, &sche->active) {
+        struct proc *proc = list_entry(node, struct proc, node);
+
+        switch (proc->thread.state) {
+        case THREAD_READY:
+            break;
+        case THREAD_WAIT_POLL:
+            list_move_tail(node, &sche->wait_poll);
+            break;
+        case THREAD_WAIT_EVENT:
+        case THREAD_WAIT_PRODUCE:
+            list_move_tail(node, &sche->wait_event);
+            break;
+        case THREAD_WAIT_EXIT:
+            list_del_init(node);
+            if (proc->cleanup)
+                scheduler_cleanup_proc(proc);
+            break;
+        default:
+            platform_halt();
+        }
+    }
 }
 
 _Noreturn void scheduler(void)
@@ -1317,23 +1349,20 @@ _Noreturn void scheduler(void)
             list_move_tail(node, &sche->ready);
         }
 
-        if (list_empty(&sche->ready))
+        if (!list_empty(&sche->ready))
+            scheduler_activate_ready(&sche->ready, &sche->active);
+        if (list_empty(&sche->active))
             continue;
-        scheduler_take_ready_batch(&sche->ready, &sche->active);
-
-        while (!list_empty(&sche->active)) {
+        {
             struct proc *proc = list_first_entry(&sche->active,
                                                  struct proc, node);
 
-            list_del_init(&proc->node);
             proc_state_set(proc, THREAD_RUNNING);
             switch_context(init, &proc->thread);
-            proc = (struct proc *)sche->stopped;
-
-            if (proc->thread.state == THREAD_WAIT_EXIT &&
-                       proc->cleanup) {
-                scheduler_cleanup_proc(proc);
-            }
+        }
+        if (sche->active_dirty) {
+            scheduler_finish_active_batch(sche);
+            sche->active_dirty = 0;
         }
     }
 }

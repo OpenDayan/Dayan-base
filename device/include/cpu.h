@@ -27,7 +27,7 @@ struct sche_state {
     struct list_head active;
     struct list_head wait_poll;
     struct list_head wait_event;
-    struct thread *stopped;
+    uint32_t active_dirty;
     uint32_t profile_enabled;
     uint32_t next_id;
     struct proc_slot *free_proc_slots;
