@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "cpu.h"
 #include "errno.h"
 #include "platform.h"
 #include "profile.h"
@@ -47,14 +48,12 @@ struct profile_state {
 static struct profile_state profile_states[CONFIG_HART_COUNT]
     __attribute__((section(".profile_state"), aligned(64)));
 
-static struct profile_state *profile_self(void)
+static inline struct profile_state *profile_self(void)
 {
-    uintptr_t hart = platform_hart_id();
-
-    return hart < CONFIG_HART_COUNT ? &profile_states[hart] : 0;
+    return &profile_states[platform_hart_id()];
 }
 
-static uint32_t profile_cycle(void)
+static inline uint32_t profile_cycle(void)
 {
     uintptr_t cycle;
 
@@ -62,8 +61,8 @@ static uint32_t profile_cycle(void)
     return (uint32_t)cycle;
 }
 
-static void profile_queue_event(struct profile_state *state,
-                                const struct proc *proc)
+static inline void profile_queue_event(struct profile_state *state,
+                                       const struct proc *proc)
 {
     struct rpc_profile_event *event = &state->buffer[state->count++];
 
@@ -77,18 +76,12 @@ void profile_record_proc_state(const struct proc *proc)
 {
     struct profile_state *state = profile_self();
 
-    if (!state || !proc || proc->thread.type != THREAD_TYPE_PROC ||
-        proc->thread.state > THREAD_KILL_WAIT_PRODUCE || !state->enabled ||
-        state->full_pending || state->flushing || !state->buffer)
+    if (state->full_pending)
         return;
-    if (state->count >= state->capacity) {
-        state->full_pending = 1;
-        (void)proc_event_wake_one(&state->wake);
-        return;
-    }
     profile_queue_event(state, proc);
     if (state->count == state->capacity) {
         state->full_pending = 1;
+        cpu_self()->sche.profile_enabled = 0;
         (void)proc_event_wake_one(&state->wake);
     }
 }
@@ -108,16 +101,13 @@ static void profile_main(void)
 {
     struct profile_state *state = profile_self();
 
-    if (!state)
-        platform_halt();
     for (;;) {
         struct rpc_profile_flush_request request;
         struct rpc_profile_flush_response response;
         long status;
 
         while (!state->full_pending) {
-            if (proc_wait_event(&state->wake) < 0)
-                platform_halt();
+            proc_wait_event(&state->wake);
         }
         if (!state->enabled || !state->buffer || !state->count) {
             state->full_pending = 0;
@@ -143,9 +133,14 @@ static void profile_main(void)
         state->count = 0;
         state->full_pending = 0;
         state->flushing = 0;
-        if (status < 0 || !profile_response_valid(state, &response) ||
-            !response.continue_profile)
+        if (!state->enabled || status < 0 ||
+            !profile_response_valid(state, &response) ||
+            !response.continue_profile) {
             state->enabled = 0;
+            cpu_self()->sche.profile_enabled = 0;
+        } else {
+            cpu_self()->sche.profile_enabled = 1;
+        }
         (void)proc_event_wake_all(&state->flush_done);
     }
 }
@@ -171,6 +166,7 @@ static int profile_start(struct profile_state *state,
     state->generation = config->generation;
     state->full_pending = 0;
     state->enabled = 1;
+    cpu_self()->sche.profile_enabled = 1;
     proc_profile_snapshot();
     return 0;
 }
@@ -183,11 +179,11 @@ static int profile_stop(struct profile_state *state,
         config->capacity != state->capacity)
         return -EINVAL;
     state->enabled = 0;
+    cpu_self()->sche.profile_enabled = 0;
     if (!state->flushing)
         state->full_pending = 0;
     while (state->flushing) {
-        if (proc_wait_event(&state->flush_done) < 0)
-            platform_halt();
+        proc_wait_event(&state->flush_done);
     }
     if (state->count)
         platform_cache_clean(state->buffer,
@@ -206,7 +202,7 @@ int profile_configure(struct rpc_profile_config *config)
     struct profile_state *state = profile_self();
     int status;
 
-    if (!state || !config || config->version != RPC_PROFILE_VERSION ||
+    if (!config || config->version != RPC_PROFILE_VERSION ||
         config->size != sizeof(*config) || config->flags ||
         config->hart_id != platform_hart_id() || config->reserved)
         return -EINVAL;
@@ -224,9 +220,7 @@ int profile_configure(struct rpc_profile_config *config)
 
 struct proc *profile_proc(void)
 {
-    struct profile_state *state = profile_self();
-
-    return state ? &state->worker : 0;
+    return &profile_self()->worker;
 }
 
 int profile_init(void)
@@ -235,8 +229,6 @@ int profile_init(void)
     struct profile_state *state = profile_self();
     void *stack;
 
-    if (!state)
-        return -EINVAL;
     memset(state, 0, sizeof(*state));
     INIT_LIST_HEAD(&state->wake);
     INIT_LIST_HEAD(&state->flush_done);

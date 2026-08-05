@@ -49,7 +49,6 @@ if grep -Eq '(^|[[:space:]])(lr\.[wd]|sc\.[wd])([.[:space:]]|$)' \
         <<<"$firmware_dump"; then
     fail "firmware must not use unsupported LR/SC instructions"
 fi
-
 if $readelf --relocations "${relocation_objects[@]}" | \
         grep -q 'R_RISCV_GPREL'; then
     fail "target objects must not contain gp-relative relocations"
@@ -141,12 +140,19 @@ proc_printf_end=$(symbol_address __proc_printf_end)
     fail "linked per-hart stack reservation has the wrong size"
 
 dapi_raw=$($objdump --disassemble "$build/sche/dapi.o")
+dapi_dump=$($objdump --disassemble --no-show-raw-insn \
+    "$build/sche/dapi.o")
 for encoding in 0000220b 0000420b 0000620b 0000820b; do
     grep -Fq "$encoding" <<<"$dapi_raw" ||
         fail "Produce instruction $encoding is missing"
 done
 grep -Fq '0000150b' <<<"$dapi_raw" ||
     fail "global Produce pop instruction encoding changed"
+if grep -Eq '(^|[[:space:]])fence([[:space:]]|$)' <<<"$dapi_dump" ||
+        grep -Eq '(^|[[:space:]])amo[^[:space:]]*\.(aq|rl|aqrl)([[:space:]]|$)' \
+            <<<"$dapi_dump"; then
+    fail "Dayan synchronization API must use relaxed coherent accesses"
+fi
 
 local_resource_apis=dayan_resource_init,dayan_resource_alloc,dayan_resource_produce,dayan_resource_consume,dayan_resource_wait_ready,dayan_resource_wait_free
 shared_resource_mutators=dayan_shared_resource_alloc,dayan_shared_resource_produce,dayan_shared_resource_consume
@@ -158,12 +164,12 @@ if $objdump --no-show-raw-insn \
 fi
 if ! $objdump --no-show-raw-insn \
         --disassemble-symbols="$shared_resource_mutators" \
-        "$build/sche/dapi.o" | grep -Fq 'amoswap.w.aq'; then
+        "$build/sche/dapi.o" | grep -Eq 'amoswap\.w([[:space:]]|$)'; then
     fail "shared resource API must use an atomic lock"
 fi
 barrier_dump=$($objdump --no-show-raw-insn \
     --disassemble-symbols=dayan_cluster_barrier "$build/sche/dapi.o")
-grep -Fq 'amoswap.w.aq' <<<"$barrier_dump" ||
+grep -Eq 'amoswap\.w([[:space:]]|$)' <<<"$barrier_dump" ||
     fail "cluster barrier must use a coherent atomic lock"
 if grep -Eq '(^|[[:space:]])(lr\.[wd]|sc\.[wd])' <<<"$barrier_dump"; then
     fail "cluster barrier must not use per-core LR/SC reservations"

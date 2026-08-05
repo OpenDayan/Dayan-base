@@ -56,10 +56,8 @@ static void rpc_transaction_wait(struct rpc_transaction *transaction)
             platform_halt();
         proc->system_wait = transaction;
     }
-    while (!transaction->completed) {
-        if (proc_wait_event(&transaction->wait) < 0)
-            platform_halt();
-    }
+    while (!transaction->completed)
+        proc_wait_event(&transaction->wait);
     if (proc)
         proc->system_wait = 0;
 }
@@ -108,24 +106,18 @@ static void rpc_send_main(void)
     for (;;) {
         struct rpc_transaction *transaction;
 
-        while (list_empty(&rpc->send_queue)) {
-            if (proc_wait_event(&rpc->send_event) < 0)
-                platform_halt();
-        }
+        while (list_empty(&rpc->send_queue))
+            proc_wait_event(&rpc->send_event);
 
         transaction = list_first_entry(&rpc->send_queue,
                                        struct rpc_transaction, node);
         list_del_init(&transaction->node);
 
-        while (!platform_rpc_send_ready()) {
-            if (proc_wait_poll(rpc_send_poll, 0) < 0)
-                platform_halt();
-        }
+        while (!platform_rpc_send_ready())
+            proc_wait_poll(rpc_send_poll, 0);
         platform_rpc_send(transaction->command);
-        while (!platform_rpc_send_ready()) {
-            if (proc_wait_poll(rpc_send_poll, 0) < 0)
-                platform_halt();
-        }
+        while (!platform_rpc_send_ready())
+            proc_wait_poll(rpc_send_poll, 0);
 
         if (transaction->cleanup)
             transaction->cleanup(transaction, transaction->cleanup_arg);
@@ -152,10 +144,8 @@ static void rpc_receive_main(void)
         int reply;
         int status;
 
-        while (!platform_rpc_receive_pending()) {
-            if (proc_wait_poll(rpc_receive_poll, 0) < 0)
-                platform_halt();
-        }
+        while (!platform_rpc_receive_pending())
+            proc_wait_poll(rpc_receive_poll, 0);
 
         command = platform_rpc_receive();
         reply = rpc_receive(rpc_command_opcode(command),

@@ -22,6 +22,19 @@ struct MatmulBf16Config {
     uint64_t c_stride;
 };
 
+enum : uint64_t {
+    kMatmulBf16PerfMagic = 0x4d4d314350455246ULL,
+};
+
+struct MatmulBf16Perf {
+    uint64_t magic;
+    uint64_t m;
+    uint64_t n;
+    uint64_t k;
+    uint64_t kernel_cycles;
+    uint64_t pipeline_cycles;
+};
+
 #if defined(__DAYAN_DEVICE__)
 
 #include <dayan_sys.h>
@@ -67,6 +80,14 @@ static constexpr uint64_t align_up(uint64_t value, uint64_t alignment)
 static inline int min_int(int left, int right)
 {
     return left < right ? left : right;
+}
+
+static inline uint64_t read_cycle()
+{
+    uint64_t cycle;
+
+    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
+    return cycle;
 }
 
 template <int SliceCount> struct UramLayout {
@@ -574,11 +595,13 @@ static inline int config_valid(const MatmulBf16Config *config)
 
 __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
                                const uint16_t *a, const uint16_t *bt,
-                               float *c)
+                               float *c, MatmulBf16Perf *perf)
 {
     using namespace matmul_bf16_1c_detail;
 
-    if (!config_valid(config) || !a || !bt || !c ||
+    const uint64_t kernel_begin = read_cycle();
+
+    if (!config_valid(config) || !a || !bt || !c || !perf ||
         dayan_task_mode() != 1U ||
         dayan_task_dim(DAYAN_TASK_X) != 1U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
@@ -636,6 +659,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         dayan_proc_exit(status);
     }
 
+    const uint64_t pipeline_begin = read_cycle();
     state.start = 1;
     status = produce_b(&state);
     if (status < 0)
@@ -646,6 +670,16 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         state.status = status;
     if (state.status < 0)
         dayan_proc_exit(state.status);
+
+    const uint64_t pipeline_end = read_cycle();
+    const uint64_t kernel_end = read_cycle();
+
+    perf->magic = kMatmulBf16PerfMagic;
+    perf->m = config->m;
+    perf->n = config->n;
+    perf->k = config->k;
+    perf->kernel_cycles = kernel_end - kernel_begin;
+    perf->pipeline_cycles = pipeline_end - pipeline_begin;
 }
 
 DAYAN_KERNEL_DESC(matmul_bf16_1c, MATMUL_BF16_1C_SLICES, 0,
@@ -665,7 +699,7 @@ extern "C" __host__ char *getenv(const char *name);
 __host__ static void usage(const char *program)
 {
     std::printf("usage: %s [M N K]\n", program);
-    std::printf("  defaults: M=384 N=64 K=256\n");
+    std::printf("  defaults: M=768 N=512 K=1536\n");
     std::printf("  N must be a multiple of 16; K must be a multiple of 256.\n");
     std::printf("  B is generated/stored as BT[N][K], and C is FP32.\n");
 }
@@ -870,16 +904,17 @@ __host__ static int validate_output(const std::vector<float> &actual,
 
 __host__ int main(int argc, char **argv)
 {
-    uint64_t m = 384;
-    uint64_t n = 64;
-    uint64_t k = 256;
+    uint64_t m = 768;
+    uint64_t n = 512;
+    uint64_t k = 1536;
     size_t a_elements = 0;
     size_t bt_elements = 0;
     size_t c_elements = 0;
     size_t a_bytes = 0;
     size_t bt_bytes = 0;
     size_t c_bytes = 0;
-    const uint32_t timeout_ms = 60000;
+    /* Full-size RTL simulation can take several wall minutes. */
+    const uint32_t timeout_ms = 3600000;
 
     if (argc == 2 && std::strcmp(argv[1], "--help") == 0) {
         usage(argv[0]);
@@ -925,6 +960,7 @@ __host__ int main(int argc, char **argv)
         m, n, k, k * sizeof(uint16_t), k * sizeof(uint16_t),
         n * sizeof(float),
     };
+    MatmulBf16Perf perf = {};
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
     npu_runtime_t *runtime = nullptr;
@@ -934,6 +970,7 @@ __host__ int main(int argc, char **argv)
     npu_buffer_t *a_buffer = nullptr;
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
+    npu_buffer_t *perf_buffer = nullptr;
     const char *socket_path;
     int status = 0;
 
@@ -957,12 +994,16 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = create_buffer(context, c_bytes, &c_buffer);
     if (status == 0)
+        status = create_buffer(context, sizeof(perf), &perf_buffer);
+    if (status == 0)
         status = upload(stream, config_buffer, &config, sizeof(config),
                         timeout_ms);
     if (status == 0)
         status = upload(stream, a_buffer, a.data(), a_bytes, timeout_ms);
     if (status == 0)
         status = upload(stream, bt_buffer, bt.data(), bt_bytes, timeout_ms);
+    if (status == 0)
+        status = upload(stream, perf_buffer, &perf, sizeof(perf), timeout_ms);
 
     if (status == 0) {
         npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
@@ -977,7 +1018,26 @@ __host__ int main(int argc, char **argv)
                     (unsigned long long)m, (unsigned long long)n,
                     (unsigned)MATMUL_BF16_1C_SLICES);
         status = matmul_bf16_1c(config_buffer, a_buffer, bt_buffer,
-                                c_buffer, &launch_attrs);
+                                c_buffer, perf_buffer, &launch_attrs);
+    }
+    if (status == 0)
+        status = download(stream, &perf, perf_buffer, sizeof(perf),
+                          timeout_ms);
+    if (status == 0 &&
+        (perf.magic != kMatmulBf16PerfMagic || perf.m != m ||
+         perf.n != n || perf.k != k || !perf.kernel_cycles ||
+         !perf.pipeline_cycles || perf.pipeline_cycles > perf.kernel_cycles))
+        status = -1;
+    if (status == 0) {
+        const double flops = 2.0 * (double)m * (double)n * (double)k;
+
+        std::printf("[host] perf: kernel_cycles=%llu "
+                    "pipeline_cycles=%llu kernel_flops_per_cycle=%.3f "
+                    "pipeline_flops_per_cycle=%.3f\n",
+                    (unsigned long long)perf.kernel_cycles,
+                    (unsigned long long)perf.pipeline_cycles,
+                    flops / (double)perf.kernel_cycles,
+                    flops / (double)perf.pipeline_cycles);
     }
     if (status == 0)
         status = download(stream, c.data(), c_buffer, c_bytes, timeout_ms);
@@ -986,6 +1046,8 @@ __host__ int main(int argc, char **argv)
     if (status < 0)
         std::printf("matmul_bf16_1c demo failed: %d\n", status);
 
+    if (perf_buffer)
+        preserve_error(npu_buffer_destroy(perf_buffer), &status);
     if (c_buffer)
         preserve_error(npu_buffer_destroy(c_buffer), &status);
     if (bt_buffer)

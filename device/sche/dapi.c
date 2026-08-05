@@ -35,47 +35,41 @@ static inline uintptr_t produce_pop(void)
     return a0;
 }
 
-static int resource_lock(dayan_resource_t *resource)
+static inline void resource_lock(dayan_resource_t *resource)
 {
-    int status;
-
-    while (resource->lock) {
-        status = proc_wait_event(&resource->wait_lock);
-        if (status < 0)
-            return status;
-    }
+    while (resource->lock)
+        proc_wait_event(&resource->wait_lock);
     resource->lock = 1;
-    return 0;
 }
 
-static void resource_unlock(dayan_resource_t *resource)
+static inline void resource_unlock(dayan_resource_t *resource)
 {
     resource->lock = 0;
     (void)proc_event_wake_one(&resource->wait_lock);
 }
 
-static uint32_t resource_state(const dayan_resource_t *resource)
+static inline uint32_t resource_state(const dayan_resource_t *resource)
 {
     return resource->state;
 }
 
-static void shared_resource_lock(dayan_shared_resource_t *resource)
+static inline void shared_resource_lock(dayan_shared_resource_t *resource)
 {
-    while (__atomic_exchange_n(&resource->lock, 1, __ATOMIC_ACQUIRE)) {
+    while (__atomic_exchange_n(&resource->lock, 1, __ATOMIC_RELAXED)) {
         while (__atomic_load_n(&resource->lock, __ATOMIC_RELAXED))
             __asm__ volatile("" ::: "memory");
     }
 }
 
-static void shared_resource_unlock(dayan_shared_resource_t *resource)
+static inline void shared_resource_unlock(dayan_shared_resource_t *resource)
 {
-    __atomic_store_n(&resource->lock, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&resource->lock, 0, __ATOMIC_RELAXED);
 }
 
-static uint32_t shared_resource_state(
+static inline uint32_t shared_resource_state(
     const dayan_shared_resource_t *resource)
 {
-    return __atomic_load_n(&resource->state, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&resource->state, __ATOMIC_RELAXED);
 }
 
 static int shared_range_valid(const void *object, size_t object_size,
@@ -100,20 +94,20 @@ static int shared_range_valid(const void *object, size_t object_size,
     return !(addr & (alignment - 1U));
 }
 
-static int shared_resource_valid(
+static inline int shared_resource_valid(
     const dayan_shared_resource_t *resource)
 {
     return shared_range_valid(resource, sizeof(*resource),
                               _Alignof(dayan_shared_resource_t));
 }
 
-static int shared_resource_ready(struct proc *proc, void *arg)
+static inline int shared_resource_ready(struct proc *proc, void *arg)
 {
     (void)proc;
     return shared_resource_state(arg) == DAYAN_RESOURCE_READY;
 }
 
-static int shared_resource_free(struct proc *proc, void *arg)
+static inline int shared_resource_free(struct proc *proc, void *arg)
 {
     (void)proc;
     return shared_resource_state(arg) == DAYAN_RESOURCE_FREE;
@@ -171,26 +165,26 @@ struct barrier_wait {
     uint32_t generation;
 };
 
-static int barrier_advanced(struct proc *proc, void *arg)
+static inline int barrier_advanced(struct proc *proc, void *arg)
 {
     const struct barrier_wait *wait = arg;
 
     (void)proc;
     return __atomic_load_n(&wait->barrier->generation,
-                           __ATOMIC_ACQUIRE) != wait->generation;
+                           __ATOMIC_RELAXED) != wait->generation;
 }
 
-static void barrier_lock(dayan_cluster_barrier_t *barrier)
+static inline void barrier_lock(dayan_cluster_barrier_t *barrier)
 {
-    while (__atomic_exchange_n(&barrier->lock, 1U, __ATOMIC_ACQUIRE)) {
+    while (__atomic_exchange_n(&barrier->lock, 1U, __ATOMIC_RELAXED)) {
         while (__atomic_load_n(&barrier->lock, __ATOMIC_RELAXED))
             proc_yield();
     }
 }
 
-static void barrier_unlock(dayan_cluster_barrier_t *barrier)
+static inline void barrier_unlock(dayan_cluster_barrier_t *barrier)
 {
-    __atomic_store_n(&barrier->lock, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&barrier->lock, 0U, __ATOMIC_RELAXED);
 }
 
 int dayan_cluster_barrier(uint32_t participants,
@@ -217,16 +211,13 @@ int dayan_cluster_barrier(uint32_t participants,
     if (count + 1U == participants) {
         barrier->count = 0;
         __atomic_store_n(&barrier->generation, wait.generation + 1U,
-                         __ATOMIC_RELEASE);
+                         __ATOMIC_RELAXED);
         barrier_unlock(barrier);
         return 0;
     }
     barrier_unlock(barrier);
     while (!barrier_advanced(proc, &wait)) {
-        int status = proc_wait_poll(barrier_advanced, &wait);
-
-        if (status < 0)
-            return status;
+        proc_wait_poll(barrier_advanced, &wait);
     }
     return 0;
 }
@@ -255,25 +246,25 @@ uint32_t dayan_task_mode(void)
 void dayan_wait_lsu(void)
 {
     __asm__ volatile(".insn 4, 0x0000220b" ::: "memory");
-    (void)proc_wait_produce();
+    proc_wait_produce();
 }
 
 void dayan_wait_mat(void)
 {
     __asm__ volatile(".insn 4, 0x0000420b" ::: "memory");
-    (void)proc_wait_produce();
+    proc_wait_produce();
 }
 
 void dayan_wait_vec(void)
 {
     __asm__ volatile(".insn 4, 0x0000620b" ::: "memory");
-    (void)proc_wait_produce();
+    proc_wait_produce();
 }
 
 void dayan_wait_macro(void)
 {
     __asm__ volatile(".insn 4, 0x0000820b" ::: "memory");
-    (void)proc_wait_produce();
+    proc_wait_produce();
 }
 
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));
@@ -283,7 +274,7 @@ void proc_scan_produce(void)
     uintptr_t token;
 
     while ((token = produce_pop()) != 0)
-        (void)proc_complete_produce((struct proc *)token);
+        (void)proc_wake((struct proc *)token);
 }
 
 int dayan_resource_init(dayan_resource_t *resource)
@@ -309,9 +300,7 @@ int dayan_resource_alloc(dayan_resource_t *resource,
     if (!resource || !consumer_count)
         return -EINVAL;
 
-    status = resource_lock(resource);
-    if (status < 0)
-        return status;
+    resource_lock(resource);
     if (resource->state != DAYAN_RESOURCE_FREE) {
         status = -EBUSY;
     } else {
@@ -333,9 +322,7 @@ int dayan_resource_produce(dayan_resource_t *resource)
     if (!resource)
         return -EINVAL;
 
-    status = resource_lock(resource);
-    if (status < 0)
-        return status;
+    resource_lock(resource);
     if (resource->state != DAYAN_RESOURCE_BUSY ||
         !resource->producer_count) {
         status = -EBUSY;
@@ -354,9 +341,7 @@ int dayan_resource_consume(dayan_resource_t *resource)
     if (!resource)
         return -EINVAL;
 
-    status = resource_lock(resource);
-    if (status < 0)
-        return status;
+    resource_lock(resource);
     if (resource->state != DAYAN_RESOURCE_READY ||
         !resource->consumer_count) {
         status = -EBUSY;
@@ -370,29 +355,19 @@ int dayan_resource_consume(dayan_resource_t *resource)
 
 int dayan_resource_wait_ready(dayan_resource_t *resource)
 {
-    int status;
-
     if (!resource)
         return -EINVAL;
-    while (resource_state(resource) != DAYAN_RESOURCE_READY) {
-        status = proc_wait_event(&resource->wait_ready);
-        if (status < 0)
-            return status;
-    }
+    while (resource_state(resource) != DAYAN_RESOURCE_READY)
+        proc_wait_event(&resource->wait_ready);
     return 0;
 }
 
 int dayan_resource_wait_free(dayan_resource_t *resource)
 {
-    int status;
-
     if (!resource)
         return -EINVAL;
-    while (resource_state(resource) != DAYAN_RESOURCE_FREE) {
-        status = proc_wait_event(&resource->wait_free);
-        if (status < 0)
-            return status;
-    }
+    while (resource_state(resource) != DAYAN_RESOURCE_FREE)
+        proc_wait_event(&resource->wait_free);
     return 0;
 }
 
@@ -405,7 +380,7 @@ int dayan_shared_resource_init(dayan_shared_resource_t *resource)
     __atomic_store_n(&resource->producer_count, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&resource->consumer_count, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&resource->state, DAYAN_RESOURCE_FREE,
-                     __ATOMIC_RELEASE);
+                     __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -430,7 +405,7 @@ int dayan_shared_resource_alloc(dayan_shared_resource_t *resource,
         __atomic_store_n(&resource->state,
                          producer_count ? DAYAN_RESOURCE_BUSY :
                                           DAYAN_RESOURCE_READY,
-                         __ATOMIC_RELEASE);
+                         __ATOMIC_RELAXED);
     }
     shared_resource_unlock(resource);
     return status;
@@ -457,7 +432,7 @@ int dayan_shared_resource_produce(dayan_shared_resource_t *resource)
                          __ATOMIC_RELAXED);
         if (!producer_count)
             __atomic_store_n(&resource->state, DAYAN_RESOURCE_READY,
-                             __ATOMIC_RELEASE);
+                             __ATOMIC_RELAXED);
     }
     shared_resource_unlock(resource);
     return status;
@@ -484,7 +459,7 @@ int dayan_shared_resource_consume(dayan_shared_resource_t *resource)
                          __ATOMIC_RELAXED);
         if (!consumer_count)
             __atomic_store_n(&resource->state, DAYAN_RESOURCE_FREE,
-                             __ATOMIC_RELEASE);
+                             __ATOMIC_RELAXED);
     }
     shared_resource_unlock(resource);
     return status;
@@ -492,28 +467,18 @@ int dayan_shared_resource_consume(dayan_shared_resource_t *resource)
 
 int dayan_shared_resource_wait_ready(dayan_shared_resource_t *resource)
 {
-    int status;
-
     if (!resource)
         return -EINVAL;
-    while (shared_resource_state(resource) != DAYAN_RESOURCE_READY) {
-        status = proc_wait_poll(shared_resource_ready, resource);
-        if (status < 0)
-            return status;
-    }
+    while (shared_resource_state(resource) != DAYAN_RESOURCE_READY)
+        proc_wait_poll(shared_resource_ready, resource);
     return 0;
 }
 
 int dayan_shared_resource_wait_free(dayan_shared_resource_t *resource)
 {
-    int status;
-
     if (!resource)
         return -EINVAL;
-    while (shared_resource_state(resource) != DAYAN_RESOURCE_FREE) {
-        status = proc_wait_poll(shared_resource_free, resource);
-        if (status < 0)
-            return status;
-    }
+    while (shared_resource_state(resource) != DAYAN_RESOURCE_FREE)
+        proc_wait_poll(shared_resource_free, resource);
     return 0;
 }

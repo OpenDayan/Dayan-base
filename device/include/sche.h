@@ -99,11 +99,10 @@ int proc_wake(struct proc *proc);
 size_t proc_event_wake_one(struct list_head *event);
 size_t proc_event_wake_all(struct list_head *event);
 void proc_yield(void);
-int proc_wait_poll(proc_poll_fn poll, void *arg);
+void proc_wait_poll(proc_poll_fn poll, void *arg);
 /* A null event selects the scheduler's default externally-driven queue. */
-int proc_wait_event(struct list_head *event);
-int proc_wait_produce(void);
-int proc_complete_produce(struct proc *proc);
+void proc_wait_event(struct list_head *event);
+void proc_wait_produce(void);
 void proc_scan_produce(void);
 _Noreturn void proc_exit(void);
 _Noreturn void proc_exit_status(int64_t status);

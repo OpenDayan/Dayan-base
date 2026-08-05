@@ -92,23 +92,19 @@ struct proc *proc_self(void)
     return container_of(thread, struct proc, thread);
 }
 
-static void proc_state_set(struct proc *proc, uint32_t state)
+static inline void proc_state_set(struct proc *proc, uint32_t state)
 {
-    if (!proc || proc->thread.type != THREAD_TYPE_PROC ||
-        state > THREAD_KILL_WAIT_PRODUCE)
-        platform_halt();
-    if (proc->thread.state == state)
-        return;
     proc->thread.state = state;
-    profile_record_proc_state(proc);
+    if (proc->thread.cpu->sche.profile_enabled)
+        profile_record_proc_state(proc);
 }
 
-static void switch_to_scheduler(struct thread *thread)
+static inline void switch_to_scheduler(struct thread *thread)
 {
-    struct thread *init = &thread->cpu->sche.init;
+    struct sche_state *sche = &thread->cpu->sche;
 
-    init->state = THREAD_RUNNING;
-    switch_context(thread, init);
+    sche->stopped = thread;
+    switch_context(thread, &sche->init);
 }
 
 void sche_init(void)
@@ -126,9 +122,11 @@ void sche_init(void)
     init->pc = 0;
     init->type = THREAD_TYPE_BASE;
     INIT_LIST_HEAD(&sche->ready);
+    INIT_LIST_HEAD(&sche->active);
     INIT_LIST_HEAD(&sche->wait_poll);
     INIT_LIST_HEAD(&sche->wait_event);
-    sche->event_waiters = 0;
+    sche->stopped = 0;
+    sche->profile_enabled = 0;
     sche->next_id = 1;
     sche->free_proc_slots = 0;
     sche->free_proc_slot_count = 0;
@@ -153,7 +151,7 @@ void sche_init(void)
     }
 }
 
-static struct proc_slot *global_slot_pop(struct cpu *cpu)
+static inline struct proc_slot *global_slot_pop(struct cpu *cpu)
 {
     struct sche_state *sche = &cpu->sche;
     struct proc_slot *slot = sche->free_proc_slots;
@@ -169,7 +167,7 @@ static struct proc_slot *global_slot_pop(struct cpu *cpu)
     return slot;
 }
 
-static void global_slot_push(struct proc_slot *slot)
+static inline void global_slot_push(struct proc_slot *slot)
 {
     struct sche_state *sche;
 
@@ -260,13 +258,13 @@ int thread_init(struct thread *thread, uint32_t type)
     thread->pc = 0;
     thread->type = type;
     thread->state = THREAD_WAIT_START;
-    if (type == THREAD_TYPE_PROC)
+    if (type == THREAD_TYPE_PROC && sche->profile_enabled)
         profile_record_proc_state(container_of(thread, struct proc, thread));
     return 0;
 }
 
-static int proc_name_copy(char destination[PROC_NAME_SIZE],
-                          const char *source)
+static inline int proc_name_copy(char destination[PROC_NAME_SIZE],
+                                 const char *source)
 {
     size_t length;
 
@@ -705,7 +703,6 @@ int proc_join(uint32_t proc_id, int64_t *result)
 {
     struct proc *parent = proc_self();
     struct proc_slot *slot;
-    int status;
 
     if (!parent || !parent->family)
         return -EPERM;
@@ -717,11 +714,9 @@ int proc_join(uint32_t proc_id, int64_t *result)
     while (slot->state != PROC_SLOT_ZOMBIE) {
         parent->join_kind = 1U;
         parent->join_proc_id = proc_id;
-        status = proc_wait_event(&parent->wait_children);
+        proc_wait_event(&parent->wait_children);
         parent->join_kind = 0;
         parent->join_proc_id = 0;
-        if (status < 0)
-            return status;
         slot = find_direct_child(parent, proc_id);
         if (!slot)
             return -ECHILD;
@@ -736,17 +731,14 @@ int proc_join_all(void)
 {
     struct proc *parent = proc_self();
     struct proc_slot *slot;
-    int status;
 
     if (!parent || !parent->family)
         return -EPERM;
     while (parent->live_children) {
         parent->join_kind = 2U;
         parent->join_proc_id = 0;
-        status = proc_wait_event(&parent->wait_children);
+        proc_wait_event(&parent->wait_children);
         parent->join_kind = 0;
-        if (status < 0)
-            return status;
     }
     for (slot = parent->family->slots; slot; slot = slot->family_next) {
         if (slot->state == PROC_SLOT_ZOMBIE &&
@@ -859,21 +851,14 @@ void proc_profile_snapshot(void)
 
 static void kill_unlink_proc(struct proc *proc)
 {
-    struct sche_state *sche = &proc->thread.cpu->sche;
-
     switch (proc->thread.state) {
     case THREAD_READY:
     case THREAD_WAIT_POLL:
+    case THREAD_WAIT_EVENT:
+    case THREAD_WAIT_PRODUCE:
         if (list_empty(&proc->node))
             platform_halt();
         list_del_init(&proc->node);
-        break;
-    case THREAD_WAIT_EVENT:
-    case THREAD_WAIT_PRODUCE:
-        if (list_empty(&proc->node) || !sche->event_waiters)
-            platform_halt();
-        list_del_init(&proc->node);
-        --sche->event_waiters;
         break;
     case THREAD_WAIT_EXIT:
     case THREAD_WAIT_START:
@@ -1122,6 +1107,7 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
     return 0;
 }
 
+__attribute__((cold, noinline))
 static void kill_complete_produce(struct proc *proc)
 {
     struct proc_slot *slot = container_of(proc, struct proc_slot, proc);
@@ -1152,45 +1138,32 @@ static void kill_complete_produce(struct proc *proc)
     }
 }
 
-int proc_complete_produce(struct proc *proc)
+int proc_wake(struct proc *proc)
 {
+    struct sche_state *sche;
+    uint32_t state;
+
     if (!proc)
         return -EINVAL;
-    if (proc->thread.state == THREAD_KILL_WAIT_PRODUCE) {
+    state = proc->thread.state;
+    if (state == THREAD_WAIT_PRODUCE || state == THREAD_WAIT_EVENT) {
+        sche = &proc->thread.cpu->sche;
+        proc_state_set(proc, THREAD_READY);
+        list_move_tail(&proc->node, &sche->ready);
+        return 0;
+    }
+    if (state == THREAD_KILL_WAIT_PRODUCE) {
         kill_complete_produce(proc);
         return 0;
     }
-    return proc_wake(proc);
-}
-
-int proc_wake(struct proc *proc)
-{
-    struct cpu *cpu = cpu_self();
-    struct sche_state *sche = &cpu->sche;
-
-    if (!proc)
-        return -EINVAL;
-    if (proc->thread.cpu != cpu)
-        return -EPERM;
-    if (proc->thread.type != THREAD_TYPE_PROC ||
-        (proc->thread.state != THREAD_WAIT_EVENT &&
-         proc->thread.state != THREAD_WAIT_PRODUCE))
-        return -EBUSY;
-    if (!sche->event_waiters)
-        return -EINVAL;
-    proc->poll = 0;
-    proc->poll_arg = 0;
-    proc_state_set(proc, THREAD_READY);
-    --sche->event_waiters;
-    list_move_tail(&proc->node, &sche->ready);
-    return 0;
+    return -EBUSY;
 }
 
 size_t proc_event_wake_one(struct list_head *event)
 {
     struct proc *proc;
 
-    if (!event || list_empty(event))
+    if (list_empty(event))
         return 0;
     proc = list_first_entry(event, struct proc, node);
     return proc_wake(proc) == 0;
@@ -1205,71 +1178,66 @@ size_t proc_event_wake_all(struct list_head *event)
     return count;
 }
 
-int proc_wait_poll(proc_poll_fn poll, void *arg)
+static inline void switch_to_next_or_scheduler(struct proc *proc)
 {
-    struct proc *proc = proc_self();
+    struct sche_state *sche = &proc->thread.cpu->sche;
 
-    if (!poll)
-        return -EINVAL;
-    if (!proc)
-        return -EPERM;
+    if (list_empty(&sche->active)) {
+        switch_to_scheduler(&proc->thread);
+    } else {
+        struct proc *next = list_first_entry(&sche->active,
+                                             struct proc, node);
+
+        list_del_init(&next->node);
+        proc_state_set(next, THREAD_RUNNING);
+        switch_context(&proc->thread, &next->thread);
+    }
+}
+
+void proc_wait_poll(proc_poll_fn poll, void *arg)
+{
+    struct proc *proc = (struct proc *)current;
+    struct sche_state *sche = &proc->thread.cpu->sche;
+
     proc->poll = poll;
     proc->poll_arg = arg;
     proc_state_set(proc, THREAD_WAIT_POLL);
-    switch_to_scheduler(&proc->thread);
-    return 0;
+    list_add_tail(&proc->node, &sche->wait_poll);
+    switch_to_next_or_scheduler(proc);
 }
 
-int proc_wait_event(struct list_head *event)
+void proc_wait_event(struct list_head *event)
 {
-    struct proc *proc = proc_self();
+    struct proc *proc = (struct proc *)current;
     struct sche_state *sche;
 
-    if (!proc)
-        return -EPERM;
-    if (!list_empty(&proc->node))
-        return -EBUSY;
     sche = &proc->thread.cpu->sche;
     if (!event)
         event = &sche->wait_event;
-    proc->poll = 0;
-    proc->poll_arg = 0;
     proc_state_set(proc, THREAD_WAIT_EVENT);
-    ++sche->event_waiters;
     list_add_tail(&proc->node, event);
-    switch_to_scheduler(&proc->thread);
-    return 0;
+    switch_to_next_or_scheduler(proc);
 }
 
-int proc_wait_produce(void)
+void proc_wait_produce(void)
 {
-    struct proc *proc = proc_self();
+    struct proc *proc = (struct proc *)current;
     struct sche_state *sche;
 
-    if (!proc)
-        return -EPERM;
-    if (!list_empty(&proc->node))
-        return -EBUSY;
     sche = &proc->thread.cpu->sche;
-    proc->poll = 0;
-    proc->poll_arg = 0;
     proc_state_set(proc, THREAD_WAIT_PRODUCE);
-    ++sche->event_waiters;
     list_add_tail(&proc->node, &sche->wait_event);
-    switch_to_scheduler(&proc->thread);
-    return 0;
+    switch_to_next_or_scheduler(proc);
 }
 
 void proc_yield(void)
 {
-    struct proc *proc = proc_self();
+    struct proc *proc = (struct proc *)current;
+    struct sche_state *sche = &proc->thread.cpu->sche;
 
-    if (!proc)
-        return;
-    proc->poll = 0;
-    proc->poll_arg = 0;
     proc_state_set(proc, THREAD_READY);
-    switch_to_scheduler(&proc->thread);
+    list_add_tail(&proc->node, &sche->ready);
+    switch_to_next_or_scheduler(proc);
 }
 
 _Noreturn void proc_exit_status(int64_t status)
@@ -1300,6 +1268,33 @@ _Noreturn void proc_exit(void)
     proc_exit_status(0);
 }
 
+__attribute__((cold, noinline))
+static void scheduler_cleanup_proc(struct proc *proc)
+{
+    proc_cleanup_fn cleanup = proc->cleanup;
+    void *cleanup_arg = proc->cleanup_arg;
+    struct proc_family *family = proc->family;
+    int root = !proc->parent && family;
+
+    proc->cleanup = 0;
+    proc->cleanup_arg = 0;
+    cleanup(proc, cleanup_arg);
+    if (root) {
+        proc_family_destroy(family);
+        proc_slot_release(proc);
+    }
+}
+
+static inline void scheduler_take_ready_batch(struct list_head *ready,
+                                              struct list_head *batch)
+{
+    batch->next = ready->next;
+    batch->prev = ready->prev;
+    batch->next->prev = batch;
+    batch->prev->next = batch;
+    INIT_LIST_HEAD(ready);
+}
+
 _Noreturn void scheduler(void)
 {
     struct thread *init = current;
@@ -1308,7 +1303,6 @@ _Noreturn void scheduler(void)
     for (;;) {
         struct list_head *node;
         struct list_head *next;
-        struct proc *proc;
 
         proc_scan_produce();
 
@@ -1323,36 +1317,22 @@ _Noreturn void scheduler(void)
             list_move_tail(node, &sche->ready);
         }
 
-        proc = list_first_entry_or_null(&sche->ready, struct proc, node);
-
-        if (!proc) {
-            if (list_empty(&sche->wait_poll) && !sche->event_waiters)
-                platform_idle();
+        if (list_empty(&sche->ready))
             continue;
-        }
-        list_del_init(&proc->node);
+        scheduler_take_ready_batch(&sche->ready, &sche->active);
 
-        init->state = THREAD_READY;
-        proc_state_set(proc, THREAD_RUNNING);
-        switch_context(init, &proc->thread);
+        while (!list_empty(&sche->active)) {
+            struct proc *proc = list_first_entry(&sche->active,
+                                                 struct proc, node);
 
-        if (proc->thread.state == THREAD_READY) {
-            list_add_tail(&proc->node, &sche->ready);
-        } else if (proc->thread.state == THREAD_WAIT_POLL) {
-            list_add_tail(&proc->node, &sche->wait_poll);
-        } else if (proc->thread.state == THREAD_WAIT_EXIT &&
-                   proc->cleanup) {
-            proc_cleanup_fn cleanup = proc->cleanup;
-            void *cleanup_arg = proc->cleanup_arg;
-            struct proc_family *family = proc->family;
-            int root = !proc->parent && family;
+            list_del_init(&proc->node);
+            proc_state_set(proc, THREAD_RUNNING);
+            switch_context(init, &proc->thread);
+            proc = (struct proc *)sche->stopped;
 
-            proc->cleanup = 0;
-            proc->cleanup_arg = 0;
-            cleanup(proc, cleanup_arg);
-            if (root) {
-                proc_family_destroy(family);
-                proc_slot_release(proc);
+            if (proc->thread.state == THREAD_WAIT_EXIT &&
+                       proc->cleanup) {
+                scheduler_cleanup_proc(proc);
             }
         }
     }

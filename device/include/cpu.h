@@ -24,9 +24,11 @@ struct mem_state {
 struct sche_state {
     struct thread init;
     struct list_head ready;
+    struct list_head active;
     struct list_head wait_poll;
     struct list_head wait_event;
-    size_t event_waiters;
+    struct thread *stopped;
+    uint32_t profile_enabled;
     uint32_t next_id;
     struct proc_slot *free_proc_slots;
     uint32_t free_proc_slot_count;

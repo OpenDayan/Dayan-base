@@ -10,8 +10,9 @@ demo/
 ├── Makefile
 ├── device_include/cstdint       # freestanding Device 指令头兼容层
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
+├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
-├── matmul_bf16_4c.cpp           # 2x2 Cluster OS 流水与源端推送 A/B 广播
+├── matmul_bf16_4c.cpp           # 2x2 Cluster OS：DRAM Load、远端 Copy、双 MatStore
 ├── run_matmul_cmodel.sh
 ├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
@@ -29,7 +30,9 @@ make -C demo
 ```
 
 产物为 `build/demo/print_demo`、`build/demo/lsu_bandwidth`、
-`build/demo/matmul_bf16_1c` 和 `build/demo/matmul_bf16_4c`。矩阵指令定义来自相邻的
+`build/demo/shared_notify_latency`、
+`build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
+`build/demo/matmul_bf16_4c_d2a_model`。矩阵指令定义来自相邻的
 `npu-kernels` 仓库，默认路径是 `../npu-kernels`，也可显式覆盖：
 
 ```sh
@@ -58,6 +61,30 @@ build/demo/lsu_bandwidth d2u
 build/demo/lsu_bandwidth u2d
 ```
 
+## 跨 Core 通知延迟微基准
+
+`shared_notify_latency` 隔离测量 Atomic Cache 上
+`dayan_shared_resource_t` 的 core 0 -> core 1 通知路径。core 1 先用另一项
+Shared Resource 发布 armed 握手，保证自己已经进入接收流程；core 0 随后在
+`dayan_shared_resource_produce()` 前记录 `mcycle`，core 1 在
+`dayan_shared_resource_wait_ready()` 返回后立即记录 `mcycle`。此外 core 1 会立刻
+回 ACK，得到一个不依赖跨 Core 计数器对齐的 round-trip 对照。默认预热 16 次并采集
+64 个样本，可指定不超过 512 的样本数：
+
+```sh
+build/demo/shared_notify_latency
+build/demo/shared_notify_latency 512
+```
+
+主指标包含 producer API、Atomic Cache 状态可见性、接收 Core 的 scheduler 轮询和
+线程恢复；不包含 kernel 启动、初始化 barrier 和结果回传。为 TestCluster 的
+`nd` 波形窗口定位时，可传入第二个参数让 core 0 在初始化后打印 marker 并延迟指定
+周期；该延时不进入样本时间戳：
+
+```sh
+build/demo/shared_notify_latency 1 200000
+```
+
 参数省略时使用 `11 22 33 44 55 66 77`。示例采用
 `NPUTaskDim3{2, 2, 1}` 和 `NPUTaskMode::kSingleCore`，因此 Device 应输出四行；不同
 logical task 的输出顺序由 Service 调度决定，不应依赖其顺序。Device `printf` 由
@@ -79,12 +106,14 @@ buffer 真双缓冲，C 使用三个跨 K 循环常驻的 slice buffer。B 的�
 consumer 关系由 `dayan_resource_init/alloc/produce/wait/consume` 管理；LSU 和 MAT
 完成等待分别使用 `dayan_wait_lsu()` 与 `dayan_wait_mat()`。
 
-默认 Host case 为 `M=384, N=64, K=256`，它会生成确定性 BF16 输入、执行 Device
-kernel、下载结果并逐元素和 CPU 参考结果比较：
+默认 Host case 为 `M=768, N=512, K=1536`，与四 Core 默认 case 中每个 Core
+承担的矩阵范围和 tile 数量完全一致，便于直接比较单核流水与跨核协作开销。它会生成
+确定性 BF16 输入、执行 Device kernel、回传无 profile 扰动的 Device `mcycle`
+吞吐，并逐元素和 CPU 参考结果比较：
 
 ```sh
 build/demo/matmul_bf16_1c
-build/demo/matmul_bf16_1c 768 256 512
+build/demo/matmul_bf16_1c 384 256 512
 ```
 
 当前保留原分块算法的对齐约束：`N` 必须是 16 的整数倍，`K` 必须是 256 的整数倍。
@@ -127,22 +156,42 @@ bash demo/run_matmul_cmodel.sh 384 64 256
 
 ```sh
 make -C demo run-matmul-4c
-bash demo/run_matmul_4c_cmodel.sh 2048 2048 2048
+bash demo/run_matmul_4c_cmodel.sh 1536 1024 1536
 ```
 
-默认 case 为 `M=2048, N=2048, K=2048`。每个 Core 使用
+默认 case 为 `M=1536, N=1024, K=1536`：M/N 各覆盖 2x2 个完整的 Cluster tile，
+K 包含 6 个分片，可以充分展开 A/B 双缓冲流水并降低启动、收尾占比。每个 Core 使用
 `tileM=384`、`tileN=256`、`tileK=256`，与单 Core 版本严格相同；三个
-consumer 分别处理一个 `128x256x256` MAT slice。A、双缓冲 B 和常驻 C
-合计占用 832KiB URAM。M 维在两行 Core 之间连续等分，每行再按 384 行推进，
-避免 M tile 数为奇数时的负载不均；N 维仍按 256 列 tile 交错分给两列 Core。
-每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 横向推送 A，core 01/10
-纵向推送 B。A 不再由根线程串行生产：三个 consumer 各自使用 LSU group
-`0/4/2` 发射本 slice 的 D2U。源端在 A 和 B 均就绪后连续发射 A U2D 与本地
-MAT，再等待 U2D 完成并发布对应的 `dayan_shared_resource_t`；因此广播可以与
-源端 MAT 重叠，任一 slice 完成 MAT 后也可以独立进入下一代。接收端直接等待
-描述符并使用已经落入本地 URAM 的数据，不再发起拉取 DMA。描述符一直占用到
-远端 MAT 完成，避免源端过早覆盖远端 A。B 继续用双缓冲，C store 的 wait 延后
-到下一块 C 被覆盖之前。
+`128x256x256` slice 严格按线性顺序执行。A 和 B 都使用双缓冲，三个 C slice
+在 K 循环内常驻，合计正好占用 1MiB URAM。M 维在两行 Core 之间连续等分，
+每行再按 384 行推进；N 维按 256 列 tile 交错分给两列 Core。
+
+每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 负责 A，core 01/10 负责
+B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker 和两个 MatStore
+worker。DRAM Loader 发射本代首条 D2U 后通过本地 `dayan_resource_t` 允许 Copy
+进入；源数据真正完成后再通过 Atomic Cache 中的 `dayan_shared_resource_t`
+发布给远端。Copy 使用 D2U 从源 Core URAM 拉取已完成的数据，MAT 只消费本地
+Resource。两个 MatStore 静态交替处理线性 job：前一条 MAT 成功入队后才用本地
+Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射顺序不会反转。
+整个数据面不使用自写 generation 原子轮询或动态抢任务。
 对应日志为
 `build/demo/matmul_4c_cmodel.log`、`build/demo/matmul_4c_dayan_server.log` 和
 `build/demo/matmul_bf16_4c.log`。
+
+## 四 Core D2A 性能模型
+
+`matmul_bf16_4c_d2a_model` 是由同一份 4C 源码条件编译出的假想性能版本。未来 D2A
+被建模为一次源端 D2U：该 DMA 完成时，数据被视为已经同时写入源端和远端 URAM。
+远端 Copy worker 仍负责把 Atomic Cache 中的 shared resource 转换为本地 resource，
+从而保留真实算子的线程调度、顺序发布和双缓冲生命周期；但它不发远端 D2U，也不执行
+`dayan_wait_lsu()`。通知器直接依赖源端 shared resource，不再等待本核心 Loader 的
+`load_issued`；后者是旧 Copy-DMA 的本地发射顺序约束，会在无 DMA 模型里造成跨核等待
+环。A 仍按三个 128-row slice 逐片发布，MAT、C 写回和所有本地数据依赖保持不变。
+
+当前硬件没有 D2A，远端 URAM 中不会获得正确数据，因此该目标只报告 Device `mcycle`
+性能并明确跳过数值校验。默认尺寸同 4C 实算版本，为 `1536x1024x1536`：
+
+```sh
+build/demo/matmul_bf16_4c_d2a_model
+build/demo/matmul_bf16_4c_d2a_model 768 512 256
+```

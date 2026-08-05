@@ -8,6 +8,10 @@
 _Static_assert(CONFIG_HART_COUNT <= 32,
                "RPC interrupt controller has only 32 lines");
 
+enum {
+    CACHE_FENCE_THRESHOLD = 16 * 1024,
+};
+
 static volatile uint32_t *rpc_interrupt_reg(uintptr_t offset)
 {
     return (volatile uint32_t *)((uintptr_t)CONFIG_CONTROL_BASE + offset);
@@ -49,8 +53,6 @@ uintptr_t platform_hart_id(void)
 
 __attribute__((weak)) void platform_cache_init(void)
 {
-    // __asm__ volatile("fence.i" ::: "memory");
-    // __asm__ volatile("fence rw, rw" ::: "memory");
 }
 
 __attribute__((weak)) void platform_cache_clean(const void *addr, size_t size)
@@ -60,6 +62,10 @@ __attribute__((weak)) void platform_cache_clean(const void *addr, size_t size)
 
     if (!size)
         return;
+    if (size > CACHE_FENCE_THRESHOLD) {
+        __asm__ volatile("fence rw, rw" ::: "memory");
+        return;
+    }
     line = (uintptr_t)addr & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
     if (size - 1 > UINTPTR_MAX - (uintptr_t)addr)
         last = UINTPTR_MAX & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
@@ -67,7 +73,6 @@ __attribute__((weak)) void platform_cache_clean(const void *addr, size_t size)
         last = ((uintptr_t)addr + size - 1) &
                ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
 
-    __asm__ volatile("fence rw, rw" ::: "memory");
     for (;;) {
         __asm__ volatile(".insn i 0x0f, 2, x0, %0, 0x002"
                          : : "r"(line) : "memory");
@@ -75,7 +80,6 @@ __attribute__((weak)) void platform_cache_clean(const void *addr, size_t size)
             break;
         line += CONFIG_CACHE_LINE_SIZE;
     }
-    __asm__ volatile("fence rw, rw" ::: "memory");
 }
 
 __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
@@ -85,6 +89,10 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
 
     if (!size)
         return;
+    if (size > CACHE_FENCE_THRESHOLD) {
+        __asm__ volatile("fence rw, rw" ::: "memory");
+        return;
+    }
     line = (uintptr_t)addr & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
     if (size - 1 > UINTPTR_MAX - (uintptr_t)addr)
         last = UINTPTR_MAX & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
@@ -92,7 +100,6 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
         last = ((uintptr_t)addr + size - 1) &
                ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
 
-    __asm__ volatile("fence rw, rw" ::: "memory");
     for (;;) {
         __asm__ volatile(".insn i 0x0f, 2, x0, %0, 0x000"
                          : : "r"(line) : "memory");
@@ -100,7 +107,6 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
             break;
         line += CONFIG_CACHE_LINE_SIZE;
     }
-    __asm__ volatile("fence rw, rw" ::: "memory");
 }
 
 void platform_instruction_fence(void)
