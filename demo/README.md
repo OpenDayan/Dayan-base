@@ -196,3 +196,17 @@ Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射�
 build/demo/matmul_bf16_4c_d2a_model
 build/demo/matmul_bf16_4c_d2a_model 768 512 256
 ```
+
+## 四 Core 直接广播性能模型
+
+`matmul_bf16_broadcast_4c` 建模更完整的未来广播指令：源端 Loader 的一次 D2U
+同时填充本地和远端 URAM，完成后直接发布本地 Resource 和 Atomic Cache Shared
+Resource。tile 固定为 `512x384x256`，A 沿 M 维等分为四个 `128x256` slice。
+每个 Core 只创建一个 DRAM Loader 和两个有序 MatStore worker，不再创建 Copy worker；
+源端 MAT 消费本地 Resource，远端 MAT 直接等待并消费 Shared Resource。B 的远端
+Shared Resource 由四个 M slice 分别消费。模型保留真实的 Load/MAT/C 写回时序与同步
+成本，但由于当前指令不会真实写入远端 URAM，仍跳过数值校验。
+
+```sh
+build/demo/matmul_bf16_broadcast_4c
+```
