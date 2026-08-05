@@ -118,6 +118,14 @@ demo 构建末尾的 `device-isa-check: PASS` 很重要。当前硬件不支持 
 make -B -C ./demo -j72 all
 ```
 
+正式四核 matmul 默认使用四个 M slice；也可以显式构建目标以避免复用旧的三 slice
+产物：
+
+```sh
+make -B -C ./demo -j72 MATMUL_4C_SLICES=4 \
+  ../build/demo/matmul_bf16_4c
+```
+
 ## 4. 推荐：使用生命周期 runner
 
 runner 位于 `./scripts/run_testcluster_operator.py`。
@@ -207,11 +215,11 @@ python3 ./scripts/run_testcluster_operator.py \
   --startup-timeout 180 \
   --core-mask 0xf \
   --expect '[host] PASS:' \
-  -- ./build/demo/matmul_bf16_4c 1024 512 256
+  -- ./build/demo/matmul_bf16_4c 1024 768 256
 ```
 
-当前 4c 默认 case 是 `2048x2048x2048`，每 Core tile 为 `512x256x256`，三片 M
-slice 为 `160/192/160`，Cluster output tile 为 `1024x512`。完整默认 case 可省略参数：
+当前 4c 默认 case 是 `1024x1536x1536`，每 Core tile 为 `512x384x256`，四片 M
+slice 均为 128 行，Cluster output tile 为 `1024x768`。完整默认 case 可省略参数：
 
 ```sh
 python3 ./scripts/run_testcluster_operator.py \
@@ -225,10 +233,9 @@ python3 ./scripts/run_testcluster_operator.py \
   -- ./build/demo/matmul_bf16_4c
 ```
 
-`2048^3` 包含约 8.59G 次 BF16 MAC。Verilator RTL 仿真会比 cmodel 慢得多，适合作为
-长时间回归，不适合作为首次 bring-up。当前 demo 内部 launch/memcpy timeout 为 30
-分钟；如果所用 TestCluster 无法在这个时间内完成，需先提高 demo 的 timeout 并重新
-构建。日常调试优先使用前面的单 Cluster tile case，完整数值验证可先运行：
+默认 case 包含约 2.42G 次 BF16 MAC，K 方向有 6 个分片，足以展开四 slice 流水。
+Verilator RTL 仿真仍明显慢于 cmodel；日常 bring-up 可先使用前面的单 Cluster tile
+case，完整数值验证可先运行：
 
 ```sh
 make -C ./demo run-matmul-4c
@@ -240,6 +247,8 @@ make -C ./demo run-matmul-4c
 runner 设置的 `DAYAN_SERVER_SOCKET` 会被 `dyperf` 读取并继续传给子进程：
 
 ```sh
+PERF_RUN_DIR="$PWD/build/testcluster-runs/matmul-bf16-4c-dyperf-$(date +%Y%m%d-%H%M%S)"
+
 python3 ./scripts/run_testcluster_operator.py \
   --repo . \
   --sim-dir "$NPU_TC_ROOT" \
@@ -247,10 +256,11 @@ python3 ./scripts/run_testcluster_operator.py \
   --dram-config "$NPU_TC_DRAM" \
   --startup-timeout 180 \
   --core-mask 0xf \
+  --log-dir "$PERF_RUN_DIR" \
   --expect '[host] PASS:' \
   -- ./build/host/dyperf/dyperf \
-     --output ./build/matmul-4c-trace.json \
-     -- ./build/demo/matmul_bf16_4c 2048 2048 2048
+     --output "$PERF_RUN_DIR/trace.json" \
+     -- ./build/demo/matmul_bf16_4c 1024 1536 1536
 ```
 
 未显式指定 `--duration-ms` 时，采样持续到算子退出，`dyperf` 返回算子的退出码。显式
@@ -444,7 +454,7 @@ DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
 
 ```sh
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
-  ./build/demo/matmul_bf16_4c 1024 512 256
+  ./build/demo/matmul_bf16_4c 1024 768 256
 ```
 
 四核完整默认 case：
@@ -459,8 +469,8 @@ DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
 ```sh
 DAYAN_SERVER_SOCKET="$DAYAN_SERVER_SOCKET" \
   ./build/host/dyperf/dyperf \
-    --output ./build/matmul-4c-trace.json \
-    -- ./build/demo/matmul_bf16_4c 1024 512 256
+    --output ./build/testcluster-runs/matmul-4c-trace.json \
+    -- ./build/demo/matmul_bf16_4c 1024 768 256
 ```
 
 同一个 Server 可以并行接受 `dyperf` 和多个 Host Runtime；算子能否同时执行还受 Core、
@@ -687,5 +697,5 @@ Host 算子已经报告 PASS 且清理发生在其后，这只是交互命令的
 2. 用 cmodel 运行目标算子的完整数值 case；
 3. 用 TestCluster runner 跑 `print_demo`，确认 BL0/BL1、RPC 和 Device printf；
 4. 用 TestCluster 跑单核或一个对齐的四核 Cluster tile；
-5. 只有需要发布回归或硬件时序证据时，才运行 `2048^3` 长 case 或开启波形；
+5. 只有需要发布回归或硬件时序证据时，才运行完整 `1024x1536x1536` case 或开启波形；
 6. 以 Host 退出码和数值参考校验为最终判据，并保留本次 runner 日志目录。

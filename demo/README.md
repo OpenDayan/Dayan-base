@@ -162,8 +162,8 @@ bash demo/run_matmul_4c_cmodel.sh 1024 1536 1536
 默认 case 为 `M=1024, N=1536, K=1536`：M 正好覆盖一个完整的 2-Core tile，
 N 正好覆盖两个完整的 2-Core tile，K 包含 6 个分片，可以充分展开 slice 流水并
 避免 M/N 边缘碎片。每个 Core 使用 `tileM=512`、`tileN=384`、
-`tileK=256`；三个 M slice 分别为 170、171、171 行，并严格按线性顺序执行。
-A 的每个 slice 使用单缓冲，B 保持两个 full-tile buffer 真双缓冲，三个 FP32 C
+`tileK=256`；四个 M slice 均为 128 行，并严格按线性顺序执行。
+A 的每个 slice 使用单缓冲，B 保持两个 full-tile buffer 真双缓冲，四个 FP32 C
 slice 在 K 循环内常驻，合计占用 1.375MiB URAM。M 维在两行 Core 之间连续等分，
 每行再按 512 行推进；N 维按 384 列 tile 交错分给两列 Core。
 
@@ -187,7 +187,7 @@ Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射�
 从而保留真实算子的线程调度、顺序发布和 buffer 生命周期；但它不发远端 D2U，也不执行
 `dayan_wait_lsu()`。通知器直接依赖源端 shared resource，不再等待本核心 Loader 的
 `load_issued`；后者是旧 Copy-DMA 的本地发射顺序约束，会在无 DMA 模型里造成跨核等待
-环。A 仍按三个 170/171/171-row slice 逐片发布，MAT、C 写回和所有本地数据依赖保持不变。
+环。A 仍按四个 128-row slice 逐片发布，MAT、C 写回和所有本地数据依赖保持不变。
 
 当前硬件没有 D2A，远端 URAM 中不会获得正确数据，因此该目标只报告 Device `mcycle`
 性能并明确跳过数值校验。默认尺寸同 4C 实算版本，为 `1024x1536x1536`：

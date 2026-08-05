@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 #ifndef MATMUL_BF16_4C_SLICES
-#define MATMUL_BF16_4C_SLICES 3
+#define MATMUL_BF16_4C_SLICES 4
 #endif
 
 #ifndef MATMUL_BF16_4C_URAM_BYTES
@@ -123,8 +123,9 @@ struct Constants {
 };
 
 static_assert(MATMUL_BF16_4C_SLICES == 1 ||
-                  MATMUL_BF16_4C_SLICES == 3,
-              "MATMUL_BF16_4C_SLICES must be 1 or 3");
+                  MATMUL_BF16_4C_SLICES == 3 ||
+                  MATMUL_BF16_4C_SLICES == 4,
+              "MATMUL_BF16_4C_SLICES must be 1, 3, or 4");
 static_assert(Constants::kTileM == 512 && Constants::kTileN == 384,
               "4-Core matmul uses a 512x384 output tile per Core");
 static_assert(Constants::kTileK == 256,
@@ -241,10 +242,16 @@ template <int SliceCount> struct UramLayout {
 using Layout = UramLayout<MATMUL_BF16_4C_SLICES>;
 
 static_assert(MATMUL_BF16_4C_SLICES == 1 ||
-                  (Layout::slice_rows(0) == 170 &&
+                  (MATMUL_BF16_4C_SLICES == 3 &&
+                   Layout::slice_rows(0) == 170 &&
                    Layout::slice_rows(1) == 171 &&
-                   Layout::slice_rows(2) == 171),
-              "three-slice mode must cover the 512-row tile exactly");
+                   Layout::slice_rows(2) == 171) ||
+                  (MATMUL_BF16_4C_SLICES == 4 &&
+                   Layout::slice_rows(0) == 128 &&
+                   Layout::slice_rows(1) == 128 &&
+                   Layout::slice_rows(2) == 128 &&
+                   Layout::slice_rows(3) == 128),
+              "slice mode must cover the 512-row tile exactly");
 static_assert(Layout::total_bytes() == 1441792U,
               "512x384x256 single-A/double-B layout must use 1.375 MiB");
 static_assert(Layout::total_bytes() <= MATMUL_BF16_4C_URAM_BYTES,
@@ -794,9 +801,12 @@ static inline void configure_mat_slice(const MatmulState *state)
 static inline void configure_mat_slices(const MatmulState *state)
 {
     configure_mat_slice<0, 0>(state);
-#if MATMUL_BF16_4C_SLICES == 3
+#if MATMUL_BF16_4C_SLICES >= 3
     configure_mat_slice<4, 1>(state);
     configure_mat_slice<2, 2>(state);
+#endif
+#if MATMUL_BF16_4C_SLICES == 4
+    configure_mat_slice<1, 3>(state);
 #endif
 }
 
@@ -933,12 +943,17 @@ static void mat_worker(void *argument)
             case 0:
                 execute_mat_job<0, 0>(state, &job, worker);
                 break;
-#if MATMUL_BF16_4C_SLICES == 3
+#if MATMUL_BF16_4C_SLICES >= 3
             case 1:
                 execute_mat_job<4, 1>(state, &job, worker);
                 break;
             case 2:
                 execute_mat_job<2, 2>(state, &job, worker);
+                break;
+#endif
+#if MATMUL_BF16_4C_SLICES == 4
+            case 3:
+                execute_mat_job<1, 3>(state, &job, worker);
                 break;
 #endif
             default:

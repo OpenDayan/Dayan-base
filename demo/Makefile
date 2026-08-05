@@ -7,6 +7,7 @@ NPU_KERNELS_DIR ?= $(abspath $(ROOT)/../npu-kernels)
 NPU_KERNEL_INCLUDE := $(NPU_KERNELS_DIR)/include
 DAYAN_API_HEADERS := $(wildcard $(ROOT)/device/include/api/*.h)
 MATMUL_SLICES ?= 3
+MATMUL_4C_SLICES ?= 4
 MATMUL_BROADCAST_SLICES ?= 4
 DEVICE_ISA_CHECK := ./check_device_isa.sh
 
@@ -96,7 +97,7 @@ $(MATMUL_4C_TARGET): matmul_bf16_4c.cpp $(MATMUL_HEADERS) $(DAYAN_API_HEADERS) \
 	@mkdir -p $(dir $@)
 	$(DYCC) --save-temps=$(MATMUL_4C_TEMPS) -O2 -Wall -Wextra -Werror \
 		-I$(NPU_KERNEL_INCLUDE) \
-		-DMATMUL_BF16_4C_SLICES=$(MATMUL_SLICES) \
+		-DMATMUL_BF16_4C_SLICES=$(MATMUL_4C_SLICES) \
 		-Xdevice -I$(abspath device_include) $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(MATMUL_4C_TEMPS)/matmul_bf16_4c.cpp.dycc.device.o
@@ -107,7 +108,7 @@ $(MATMUL_4C_D2A_TARGET): matmul_bf16_4c.cpp $(MATMUL_HEADERS) \
 	@mkdir -p $(dir $@)
 	$(DYCC) --save-temps=$(MATMUL_4C_D2A_TEMPS) \
 		-O2 -Wall -Wextra -Werror -I$(NPU_KERNEL_INCLUDE) \
-		-DMATMUL_BF16_4C_SLICES=$(MATMUL_SLICES) \
+		-DMATMUL_BF16_4C_SLICES=$(MATMUL_4C_SLICES) \
 		-DMATMUL_BF16_4C_D2A_MODEL=1 \
 		-Xdevice -I$(abspath device_include) $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
