@@ -89,10 +89,6 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
 
     if (!size)
         return;
-    if (size > CACHE_FENCE_THRESHOLD) {
-        __asm__ volatile("fence rw, rw" ::: "memory");
-        return;
-    }
     line = (uintptr_t)addr & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
     if (size - 1 > UINTPTR_MAX - (uintptr_t)addr)
         last = UINTPTR_MAX & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);

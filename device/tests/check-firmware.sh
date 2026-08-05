@@ -155,17 +155,27 @@ if grep -Eq '(^|[[:space:]])fence([[:space:]]|$)' <<<"$dapi_dump" ||
 fi
 
 local_resource_apis=dayan_resource_init,dayan_resource_alloc,dayan_resource_produce,dayan_resource_consume,dayan_resource_wait_ready,dayan_resource_wait_free
-shared_resource_mutators=dayan_shared_resource_alloc,dayan_shared_resource_produce,dayan_shared_resource_consume
 if $objdump --no-show-raw-insn \
         --disassemble-symbols="$local_resource_apis" \
         "$build/sche/dapi.o" | \
         grep -Eq '(^|[[:space:]])(amo[^[:space:]]*|lr\.[wd][^[:space:]]*|sc\.[wd][^[:space:]]*|fence)([[:space:]]|$)'; then
     fail "per-hart resource API must not use atomic instructions"
 fi
-if ! $objdump --no-show-raw-insn \
-        --disassemble-symbols="$shared_resource_mutators" \
-        "$build/sche/dapi.o" | grep -Eq 'amoswap\.w([[:space:]]|$)'; then
-    fail "shared resource API must use an atomic lock"
+shared_alloc_dump=$($objdump --no-show-raw-insn \
+    --disassemble-symbols=dayan_shared_resource_alloc "$build/sche/dapi.o")
+shared_produce_dump=$($objdump --no-show-raw-insn \
+    --disassemble-symbols=dayan_shared_resource_produce "$build/sche/dapi.o")
+shared_consume_dump=$($objdump --no-show-raw-insn \
+    --disassemble-symbols=dayan_shared_resource_consume "$build/sche/dapi.o")
+grep -Eq 'amocas\.d([[:space:]]|$)' <<<"$shared_alloc_dump" ||
+    fail "shared resource allocation must use native 64-bit AMOCAS"
+grep -Eq 'amoadd\.d([[:space:]]|$)' <<<"$shared_produce_dump" ||
+    fail "shared resource produce must use native 64-bit AMOADD"
+grep -Eq 'amoadd\.d([[:space:]]|$)' <<<"$shared_consume_dump" ||
+    fail "shared resource consume must use native 64-bit AMOADD"
+shared_resource_dump="$shared_alloc_dump$shared_produce_dump$shared_consume_dump"
+if grep -Eq 'amoswap\.[wd]([[:space:]]|$)' <<<"$shared_resource_dump"; then
+    fail "shared resource API must not use an atomic spin lock"
 fi
 barrier_dump=$($objdump --no-show-raw-insn \
     --disassemble-symbols=dayan_cluster_barrier "$build/sche/dapi.o")

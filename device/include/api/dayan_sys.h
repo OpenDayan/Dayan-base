@@ -62,12 +62,14 @@ typedef struct dayan_resource {
     struct list_head wait_free;
 } dayan_resource_t;
 
-/* Cross-hart resource. Place it within the allocation rooted at shared. */
+/*
+ * Cross-hart resource. Place it within the allocation rooted at shared.
+ * Fields are private. counts packs producer_remaining in bits 63:32 and
+ * consumer_remaining in bits 31:0.
+ */
 typedef struct dayan_shared_resource {
-    uint32_t state;
-    uint32_t producer_count;
-    uint32_t consumer_count;
-    uint32_t lock;
+    uint64_t counts;
+    uint64_t reserved;
 } dayan_shared_resource_t;
 
 #ifdef __cplusplus

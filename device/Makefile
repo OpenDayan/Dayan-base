@@ -36,7 +36,7 @@ URAM_BASE       ?= 0x00800000
 URAM_SIZE       ?= 0x00180000
 URAM_STRIDE     ?= 0x00200000
 
-ARCH := rv64imaf_zicsr_zifencei
+ARCH := rv64imaf_zicsr_zifencei_zacas
 ABI  := lp64
 
 CPPFLAGS := -Iinclude/api -Iinclude -Ilib/include \

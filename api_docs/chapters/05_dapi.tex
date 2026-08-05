@@ -114,14 +114,16 @@ FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE；当 producer co
 
 \code{dayan_shared_resource_t} 表达 Cluster 内跨 Hart 的发布/消费。对象必须位于当前 kernel
 的 \code{shared} allocation 且满足自然对齐；其状态更新使用 Atomic Cache 可见的原子
-操作，等待侧以 scheduler poll 让出 Core。
+操作，等待侧以 scheduler poll 让出 Core。producer/consumer 剩余计数打包在同一个
+64-bit 状态字中，分配使用 \code{amocas.d}，发布和消费使用 \code{amoadd.d}，不使用
+自旋锁。
 
 \begin{dayantable}{Shared resource dapi}{tab:api-dapi-shared-resource}{X[47,l] X[53,l]}
   API & 行为 \\
   \code{dayan_shared_resource_init} & 校验 shared 范围，并将跨 Hart 对象初始化为 FREE。 \\
-  \code{dayan_shared_resource_alloc} & 原子地从 FREE 开始一代资源并设置计数。 \\
-  \code{dayan_shared_resource_produce} & 原子递减 producer count，最后一个 producer 发布 READY。 \\
-  \code{dayan_shared_resource_consume} & 原子递减 consumer count，最后一个 consumer 发布 FREE。 \\
+  \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 开始一代资源并设置计数。 \\
+  \code{dayan_shared_resource_produce} & 使用 \code{amoadd.d} 原子递减 producer count，最后一个 producer 发布 READY。 \\
+  \code{dayan_shared_resource_consume} & 使用 \code{amoadd.d} 原子递减 consumer count，最后一个 consumer 发布 FREE。 \\
   \code{dayan_shared_resource_wait_ready} & 可调度地轮询，直到跨 Hart 资源为 READY。 \\
   \code{dayan_shared_resource_wait_free} & 可调度地轮询，直到跨 Hart 资源为 FREE。 \\
 \end{dayantable}

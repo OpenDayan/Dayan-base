@@ -92,11 +92,11 @@ x=0--3 分别对应同一 Cluster 内一次 group 调度的四个 lane；y、z �
 \begin{dayantable}{跨核 resource 接口}{tab:kernel-032}{X[42,l] X[58,l]}
   符号 & 行为 \\
   \code{dayan_shared_resource_init} & 检查硬件 coherent window，并原子初始化为 FREE。 \\
-  \code{dayan_shared_resource_alloc} & 在锁内设置 producer/consumer 数量。 \\
-  \code{dayan_shared_resource_produce} & 减少 producer；最后一次以 release 语义发布 READY。 \\
-  \code{dayan_shared_resource_consume} & 减少 consumer；最后一次以 release 语义发布 FREE。 \\
-  \code{dayan_shared_resource_wait_ready} & 以 acquire load 检查 READY，未满足时进入 poll wait。 \\
-  \code{dayan_shared_resource_wait_free} & 以 acquire load 检查 FREE，未满足时进入 poll wait。 \\
+  \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 原子安装 producer/consumer 计数。 \\
+  \code{dayan_shared_resource_produce} & 使用一条 \code{amoadd.d} 减少 producer；归零即发布 READY。 \\
+  \code{dayan_shared_resource_consume} & 使用一条 \code{amoadd.d} 减少 consumer；整个状态字归零即发布 FREE。 \\
+  \code{dayan_shared_resource_wait_ready} & 读取打包状态字检查 READY，未满足时进入 poll wait。 \\
+  \code{dayan_shared_resource_wait_free} & 读取打包状态字检查 FREE，未满足时进入 poll wait。 \\
 \end{dayantable}
 
 初始化函数按当前 proc 保存的 Host allocation 精确长度检查对象边界。默认 coherent

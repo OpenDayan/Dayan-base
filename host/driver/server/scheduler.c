@@ -552,13 +552,11 @@ static int initialize_shared(dayan_server_t *server,
         uint32_t instance;
 
         for (instance = 0; instance < sync->count; ++instance) {
-            uint32_t state = sync->producer_count ? 1U : 2U;
+            uint64_t counts =
+                ((uint64_t)sync->producer_count << 32) |
+                sync->consumer_count;
 
-            memcpy(image + resource_offset, &state, sizeof(state));
-            memcpy(image + resource_offset + 4U, &sync->producer_count,
-                   sizeof(sync->producer_count));
-            memcpy(image + resource_offset + 8U, &sync->consumer_count,
-                   sizeof(sync->consumer_count));
+            memcpy(image + resource_offset, &counts, sizeof(counts));
             resource_offset += SERVER_SHARED_RESOURCE_SIZE;
         }
     }

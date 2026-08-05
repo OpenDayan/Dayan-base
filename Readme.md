@@ -401,8 +401,10 @@ Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项�
 与本核另一个 proc 同时执行。初始化后，存在等待者的资源对象不得复制、移动或再次
 初始化。
 
-`dayan_shared_resource_t` 供多个 hart 共享，所有字段通过 `__atomic` 访问，临界区使用
-RV64A 原子锁。它不能保存只对某个 hart 私有的 proc 链表节点，因此
+`dayan_shared_resource_t` 供多个 hart 共享。producer/consumer 剩余计数打包在同一个
+64-bit 状态字中：`alloc()` 使用 `amocas.d` 从 FREE 原子安装新一代计数，`produce()`
+和 `consume()` 分别使用一条 `amoadd.d` 递减计数，全程没有自旋锁。它不能保存只对某个
+hart 私有的 proc 链表节点，因此
 `wait_ready/free()` 使用 `proc_wait_poll()` 检查一致性状态。`dayan_sys.h` 以全局寄存器
 变量的形式把 `shared` 直接绑定到 `gp`；它没有内存符号，也不是固件定义的普通全局
 变量，算子代码不得改写它。算子应在 Host

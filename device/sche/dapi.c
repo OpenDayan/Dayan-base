@@ -10,6 +10,11 @@ _Static_assert(sizeof(dayan_resource_t) == 64,
                "dayan resource ABI must stay fixed");
 _Static_assert(sizeof(dayan_shared_resource_t) == 16,
                "dayan shared resource ABI must stay fixed");
+_Static_assert(_Alignof(dayan_shared_resource_t) == 8,
+               "dayan shared resource ABI alignment changed");
+_Static_assert(offsetof(dayan_shared_resource_t, counts) == 0 &&
+                   offsetof(dayan_shared_resource_t, reserved) == 8,
+               "dayan shared resource ABI layout changed");
 _Static_assert(sizeof(dayan_cluster_barrier_t) == 16,
                "dayan cluster barrier ABI must stay fixed");
 _Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
@@ -53,23 +58,64 @@ static inline uint32_t resource_state(const dayan_resource_t *resource)
     return resource->state;
 }
 
-static inline void shared_resource_lock(dayan_shared_resource_t *resource)
+#define SHARED_RESOURCE_PRODUCER_ONE (1ULL << 32)
+
+static inline uint64_t shared_resource_pack(uint32_t producer_count,
+                                            uint32_t consumer_count)
 {
-    while (__atomic_exchange_n(&resource->lock, 1, __ATOMIC_RELAXED)) {
-        while (__atomic_load_n(&resource->lock, __ATOMIC_RELAXED))
-            __asm__ volatile("" ::: "memory");
-    }
+    return ((uint64_t)producer_count << 32) | consumer_count;
 }
 
-static inline void shared_resource_unlock(dayan_shared_resource_t *resource)
+static inline uint32_t shared_resource_producers(uint64_t counts)
 {
-    __atomic_store_n(&resource->lock, 0, __ATOMIC_RELAXED);
+    return (uint32_t)(counts >> 32);
+}
+
+static inline uint32_t shared_resource_consumers(uint64_t counts)
+{
+    return (uint32_t)counts;
+}
+
+static inline uint64_t shared_resource_counts(
+    const dayan_shared_resource_t *resource)
+{
+    return __atomic_load_n(&resource->counts, __ATOMIC_RELAXED);
+}
+
+static inline uint64_t shared_resource_fetch_add(
+    dayan_shared_resource_t *resource, uint64_t value)
+{
+    uint64_t old;
+
+    __asm__ volatile("amoadd.d %0, %2, (%1)"
+                     : "=r"(old)
+                     : "r"(&resource->counts), "r"(value)
+                     : "memory");
+    return old;
+}
+
+static inline uint64_t shared_resource_compare_exchange(
+    dayan_shared_resource_t *resource, uint64_t expected, uint64_t desired)
+{
+    uint64_t observed = expected;
+
+    /* AMOCAS.D: rd is both the comparison operand and returned old value. */
+    __asm__ volatile("amocas.d %0, %2, (%1)"
+                     : "+r"(observed)
+                     : "r"(&resource->counts), "r"(desired)
+                     : "memory");
+    return observed;
 }
 
 static inline uint32_t shared_resource_state(
     const dayan_shared_resource_t *resource)
 {
-    return __atomic_load_n(&resource->state, __ATOMIC_RELAXED);
+    uint64_t counts = shared_resource_counts(resource);
+
+    if (!counts)
+        return DAYAN_RESOURCE_FREE;
+    return shared_resource_producers(counts) ? DAYAN_RESOURCE_BUSY :
+                                               DAYAN_RESOURCE_READY;
 }
 
 static int shared_range_valid(const void *object, size_t object_size,
@@ -110,7 +156,7 @@ static inline int shared_resource_ready(struct proc *proc, void *arg)
 static inline int shared_resource_free(struct proc *proc, void *arg)
 {
     (void)proc;
-    return shared_resource_state(arg) == DAYAN_RESOURCE_FREE;
+    return shared_resource_counts(arg) == 0;
 }
 
 void dayan_yield(void)
@@ -376,11 +422,8 @@ int dayan_shared_resource_init(dayan_shared_resource_t *resource)
     if (!resource || !shared_resource_valid(resource))
         return -EINVAL;
 
-    __atomic_store_n(&resource->lock, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&resource->producer_count, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&resource->consumer_count, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&resource->state, DAYAN_RESOURCE_FREE,
-                     __ATOMIC_RELAXED);
+    __atomic_store_n(&resource->counts, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&resource->reserved, 0, __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -388,81 +431,46 @@ int dayan_shared_resource_alloc(dayan_shared_resource_t *resource,
                                 uint32_t producer_count,
                                 uint32_t consumer_count)
 {
-    int status = 0;
+    uint64_t counts;
 
     if (!resource || !consumer_count)
         return -EINVAL;
-
-    shared_resource_lock(resource);
-    if (__atomic_load_n(&resource->state, __ATOMIC_RELAXED) !=
-        DAYAN_RESOURCE_FREE) {
-        status = -EBUSY;
-    } else {
-        __atomic_store_n(&resource->producer_count, producer_count,
-                         __ATOMIC_RELAXED);
-        __atomic_store_n(&resource->consumer_count, consumer_count,
-                         __ATOMIC_RELAXED);
-        __atomic_store_n(&resource->state,
-                         producer_count ? DAYAN_RESOURCE_BUSY :
-                                          DAYAN_RESOURCE_READY,
-                         __ATOMIC_RELAXED);
-    }
-    shared_resource_unlock(resource);
-    return status;
+    counts = shared_resource_pack(producer_count, consumer_count);
+    return shared_resource_compare_exchange(resource, 0, counts) ?
+               -EBUSY : 0;
 }
 
 int dayan_shared_resource_produce(dayan_shared_resource_t *resource)
 {
-    uint32_t producer_count;
-    int status = 0;
+    uint64_t counts;
 
     if (!resource)
         return -EINVAL;
-
-    shared_resource_lock(resource);
-    producer_count = __atomic_load_n(&resource->producer_count,
-                                     __ATOMIC_RELAXED);
-    if (__atomic_load_n(&resource->state, __ATOMIC_RELAXED) !=
-            DAYAN_RESOURCE_BUSY ||
-        !producer_count) {
-        status = -EBUSY;
-    } else {
-        --producer_count;
-        __atomic_store_n(&resource->producer_count, producer_count,
-                         __ATOMIC_RELAXED);
-        if (!producer_count)
-            __atomic_store_n(&resource->state, DAYAN_RESOURCE_READY,
-                             __ATOMIC_RELAXED);
+    counts = shared_resource_fetch_add(resource,
+                                       -SHARED_RESOURCE_PRODUCER_ONE);
+    if (!shared_resource_producers(counts) ||
+        !shared_resource_consumers(counts)) {
+        (void)shared_resource_fetch_add(resource,
+                                        SHARED_RESOURCE_PRODUCER_ONE);
+        return -EBUSY;
     }
-    shared_resource_unlock(resource);
-    return status;
+    return 0;
 }
 
 int dayan_shared_resource_consume(dayan_shared_resource_t *resource)
 {
+    uint64_t counts;
     uint32_t consumer_count;
-    int status = 0;
 
     if (!resource)
         return -EINVAL;
-
-    shared_resource_lock(resource);
-    consumer_count = __atomic_load_n(&resource->consumer_count,
-                                     __ATOMIC_RELAXED);
-    if (__atomic_load_n(&resource->state, __ATOMIC_RELAXED) !=
-            DAYAN_RESOURCE_READY ||
-        !consumer_count) {
-        status = -EBUSY;
-    } else {
-        --consumer_count;
-        __atomic_store_n(&resource->consumer_count, consumer_count,
-                         __ATOMIC_RELAXED);
-        if (!consumer_count)
-            __atomic_store_n(&resource->state, DAYAN_RESOURCE_FREE,
-                             __ATOMIC_RELAXED);
+    counts = shared_resource_fetch_add(resource, ~0ULL);
+    consumer_count = shared_resource_consumers(counts);
+    if (shared_resource_producers(counts) || !consumer_count) {
+        (void)shared_resource_fetch_add(resource, 1ULL);
+        return -EBUSY;
     }
-    shared_resource_unlock(resource);
-    return status;
+    return 0;
 }
 
 int dayan_shared_resource_wait_ready(dayan_shared_resource_t *resource)
@@ -478,7 +486,7 @@ int dayan_shared_resource_wait_free(dayan_shared_resource_t *resource)
 {
     if (!resource)
         return -EINVAL;
-    while (shared_resource_state(resource) != DAYAN_RESOURCE_FREE)
+    while (shared_resource_counts(resource))
         proc_wait_poll(shared_resource_free, resource);
     return 0;
 }
