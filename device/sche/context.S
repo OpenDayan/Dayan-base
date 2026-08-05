@@ -20,6 +20,8 @@ switch_context:
     sd      s10, SWITCH_FRAME_S10(sp)
     sd      s11, SWITCH_FRAME_S11(sp)
     sd      gp, SWITCH_FRAME_GP(sp)
+    csrr    t0, fcsr
+    sd      t0, SWITCH_FRAME_FCSR(sp)
 
     sd      sp, THREAD_SP_OFFSET(a0)
     la      t0, switch_context_restore
@@ -49,6 +51,8 @@ switch_context_restore:
     ld      s10, SWITCH_FRAME_S10(sp)
     ld      s11, SWITCH_FRAME_S11(sp)
     ld      gp, SWITCH_FRAME_GP(sp)
+    ld      t0, SWITCH_FRAME_FCSR(sp)
+    csrw    fcsr, t0
     addi    sp, sp, SWITCH_FRAME_SIZE
     ret
 .size switch_context_restore, . - switch_context_restore

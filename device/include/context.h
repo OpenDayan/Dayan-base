@@ -18,7 +18,9 @@
 #define SWITCH_FRAME_S10       88
 #define SWITCH_FRAME_S11       96
 #define SWITCH_FRAME_GP       104
-#define SWITCH_FRAME_SIZE     112
+#define SWITCH_FRAME_FCSR     112
+#define SWITCH_FRAME_RESERVED 120
+#define SWITCH_FRAME_SIZE     128
 
 #define PROC_FRAME_ENTRY        0
 #define PROC_FRAME_RA           8
@@ -59,6 +61,8 @@ struct switch_frame {
     uintptr_t s10;
     uintptr_t s11;
     uintptr_t gp;
+    uintptr_t fcsr;
+    uintptr_t reserved;
 };
 
 struct proc_frame {
@@ -77,6 +81,8 @@ _Static_assert(offsetof(struct switch_frame, s11) == SWITCH_FRAME_S11,
                "switch frame s11 offset");
 _Static_assert(offsetof(struct switch_frame, gp) == SWITCH_FRAME_GP,
                "switch frame gp offset");
+_Static_assert(offsetof(struct switch_frame, fcsr) == SWITCH_FRAME_FCSR,
+               "switch frame fcsr offset");
 _Static_assert(sizeof(struct switch_frame) == SWITCH_FRAME_SIZE,
                "switch frame size");
 _Static_assert((SWITCH_FRAME_SIZE & 15) == 0,

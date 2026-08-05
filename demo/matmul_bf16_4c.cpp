@@ -6,7 +6,7 @@
 #endif
 
 #ifndef MATMUL_BF16_4C_URAM_BYTES
-#define MATMUL_BF16_4C_URAM_BYTES (1024U * 1024U)
+#define MATMUL_BF16_4C_URAM_BYTES (1536U * 1024U)
 #endif
 
 #ifndef MATMUL_BF16_4C_ATOMIC_BYTES
@@ -30,11 +30,11 @@
 #endif
 
 #ifndef MATMUL_BF16_4C_TILE_M
-#define MATMUL_BF16_4C_TILE_M 384
+#define MATMUL_BF16_4C_TILE_M 512
 #endif
 
 #ifndef MATMUL_BF16_4C_TILE_N
-#define MATMUL_BF16_4C_TILE_N 256
+#define MATMUL_BF16_4C_TILE_N 384
 #endif
 
 #ifndef MATMUL_BF16_4C_TILE_K
@@ -114,7 +114,7 @@ struct Constants {
         kClusterRows = 2,
         kClusterColumns = 2,
         kClusterCores = 4,
-        kABufferCount = 2,
+        kABufferCount = 1,
         kCoherentCacheLine = 64,
         kUramAlignment = 32,
         kUramWindowBase = 0x00800000,
@@ -125,8 +125,8 @@ struct Constants {
 static_assert(MATMUL_BF16_4C_SLICES == 1 ||
                   MATMUL_BF16_4C_SLICES == 3,
               "MATMUL_BF16_4C_SLICES must be 1 or 3");
-static_assert(Constants::kTileM == 384 && Constants::kTileN == 256,
-              "4-Core matmul must preserve the proven 1-Core tile shape");
+static_assert(Constants::kTileM == 512 && Constants::kTileN == 384,
+              "4-Core matmul uses a 512x384 output tile per Core");
 static_assert(Constants::kTileK == 256,
               "RTL matmul reaches peak throughput with tile K fixed at 256");
 static_assert((Constants::kUramWindowStride &
@@ -241,10 +241,12 @@ template <int SliceCount> struct UramLayout {
 using Layout = UramLayout<MATMUL_BF16_4C_SLICES>;
 
 static_assert(MATMUL_BF16_4C_SLICES == 1 ||
-                  (Layout::slice_rows(0) == 128 &&
-                   Layout::slice_rows(1) == 128 &&
-                   Layout::slice_rows(2) == 128),
-              "three-slice mode must use the 1-Core 3x128-row split");
+                  (Layout::slice_rows(0) == 170 &&
+                   Layout::slice_rows(1) == 171 &&
+                   Layout::slice_rows(2) == 171),
+              "three-slice mode must cover the 512-row tile exactly");
+static_assert(Layout::total_bytes() == 1441792U,
+              "512x384x256 single-A/double-B layout must use 1.375 MiB");
 static_assert(Layout::total_bytes() <= MATMUL_BF16_4C_URAM_BYTES,
               "output-stationary matmul URAM layout is too large");
 
@@ -500,6 +502,9 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
                         int tile_m, int tile_n, int tile_k,
                         int *configured_rows)
 {
+#if MATMUL_BF16_4C_D2A_MODEL
+    (void)generation;
+#endif
     const int columns = cols_for_tile(
         state, tile_n, state->column_lane);
     const int peer_columns = cols_for_tile(
@@ -508,7 +513,7 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
     const bool signal_copy = generation_has_local_work(
         state, tile_m, tile_n);
 #endif
-    const int buffer_index = (int)(generation & 1U);
+    constexpr int a_buffer_index = 0;
 #if !MATMUL_BF16_4C_D2A_MODEL
     bool issued = false;
 
@@ -520,9 +525,9 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
             state, tile_m, state->row_lane, slice);
         const bool local_active = real_rows > 0 && columns > 0;
         const bool peer_active = real_rows > 0 && peer_columns > 0;
-        LocalBuffer *local = &state->a[slice][buffer_index];
+        LocalBuffer *local = &state->a[slice][a_buffer_index];
         SharedABuffer *shared =
-            &state->cluster->a[state->row_lane][slice][buffer_index];
+            &state->cluster->a[state->row_lane][slice][a_buffer_index];
 
         if (!local_active && !peer_active)
             continue;
@@ -641,12 +646,13 @@ template <long LoadGroup>
 static void copy_a(MatmulState *state, uint64_t generation,
                    int tile_m, int tile_n, int *configured_rows)
 {
+    (void)generation;
 #if !MATMUL_BF16_4C_D2A_MODEL
     const uint32_t source_lane = a_source_lane(state->row_lane);
 #endif
     const int columns = cols_for_tile(
         state, tile_n, state->column_lane);
-    const int buffer_index = (int)(generation & 1U);
+    constexpr int a_buffer_index = 0;
 
     for (int slice = 0; slice < MATMUL_BF16_4C_SLICES; ++slice) {
         const int real_rows = rows_for_slice(
@@ -654,9 +660,9 @@ static void copy_a(MatmulState *state, uint64_t generation,
 
         if (!real_rows || !columns)
             continue;
-        LocalBuffer *local = &state->a[slice][buffer_index];
+        LocalBuffer *local = &state->a[slice][a_buffer_index];
         SharedABuffer *shared =
-            &state->cluster->a[state->row_lane][slice][buffer_index];
+            &state->cluster->a[state->row_lane][slice][a_buffer_index];
 
         begin_local_resource(&local->resource, 1U);
         require_status(dayan_shared_resource_wait_ready(
@@ -665,7 +671,7 @@ static void copy_a(MatmulState *state, uint64_t generation,
         configure_loader_rows<LoadGroup>(real_rows, configured_rows);
         const uint64_t source_uram =
             state->cluster->uram_base[source_lane] +
-            Layout::a_base(slice, buffer_index);
+            Layout::a_base(slice, a_buffer_index);
 
         __tx_lsu_dma_d2u<LoadGroup>((long)local->uram,
                                     (long)source_uram);
@@ -804,9 +810,10 @@ static void execute_mat_job(MatmulState *state, const MatJob *job,
         state, job->tile_m, state->row_lane, Slice);
     const int real_columns = cols_for_tile(
         state, job->tile_n, state->column_lane);
-    const int buffer_index = (int)(job->generation & 1U);
-    LocalBuffer *a = &state->a[Slice][buffer_index];
-    LocalBuffer *b = &state->b[buffer_index];
+    constexpr int a_buffer_index = 0;
+    const int b_buffer_index = (int)(job->generation & 1U);
+    LocalBuffer *a = &state->a[Slice][a_buffer_index];
+    LocalBuffer *b = &state->b[b_buffer_index];
     const uint64_t c_uram = state->uram_base + Layout::c_base(Slice);
     MatConfig *config = &state->mat_config[Slice];
 
@@ -882,11 +889,12 @@ static inline bool prepare_mat_job(MatmulState *state, uint64_t sequence,
 
     if (!rows || !columns)
         return false;
-    const int buffer_index = (int)(job->generation & 1U);
+    constexpr int a_buffer_index = 0;
+    const int b_buffer_index = (int)(job->generation & 1U);
     require_status(dayan_resource_wait_ready(
-        &state->a[job->slice][buffer_index].resource));
+        &state->a[job->slice][a_buffer_index].resource));
     require_status(dayan_resource_wait_ready(
-        &state->b[buffer_index].resource));
+        &state->b[b_buffer_index].resource));
     return true;
 }
 
@@ -1212,7 +1220,7 @@ extern "C" __host__ char *getenv(const char *name);
 __host__ static void usage(const char *program)
 {
     std::printf("usage: %s [M N K]\n", program);
-    std::printf("  defaults: M=1536 N=1024 K=1536\n");
+    std::printf("  defaults: M=1024 N=1536 K=1536\n");
     std::printf("  N must be a multiple of 16; K must be a multiple of %u.\n",
                 (unsigned)MATMUL_BF16_4C_TILE_K);
     std::printf("  B is generated/stored as BT[N][K], and C is FP32.\n");
@@ -1426,8 +1434,8 @@ __host__ static int validate_output(const std::vector<float> &actual,
 
 __host__ int main(int argc, char **argv)
 {
-    uint64_t m = 1536;
-    uint64_t n = 1024;
+    uint64_t m = 1024;
+    uint64_t n = 1536;
     uint64_t k = 1536;
     size_t a_elements = 0;
     size_t bt_elements = 0;

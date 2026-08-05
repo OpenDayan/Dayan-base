@@ -156,15 +156,16 @@ bash demo/run_matmul_cmodel.sh 384 64 256
 
 ```sh
 make -C demo run-matmul-4c
-bash demo/run_matmul_4c_cmodel.sh 1536 1024 1536
+bash demo/run_matmul_4c_cmodel.sh 1024 1536 1536
 ```
 
-默认 case 为 `M=1536, N=1024, K=1536`：M/N 各覆盖 2x2 个完整的 Cluster tile，
-K 包含 6 个分片，可以充分展开 A/B 双缓冲流水并降低启动、收尾占比。每个 Core 使用
-`tileM=384`、`tileN=256`、`tileK=256`，与单 Core 版本严格相同；三个
-`128x256x256` slice 严格按线性顺序执行。A 和 B 都使用双缓冲，三个 C slice
-在 K 循环内常驻，合计正好占用 1MiB URAM。M 维在两行 Core 之间连续等分，
-每行再按 384 行推进；N 维按 256 列 tile 交错分给两列 Core。
+默认 case 为 `M=1024, N=1536, K=1536`：M 正好覆盖一个完整的 2-Core tile，
+N 正好覆盖两个完整的 2-Core tile，K 包含 6 个分片，可以充分展开 slice 流水并
+避免 M/N 边缘碎片。每个 Core 使用 `tileM=512`、`tileN=384`、
+`tileK=256`；三个 M slice 分别为 170、171、171 行，并严格按线性顺序执行。
+A 的每个 slice 使用单缓冲，B 保持两个 full-tile buffer 真双缓冲，三个 FP32 C
+slice 在 K 循环内常驻，合计占用 1.375MiB URAM。M 维在两行 Core 之间连续等分，
+每行再按 512 行推进；N 维按 384 列 tile 交错分给两列 Core。
 
 每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 负责 A，core 01/10 负责
 B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker 和两个 MatStore
@@ -183,13 +184,13 @@ Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射�
 `matmul_bf16_4c_d2a_model` 是由同一份 4C 源码条件编译出的假想性能版本。未来 D2A
 被建模为一次源端 D2U：该 DMA 完成时，数据被视为已经同时写入源端和远端 URAM。
 远端 Copy worker 仍负责把 Atomic Cache 中的 shared resource 转换为本地 resource，
-从而保留真实算子的线程调度、顺序发布和双缓冲生命周期；但它不发远端 D2U，也不执行
+从而保留真实算子的线程调度、顺序发布和 buffer 生命周期；但它不发远端 D2U，也不执行
 `dayan_wait_lsu()`。通知器直接依赖源端 shared resource，不再等待本核心 Loader 的
 `load_issued`；后者是旧 Copy-DMA 的本地发射顺序约束，会在无 DMA 模型里造成跨核等待
-环。A 仍按三个 128-row slice 逐片发布，MAT、C 写回和所有本地数据依赖保持不变。
+环。A 仍按三个 170/171/171-row slice 逐片发布，MAT、C 写回和所有本地数据依赖保持不变。
 
 当前硬件没有 D2A，远端 URAM 中不会获得正确数据，因此该目标只报告 Device `mcycle`
-性能并明确跳过数值校验。默认尺寸同 4C 实算版本，为 `1536x1024x1536`：
+性能并明确跳过数值校验。默认尺寸同 4C 实算版本，为 `1024x1536x1536`：
 
 ```sh
 build/demo/matmul_bf16_4c_d2a_model
