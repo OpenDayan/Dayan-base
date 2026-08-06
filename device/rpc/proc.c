@@ -45,6 +45,24 @@ static int profile_config_address_valid(uint64_t address)
                         CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
 }
 
+static int dcache_flush_address_valid(uint64_t address)
+{
+    return !(address & 7U) &&
+           range_inside(address, sizeof(struct rpc_dcache_flush_request),
+                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+}
+
+static int dcache_flush_request_valid(
+    const struct rpc_dcache_flush_request *request)
+{
+    return request->version == RPC_DCACHE_FLUSH_VERSION &&
+           request->size == sizeof(*request) &&
+           request->hart_id == platform_hart_id() && !request->flags &&
+           !request->reserved && request->length &&
+           range_inside(request->address, request->length,
+                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+}
+
 static int proc_request_valid(const struct rpc_proc_create_request *request)
 {
     uint64_t coherent_base = CONFIG_COHERENT_BASE;
@@ -177,6 +195,31 @@ static int rpc_icache_flush(uint64_t token, uint64_t *response_command)
     return 1;
 }
 
+static int rpc_dcache_flush(uint64_t arg, uint64_t *response_command)
+{
+    struct rpc_dcache_flush_request *request;
+    uint64_t address;
+    uint64_t length;
+    int status = -EINVAL;
+
+    *response_command = rpc_command_pack(RPC_DCACHE_FLUSH_RESPONSE, arg);
+    if (!dcache_flush_address_valid(arg))
+        return 1;
+    request = (struct rpc_dcache_flush_request *)(uintptr_t)arg;
+    platform_cache_invalidate(request, sizeof(*request));
+    if (dcache_flush_request_valid(request)) {
+        address = request->address;
+        length = request->length;
+        platform_cache_invalidate((void *)(uintptr_t)address,
+                                  (size_t)length);
+        status = 0;
+    }
+    request->hart_id = (uint32_t)platform_hart_id();
+    request->status = status;
+    platform_cache_clean(request, sizeof(*request));
+    return 1;
+}
+
 static int rpc_proc_ps(uint64_t arg, uint64_t *response_command)
 {
     struct rpc_proc_ps_snapshot *snapshot;
@@ -247,6 +290,8 @@ int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
         return rpc_proc_create(arg, response_command);
     if (opcode == RPC_ICACHE_FLUSH)
         return rpc_icache_flush(arg, response_command);
+    if (opcode == RPC_DCACHE_FLUSH)
+        return rpc_dcache_flush(arg, response_command);
     if (opcode == RPC_PROC_PS)
         return rpc_proc_ps(arg, response_command);
     if (opcode == RPC_PROC_KILL_ALL)

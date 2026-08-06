@@ -69,8 +69,9 @@ Service 发出 \code{RPC_PROC_CREATE} 后仍要继续处理反向 RPC。创建 p
 allocator 可能通过 \code{RPC_HEAP_ACQUIRE} 扩堆；若等待 response 的线程同时停止
 RPC worker，会形成循环等待。仓库的 Service 使用独立 worker，允许这类嵌套。
 
-Host 发布算子模块的顺序是：完成 text 搬运，向每个已启动 hart 发送
-\code{RPC_ICACHE_FLUSH} 并等待响应，最后才把模块 entry 交给 launch 路径。I-cache
+Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块范围的
+\code{RPC_DCACHE_FLUSH}，全部完成后搬运新的 text/rodata，再发送
+\code{RPC_ICACHE_FLUSH} 并等待响应，最后才把模块 entry 交给 launch 路径。cache
 同步是代码发布操作，不属于 proc 创建操作；重复创建同一模块的 proc 不会重复执行
 \code{fence.i}。
 
@@ -85,6 +86,7 @@ Host 发布算子模块的顺序是：完成 text 搬运，向每个已启动 ha
   trap record & Device 复制到稳定槽并 clean & Host 读取并清 bit；确认前槽不可复用。 \\
   proc create 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate 后读取，更新并 clean；Host 查询时重新读取。 \\
   PS/kill 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate、填充结果并 clean；Host 收到 response 后读取。 \\
+  D-cache flush 描述符 & Host 写入目标范围并提交 & Device invalidate 描述符和目标范围，回写 status 并 clean。 \\
   profile FIFO & Device 写 proc 初始状态与目标状态变化，满/STOP 时 clean & Host 读取后用 response 决定是否继续。 \\
 \end{dayantable}
 

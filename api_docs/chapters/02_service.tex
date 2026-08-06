@@ -74,7 +74,7 @@ Server 先 abort，再用 abandon 路径释放 Host tracking。
   \code{npu_service_load_bl1_file} & 读取路径后执行同一 BL1 加载流程。 \\
   \code{npu_service_set_api_elf} & 从内存 ELF 建立允许 Device object 解析的公开符号表。 \\
   \code{npu_service_set_api_elf_file} & 从文件安装 Device API ELF 符号表。 \\
-  \code{npu_service_kernel_resolve} & 将 ET\_REL object 装入 target Cluster、解析 entry，并刷新已启动 Hart 的 I-cache。 \\
+  \code{npu_service_kernel_resolve} & 将 ET\_REL object 装入 target Cluster；覆盖前失效已启动 Hart 的目标 D-cache 范围，写入后刷新 I-cache，并解析 entry。 \\
   \code{npu_service_kernel_forget} & 减少 object identity 引用；最后一个引用释放模块 allocation。 \\
 \end{dayantable}
 

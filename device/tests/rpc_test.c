@@ -12,6 +12,7 @@ int main(void)
     assert(rpc_command_opcode(command) == 0x1234);
     assert(rpc_command_arg(command) == 0xabcdef012345ULL);
     assert(sizeof(struct rpc_packet) == 40);
+    assert(sizeof(struct rpc_dcache_flush_request) == 48);
     assert(sizeof(struct rpc_print_request) == 24);
     assert(sizeof(struct rpc_heap_request) == 8);
     assert(sizeof(struct rpc_heap_response) == 16);
@@ -52,6 +53,10 @@ int main(void)
     assert(RPC_PROFILE_CONFIG == 0x0104);
     assert(RPC_PROFILE_CONFIG_RESPONSE ==
            (RPC_PROFILE_CONFIG | 0x8000));
+    assert(RPC_DCACHE_FLUSH == 0x0105);
+    assert(RPC_DCACHE_FLUSH_RESPONSE ==
+           (RPC_DCACHE_FLUSH | 0x8000));
+    assert(RPC_DCACHE_FLUSH_VERSION == 1U);
     assert(RPC_PROFILE_VERSION == 3U);
     assert(RPC_PROFILE_PROC_RUNNING == 0U);
     assert(RPC_PROFILE_PROC_KILL_WAIT_PRODUCE == 7U);

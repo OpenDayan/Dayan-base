@@ -60,7 +60,7 @@ operator.o + Host objects + libDayanRuntime --> Host executable
 
 Device 对象尚未绑定物理地址。wrapper 首次调用时用 \code{npu_kernel_descriptor_create}
 生成 Package；Runtime 把 Package 交给 Service。Service 根据目标 Cluster 做隔离的
-重定位、上传和 I-cache 发布。不可变代码/只读数据可以跨 Context 共享；含可写 section、
+重定位、覆盖前 D-cache 范围失效、上传和 I-cache 发布。不可变代码/只读数据可以跨 Context 共享；含可写 section、
 BSS 或 Context 相关重定位的模块必须保持独立。
 
 \subsection{运行期：控制面与数据面}

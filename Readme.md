@@ -293,9 +293,11 @@ profile）和至多 16 个算子 proc
 proc，摘除其它 proc 的 ready/poll/event/system-wait 节点；非 Produce slot 立即释放，
 等待 Produce 的 slot 进入 `THREAD_KILL_WAIT_PRODUCE`，收到硬件 token 后才释放。
 
-Host 更新算子 text 后使用独立的 `RPC_ICACHE_FLUSH` (`0x0101`) 发布代码，并等待
-`0x8101` 响应。`fence.i` 只作用于当前 hart，因此模块 loader 会在发布 entry 前逐个
-刷新所有已启动 hart；创建 proc 不再重复刷新 I-cache。create 描述符的请求字段在终态
+Host 覆盖动态模块前，先通过 `RPC_DCACHE_FLUSH` (`0x0105`) 让所有已启动 Hart
+失效目标模块的 D-cache 范围；全部返回 `0x8105` 后才写入新的 text/rodata。写入完成后
+再使用 `RPC_ICACHE_FLUSH` (`0x0101`) 发布代码，并等待 `0x8101` 响应。`fence.i` 只作用于
+当前 hart，因此两阶段发布都逐个处理所有已启动 hart；创建 proc 不再重复刷新 cache。
+create 描述符的请求字段在终态
 前保持不变，Device invalidate 后直接使用 `request->...`，只回写 state 和结果字段。
 
 同步异常从 `mtvec` 进入独立的每核 trap 栈，保存 x0–x31（其中 x2 为异常前的 sp）、

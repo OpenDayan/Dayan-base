@@ -142,7 +142,7 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
   独立 Device printf buffer 使用所属 Host root ID 输出；Cluster、Core 与 root proc ID
   由 Server 归属到发起任务的 Runtime Session。Runtime
   在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
-- Host→Device：`RPC_PROC_CREATE`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS`、
+- Host→Device：`RPC_PROC_CREATE`、`RPC_DCACHE_FLUSH`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS`、
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
@@ -171,8 +171,8 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 其它参与者数量或非 `kFourCore` launch 会被拒绝。
 
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
-未定义符号。代码写入某个 Cluster 后，会对该 Cluster 所有已启动 Core 分别执行
-`RPC_ICACHE_FLUSH`，再发布入口。
+未定义符号。覆盖模块前，会对该 Cluster 所有已启动 Core 分别执行带地址和长度的
+`RPC_DCACHE_FLUSH`；全部完成后写入新的 text/rodata，再执行 `RPC_ICACHE_FLUSH` 并发布入口。
 
 ## proc profile trace
 

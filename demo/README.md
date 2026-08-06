@@ -12,7 +12,7 @@ demo/
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
-├── matmul_bf16_4c.cpp           # 2x2 Cluster OS：DRAM Load、远端 Copy、双 MatStore
+├── matmul_bf16_4c.cpp           # 2x2 Cluster OS：Load、Copy、双 MAT、独立 C-Store
 ├── run_matmul_cmodel.sh
 ├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
@@ -32,7 +32,7 @@ make -C demo
 产物为 `build/demo/print_demo`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
-`build/demo/matmul_bf16_4c_d2a_model`。矩阵指令定义来自相邻的
+`build/demo/matmul_bf16_broadcast_4c`。矩阵指令定义来自相邻的
 `npu-kernels` 仓库，默认路径是 `../npu-kernels`，也可显式覆盖：
 
 ```sh
@@ -181,24 +181,6 @@ Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射�
 对应日志为
 `build/demo/matmul_4c_cmodel.log`、`build/demo/matmul_4c_dayan_server.log` 和
 `build/demo/matmul_bf16_4c.log`。
-
-## 四 Core D2A 性能模型
-
-`matmul_bf16_4c_d2a_model` 是由同一份 4C 源码条件编译出的假想性能版本。未来 D2A
-被建模为一次源端 D2U：该 DMA 完成时，数据被视为已经同时写入源端和远端 URAM。
-远端 Copy worker 仍负责把 Atomic Cache 中的 shared resource 转换为本地 resource，
-从而保留真实算子的线程调度、顺序发布和 buffer 生命周期；但它不发远端 D2U，也不执行
-`dayan_wait_lsu()`。通知器直接依赖源端 shared resource，不再等待本核心 Loader 的
-`load_issued`；后者是旧 Copy-DMA 的本地发射顺序约束，会在无 DMA 模型里造成跨核等待
-环。A 仍按四个 128-row slice 逐片发布，MAT、C 写回和所有本地数据依赖保持不变。
-
-当前硬件没有 D2A，远端 URAM 中不会获得正确数据，因此该目标只报告 Device `mcycle`
-性能并明确跳过数值校验。默认尺寸同 4C 实算版本，为 `1024x1536x1536`：
-
-```sh
-build/demo/matmul_bf16_4c_d2a_model
-build/demo/matmul_bf16_4c_d2a_model 768 512 256
-```
 
 ## 四 Core 直接广播性能模型
 

@@ -19,11 +19,13 @@ enum rpc_service {
     RPC_PROC_PS = 0x0102,
     RPC_PROC_KILL_ALL = 0x0103,
     RPC_PROFILE_CONFIG = 0x0104,
+    RPC_DCACHE_FLUSH = 0x0105,
     RPC_PROC_CREATE_RESPONSE = 0x8100,
     RPC_ICACHE_FLUSH_RESPONSE = 0x8101,
     RPC_PROC_PS_RESPONSE = 0x8102,
     RPC_PROC_KILL_ALL_RESPONSE = 0x8103,
     RPC_PROFILE_CONFIG_RESPONSE = 0x8104,
+    RPC_DCACHE_FLUSH_RESPONSE = 0x8105,
 };
 
 #define RPC_COMMAND_ARG_MASK 0x0000ffffffffffffULL
@@ -52,6 +54,20 @@ struct rpc_packet {
     int64_t status;
 };
 
+#define RPC_DCACHE_FLUSH_VERSION 1U
+
+/* Host-owned descriptor for invalidating a range in one Hart's D-cache. */
+struct rpc_dcache_flush_request {
+    uint32_t version;
+    uint32_t size;
+    uint32_t hart_id;
+    uint32_t flags;
+    uint64_t address;
+    uint64_t length;
+    int64_t status;
+    uint64_t reserved;
+};
+
 _Static_assert(offsetof(struct rpc_packet, request_addr) == 0,
                "RPC packet request address offset");
 _Static_assert(offsetof(struct rpc_packet, response_addr) == 16,
@@ -60,6 +76,12 @@ _Static_assert(offsetof(struct rpc_packet, status) == 32,
                "RPC packet status offset");
 _Static_assert(sizeof(struct rpc_packet) == 40,
                "Host RPC packet ABI must stay fixed");
+_Static_assert(offsetof(struct rpc_dcache_flush_request, address) == 16,
+               "D-cache flush address offset");
+_Static_assert(offsetof(struct rpc_dcache_flush_request, status) == 32,
+               "D-cache flush status offset");
+_Static_assert(sizeof(struct rpc_dcache_flush_request) == 48,
+               "D-cache flush request ABI must stay fixed");
 
 struct rpc_print_request {
     uint32_t hart_id;

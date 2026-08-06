@@ -984,6 +984,103 @@ static int flush_icache(npu_service_device_t *runtime, uint32_t cluster,
     return 0;
 }
 
+static int flush_dcache_core(npu_service_device_t *runtime,
+                             npu_hal_core_t core, uint64_t address,
+                             uint64_t length, uint32_t timeout)
+{
+    struct rpc_dcache_flush_request request;
+    npu_hal_allocation_t *allocation = 0;
+    uint64_t request_address;
+    uint64_t response;
+    int status;
+
+    status = npu_service_alloc_visible(
+        runtime, core, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
+        (uint32_t)npu_service_core_index(runtime, core),
+        sizeof(request), 64, &allocation);
+    if (status < 0)
+        return status;
+    status = npu_hal_memory_address(runtime->hal, allocation, core,
+                                    &request_address);
+    if (status < 0 || request_address > RPC_COMMAND_ARG_MASK) {
+        status = status < 0 ? status : -EOVERFLOW;
+        goto out;
+    }
+    memset(&request, 0, sizeof(request));
+    request.version = RPC_DCACHE_FLUSH_VERSION;
+    request.size = sizeof(request);
+    request.hart_id = core.core;
+    request.address = address;
+    request.length = length;
+    request.status = -EIO;
+    status = npu_hal_memory_write(runtime->hal, allocation, core, 0,
+                                  &request, sizeof(request));
+    if (status < 0)
+        goto out;
+    status = npu_service_rpc_call(runtime, core, RPC_DCACHE_FLUSH,
+                                  request_address, &response, timeout);
+    if (status < 0)
+        goto out;
+    if (response != rpc_command_pack(RPC_DCACHE_FLUSH_RESPONSE,
+                                     request_address)) {
+        status = -EPROTO;
+        goto out;
+    }
+    status = npu_hal_memory_read(runtime->hal, allocation, core, &request, 0,
+                                 sizeof(request));
+    if (status < 0)
+        goto out;
+    if (request.version != RPC_DCACHE_FLUSH_VERSION ||
+        request.size != sizeof(request) || request.hart_id != core.core ||
+        request.flags || request.address != address ||
+        request.length != length || request.reserved) {
+        status = -EPROTO;
+        goto out;
+    }
+    if (request.status < 0) {
+        status = request.status >= INT_MIN ? (int)request.status : -EIO;
+        goto out;
+    }
+    status = request.status == 0 ? 0 : -EPROTO;
+
+out:
+    if (allocation) {
+        int free_status = npu_hal_memory_free(runtime->hal, allocation);
+
+        if (status == 0 && free_status < 0)
+            status = free_status;
+    }
+    return status;
+}
+
+static int flush_dcache(npu_service_device_t *runtime, uint32_t cluster,
+                        uint64_t address, uint64_t length)
+{
+    uint32_t core_mask;
+    uint32_t timeout;
+    uint32_t core_index;
+
+    pthread_mutex_lock(&runtime->mutex);
+    core_mask = runtime->clusters[cluster].booted_cores;
+    timeout = runtime->options.default_timeout_ms;
+    pthread_mutex_unlock(&runtime->mutex);
+    if (!core_mask)
+        return -ENODEV;
+
+    for (core_index = 0;
+         core_index < runtime->hal_info.cores_per_cluster; ++core_index) {
+        npu_hal_core_t core = { cluster, core_index };
+        int status;
+
+        if (!(core_mask & (UINT32_C(1) << core_index)))
+            continue;
+        status = flush_dcache_core(runtime, core, address, length, timeout);
+        if (status < 0)
+            return status;
+    }
+    return 0;
+}
+
 static int load_kernel_module(npu_service_device_t *runtime,
                               npu_hal_core_t target, const void *object,
                               size_t object_size,
@@ -1093,6 +1190,9 @@ static int load_kernel_module(npu_service_device_t *runtime,
     relocations.image_size = image_size;
     relocations.base = base;
     status = apply_relocations(&relocations, symbol_section_index);
+    if (status < 0)
+        goto fail;
+    status = flush_dcache(runtime, target.cluster, base, image_size);
     if (status < 0)
         goto fail;
     status = npu_hal_memory_write(runtime->hal, allocation, target, 0, image,

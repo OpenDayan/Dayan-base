@@ -23,11 +23,13 @@ Dayan OS 主动请求的 opcode 1--7 必须由 Host 实现。Host 使用反方�
   \code{0x0102} & \code{RPC_PROC_PS} & Host $\rightarrow$ Device & 同步目标 hart 的 proc 快照。 \\
   \code{0x0103} & \code{RPC_PROC_KILL_ALL} & Host $\rightarrow$ Device & 终止目标 hart 的所有非系统 proc。 \\
   \code{0x0104} & \code{RPC_PROFILE_CONFIG} & Host $\rightarrow$ Device & 开启或停止目标 hart profile。 \\
+  \code{0x0105} & \code{RPC_DCACHE_FLUSH} & Host $\rightarrow$ Device & 失效目标 hart 的一段 D-cache。 \\
   \code{0x8100} & \code{RPC_PROC_CREATE_RESPONSE} & Device $\rightarrow$ Host & 确认 create 请求已处理。 \\
   \code{0x8101} & \code{RPC_ICACHE_FLUSH_RESPONSE} & Device $\rightarrow$ Host & 确认本 hart 的 I-cache 刷新完成。 \\
   \code{0x8102} & \code{RPC_PROC_PS_RESPONSE} & Device $\rightarrow$ Host & proc 快照完成。 \\
   \code{0x8103} & \code{RPC_PROC_KILL_ALL_RESPONSE} & Device $\rightarrow$ Host & kill-all 请求完成。 \\
   \code{0x8104} & \code{RPC_PROFILE_CONFIG_RESPONSE} & Device $\rightarrow$ Host & profile 配置完成。 \\
+  \code{0x8105} & \code{RPC_DCACHE_FLUSH_RESPONSE} & Device $\rightarrow$ Host & D-cache 范围失效完成。 \\
 \end{dayantable}
 
 Service 的 output、trap 和 proc-exit callback 分别接收 WRITE/CLEAR、TRAP REPORT 和
@@ -150,11 +152,15 @@ command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返�
 
 \subsection{发布新代码}
 
-\code{fence.i} 只同步执行它的 hart。Host 每次向 Device RAM 写入或改写 text 后，必须
+普通 Device RAM 不与 Host 自动保持 D-cache 一致。Host 覆盖模块前，必须通过
+48-byte \code{rpc_dcache_flush_request} 向全部已启动 Hart 发布模块地址和长度，并等待
+\code{RPC_DCACHE_FLUSH_RESPONSE}；Device 对描述符本身先 invalidate，再逐行失效目标范围。
+
+\code{fence.i} 只同步执行它的 hart。Host 完成新 text/rodata 写入后，必须
 对所有可能执行该 text 的已启动 hart 分别发送 \code{RPC_ICACHE_FLUSH}，等待对应的
 \code{0x8101} 响应后，才能发布 entry 或发送 \code{RPC_PROC_CREATE}。command argument
 是由 Host 选择并由 Device 原样返回的 48-bit token；无需额外描述符。当前模块加载器
-以模块基址作为 token，并在模块进入可查找表前刷新全部已启动 hart。
+以模块基址作为 token，并严格执行 D-cache invalidate、Host write、I-cache flush 的顺序。
 
 \code{RPC_PROC_CREATE} 本身不再执行 \code{fence.i}。create 描述符的请求字段由 Host
 保持不变，因此 Device invalidate 后直接通过 \code{request->field} 校验和初始化；只有

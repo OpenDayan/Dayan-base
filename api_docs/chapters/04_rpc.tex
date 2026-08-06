@@ -38,6 +38,7 @@ RPC 是 BL1 与 Host Service 之间的 mailbox 线协议，也是 Device 系统�
   请求 / 响应 & 请求 \\
   \code{RPC_PROC_CREATE} / \code{RPC_PROC_CREATE_RESPONSE} & 在指定 Hart 创建一个 Host root Proc。 \\
   \code{RPC_ICACHE_FLUSH} / \code{RPC_ICACHE_FLUSH_RESPONSE} & 使已加载代码的指令缓存更新可见。 \\
+  \code{RPC_DCACHE_FLUSH} / \code{RPC_DCACHE_FLUSH_RESPONSE} & 失效指定普通内存范围的本 Hart 数据缓存。 \\
   \code{RPC_PROC_PS} / \code{RPC_PROC_PS_RESPONSE} & 获取该 Hart 的完整 Proc snapshot。 \\
   \code{RPC_PROC_KILL_ALL} / \code{RPC_PROC_KILL_ALL_RESPONSE} & 终止该 Hart 上全部非系统 Proc。 \\
   \code{RPC_PROFILE_CONFIG} / \code{RPC_PROFILE_CONFIG_RESPONSE} & 启动或停止该 Hart 的 profile 采集。 \\

@@ -29,8 +29,10 @@ namespace scheduler_yield_bench_detail {
 
 struct BenchState {
     volatile uint32_t ready;
+    volatile uint32_t start;
     volatile uint32_t measured;
     uint64_t iterations;
+    uint64_t start_delay_cycles;
     uint64_t cycles[2];
 };
 
@@ -47,6 +49,14 @@ static inline uint64_t read_cycle()
     return cycle;
 }
 
+static inline void delay_cycles(uint64_t cycles)
+{
+    const uint64_t begin = read_cycle();
+
+    while (read_cycle() - begin < cycles)
+        __asm__ volatile("" ::: "memory");
+}
+
 static void yield_worker(void *opaque)
 {
     WorkerArgument *argument = (WorkerArgument *)opaque;
@@ -55,6 +65,19 @@ static void yield_worker(void *opaque)
     ++state->ready;
     while (state->ready != 2U)
         dayan_yield();
+
+    if (argument->index == 0U) {
+        if (state->start_delay_cycles) {
+            printf("[device] scheduler-yield waveform marker: delay=%llu "
+                   "cycles\n",
+                   (unsigned long long)state->start_delay_cycles);
+            delay_cycles(state->start_delay_cycles);
+        }
+        state->start = 1U;
+    } else {
+        while (!state->start)
+            dayan_yield();
+    }
 
     for (uint64_t i = 0; i < kWarmupIterations; ++i)
         dayan_yield();
@@ -74,6 +97,7 @@ static void yield_worker(void *opaque)
 #endif
 
 __kernel__ void scheduler_yield_bench(uint64_t iterations,
+                                      uint64_t start_delay_cycles,
                                       SchedulerYieldResults *results)
 {
     using namespace scheduler_yield_bench_detail;
@@ -87,6 +111,7 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
         {&state, 1},
     };
     state.iterations = iterations;
+    state.start_delay_cycles = start_delay_cycles;
 
     int status = dayan_create_proc("yield-0", yield_worker, &arguments[0]);
     if (status >= 0)
@@ -108,7 +133,7 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
     results->handoff_cycles = handoff_cycles;
 }
 
-DAYAN_KERNEL_DESC(scheduler_yield_bench, 2, 0, 0);
+DAYAN_KERNEL_DESC(scheduler_yield_bench, 3, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 
@@ -119,22 +144,22 @@ extern "C" __host__ char *getenv(const char *name);
 
 __host__ static void usage(const char *program)
 {
-    printf("usage: %s [ITERATIONS]\n", program);
+    printf("usage: %s [ITERATIONS [START_DELAY_CYCLES]]\n", program);
     printf("default iterations: %llu\n",
            (unsigned long long)kDefaultIterations);
 }
 
-__host__ static int parse_iterations(const char *text, uint64_t *iterations)
+__host__ static int parse_positive(const char *text, uint64_t *value_out)
 {
     char *end = nullptr;
     unsigned long long value;
 
-    if (!text || !*text || !iterations)
+    if (!text || !*text || !value_out)
         return -1;
     value = strtoull(text, &end, 0);
     if (!end || *end || !value)
         return -1;
-    *iterations = (uint64_t)value;
+    *value_out = (uint64_t)value;
     return 0;
 }
 
@@ -189,6 +214,7 @@ __host__ static int download(npu_stream_t *stream, void *destination,
 __host__ int main(int argc, char **argv)
 {
     uint64_t iterations = kDefaultIterations;
+    uint64_t start_delay_cycles = 0;
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
     npu_runtime_t *runtime = nullptr;
@@ -204,8 +230,10 @@ __host__ int main(int argc, char **argv)
         usage(argv[0]);
         return 0;
     }
-    if (argc > 2 ||
-        (argc == 2 && parse_iterations(argv[1], &iterations) < 0)) {
+    if (argc > 3 ||
+        (argc >= 2 && parse_positive(argv[1], &iterations) < 0) ||
+        (argc == 3 &&
+         parse_positive(argv[2], &start_delay_cycles) < 0)) {
         usage(argv[0]);
         return 2;
     }
@@ -236,7 +264,14 @@ __host__ int main(int argc, char **argv)
         launch_attrs.config.task_dim = NPUTaskDim3{1, 1, 1};
         launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
         launch_attrs.timeout_ms = timeout_ms;
-        status = scheduler_yield_bench(iterations, results_buffer,
+        if (start_delay_cycles) {
+            printf("[host] scheduler-yield waveform launch marker: "
+                   "delay=%llu cycles\n",
+                   (unsigned long long)start_delay_cycles);
+            fflush(stdout);
+        }
+        status = scheduler_yield_bench(iterations, start_delay_cycles,
+                                       results_buffer,
                                        &launch_attrs);
     }
     if (status == 0)

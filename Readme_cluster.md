@@ -487,8 +487,9 @@ proc slot、URAM、coherent memory 和 resident memory 配额约束。不要同�
 状态宣告 ready。BL1 启动 scheduler、RPC receive/send proc 和 profile proc。
 
 Host kernel 第一次提交时，Server 使用 `npu-os-api.elf` 解析 Device object 的公开符号，
-完成 RISC-V `ET_REL` 重定位，将代码写入目标 Cluster，并对已启动 Core 执行 I-cache
-flush。之后通过 `RPC_PROC_CREATE` 创建 root proc。
+完成 RISC-V `ET_REL` 重定位后，先对目标 Cluster 的全部已启动 Core 执行模块范围
+D-cache invalidate，再写入新的 text/rodata，最后执行 I-cache flush。之后通过
+`RPC_PROC_CREATE` 创建 root proc。
 
 ### 6.2 Atomic Cache backing
 
