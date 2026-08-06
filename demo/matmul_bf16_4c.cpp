@@ -18,12 +18,12 @@
 #endif
 
 #if MATMUL_BF16_4C_D2A_MODEL
-#define MATMUL_BF16_4C_WORKERS 4U
+#define MATMUL_BF16_4C_WORKERS 5U
 #define MATMUL_BF16_4C_KERNEL matmul_bf16_4c_d2a_model
 #define MATMUL_BF16_4C_KERNEL_LABEL "mm4c-d2a"
 #define MATMUL_BF16_4C_KERNEL_DISPLAY "matmul_bf16_4c_d2a_model"
 #else
-#define MATMUL_BF16_4C_WORKERS 4U
+#define MATMUL_BF16_4C_WORKERS 5U
 #define MATMUL_BF16_4C_KERNEL matmul_bf16_4c
 #define MATMUL_BF16_4C_KERNEL_LABEL "matmul-bf16-4c"
 #define MATMUL_BF16_4C_KERNEL_DISPLAY "matmul_bf16_4c"
@@ -51,12 +51,15 @@
  *
  * A is sourced from DRAM by cores 00/11 and shared horizontally.  B is
  * sourced from DRAM by cores 01/10 and shared vertically.  Every Core runs
- * one DRAM Loader, one remote Copy worker, and two ordered MAT/Store workers.
+ * one DRAM Loader, one remote Copy worker, two ordered MAT workers, and one
+ * ordered C-Store worker.
  * The DRAM and Copy streams advance monotonically; no worker claims work from
  * a shared iterator.  Cross-Core readiness is expressed only with shared
  * resources in Atomic Cache, while all same-Core dependencies use local
  * resources.  The two MAT workers statically alternate linear jobs and pass
  * a resource token after ordered issue, so MAT instructions cannot overtake.
+ * The C-Store worker consumes completed output slices in order.  Each C slice
+ * is released back to MAT only after its U2D has completed.
  *
  * MATMUL_BF16_4C_D2A_MODEL keeps this scheduling topology but treats the
  * source D2U as a future D2A: after that one DMA completes, the remote Copy
@@ -326,6 +329,7 @@ struct MatmulState {
     dayan_resource_t load_issued[2];
 #endif
     dayan_resource_t mat_turn[2];
+    dayan_resource_t c[MATMUL_BF16_4C_SLICES];
     uint64_t generation_count;
     MatConfig mat_config[MATMUL_BF16_4C_SLICES];
 };
@@ -812,6 +816,19 @@ static inline void configure_mat_slices(const MatmulState *state)
 
 static inline void pass_mat_turn(MatmulState *state, uint32_t worker);
 
+static inline void begin_c_output(MatmulState *state, int slice)
+{
+    dayan_resource_t *resource = &state->c[slice];
+
+    require_status(dayan_resource_wait_free(resource));
+    require_status(dayan_resource_alloc(resource, 1U, 1U));
+}
+
+static inline void publish_c_store(MatmulState *state, int slice)
+{
+    require_status(dayan_resource_produce(&state->c[slice]));
+}
+
 template <long GroupBase, int Slice>
 static void execute_mat_job(MatmulState *state, const MatJob *job,
                             uint32_t worker)
@@ -851,38 +868,11 @@ static void execute_mat_job(MatmulState *state, const MatJob *job,
     pass_mat_turn(state, worker);
     dayan_wait_mat();
 
+    if (job->tile_k + 1 == state->count_k)
+        publish_c_store(state, Slice);
+
     require_status(dayan_resource_consume(&a->resource));
     require_status(dayan_resource_consume(&b->resource));
-
-    if (job->tile_k + 1 == state->count_k) {
-        if (real_rows != config->store_rows) {
-            __tx_lsu_tcsr_write<
-                (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
-                LSU_DIM1>(real_rows - 1);
-            config->store_rows = real_rows;
-        }
-        if (real_columns != config->store_columns) {
-            __tx_lsu_tcsr_write<
-                (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
-                LSU_DIM0>((uint64_t)real_columns * sizeof(float) / 64U -
-                         1U);
-            config->store_columns = real_columns;
-        }
-        const uint64_t global_row =
-            (uint64_t)row_partition_begin(state, state->row_lane) +
-            (uint64_t)job->tile_m * Constants::kTileM +
-            Layout::slice_offset(Slice);
-        const uint64_t global_column =
-            (uint64_t)(job->tile_n * Constants::kClusterColumns +
-                       (int)state->column_lane) * Constants::kTileN;
-        const uint64_t c_dram =
-            state->c_base + global_row * state->c_stride +
-            global_column * sizeof(float);
-
-        __tx_lsu_dma_u2d<GroupBase + Constants::kLsuCStore>(
-            (long)c_dram, (long)c_uram);
-        dayan_wait_lsu();
-    }
 }
 
 static inline bool prepare_mat_job(MatmulState *state, uint64_t sequence,
@@ -905,6 +895,8 @@ static inline bool prepare_mat_job(MatmulState *state, uint64_t sequence,
         &state->a[job->slice][a_buffer_index].resource));
     require_status(dayan_resource_wait_ready(
         &state->b[b_buffer_index].resource));
+    if (job->tile_k == 0)
+        begin_c_output(state, job->slice);
     return true;
 }
 
@@ -962,6 +954,116 @@ static void mat_worker(void *argument)
         } else {
             pass_mat_turn(state, worker);
         }
+    }
+}
+
+static inline void wait_c_store_ready(MatmulState *state, int slice)
+{
+    require_status(dayan_resource_wait_ready(&state->c[slice]));
+}
+
+static inline void release_c_free(MatmulState *state, int slice)
+{
+    require_status(dayan_resource_consume(&state->c[slice]));
+}
+
+template <long GroupBase, int Slice>
+static void issue_c_store(MatmulState *state, int tile_m, int tile_n)
+{
+    const int real_rows = rows_for_slice(
+        state, tile_m, state->row_lane, Slice);
+    const int real_columns = cols_for_tile(
+        state, tile_n, state->column_lane);
+    MatConfig *config = &state->mat_config[Slice];
+
+    wait_c_store_ready(state, Slice);
+    if (real_rows != config->store_rows) {
+        __tx_lsu_tcsr_write<
+            (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
+            LSU_DIM1>(real_rows - 1);
+        config->store_rows = real_rows;
+    }
+    if (real_columns != config->store_columns) {
+        __tx_lsu_tcsr_write<
+            (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
+            LSU_DIM0>((uint64_t)real_columns * sizeof(float) / 64U - 1U);
+        config->store_columns = real_columns;
+    }
+    const uint64_t global_row =
+        (uint64_t)row_partition_begin(state, state->row_lane) +
+        (uint64_t)tile_m * Constants::kTileM +
+        Layout::slice_offset(Slice);
+    const uint64_t global_column =
+        (uint64_t)(tile_n * Constants::kClusterColumns +
+                   (int)state->column_lane) * Constants::kTileN;
+    const uint64_t c_uram = state->uram_base + Layout::c_base(Slice);
+    const uint64_t c_dram =
+        state->c_base + global_row * state->c_stride +
+        global_column * sizeof(float);
+
+    __tx_lsu_dma_u2d<GroupBase + Constants::kLsuCStore>(
+        (long)c_dram, (long)c_uram);
+}
+
+static inline void complete_c_store_batch(MatmulState *state,
+                                          uint32_t active_mask)
+{
+    dayan_wait_lsu();
+    for (int slice = 0; slice < MATMUL_BF16_4C_SLICES; ++slice) {
+        if (active_mask & (1U << slice))
+            release_c_free(state, slice);
+    }
+}
+
+static void c_store_worker(void *argument)
+{
+    MatmulState *state = (MatmulState *)argument;
+    const uint64_t output_count =
+        (uint64_t)state->count_m * (uint64_t)state->count_n;
+
+    for (uint64_t output = 0; output < output_count; ++output) {
+        const int tile_m = (int)(output / (uint64_t)state->count_n);
+        const int tile_n = (int)(output % (uint64_t)state->count_n);
+        uint32_t active_mask = 0;
+        int issued = 0;
+
+        for (int slice = 0; slice < MATMUL_BF16_4C_SLICES; ++slice) {
+            const int rows = rows_for_slice(
+                state, tile_m, state->row_lane, slice);
+            const int columns = cols_for_tile(
+                state, tile_n, state->column_lane);
+
+            if (!rows || !columns)
+                continue;
+            active_mask |= 1U << slice;
+            switch (slice) {
+            case 0:
+                issue_c_store<0, 0>(state, tile_m, tile_n);
+                break;
+#if MATMUL_BF16_4C_SLICES >= 3
+            case 1:
+                issue_c_store<4, 1>(state, tile_m, tile_n);
+                break;
+            case 2:
+                issue_c_store<2, 2>(state, tile_m, tile_n);
+                break;
+#endif
+#if MATMUL_BF16_4C_SLICES == 4
+            case 3:
+                issue_c_store<1, 3>(state, tile_m, tile_n);
+                break;
+#endif
+            default:
+                dayan_proc_exit(-22);
+            }
+            if (++issued == 2) {
+                complete_c_store_batch(state, active_mask);
+                active_mask = 0;
+                issued = 0;
+            }
+        }
+        if (active_mask)
+            complete_c_store_batch(state, active_mask);
     }
 }
 
@@ -1119,6 +1221,9 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
         state.mat_config[slice].columns = Constants::kTileN;
         state.mat_config[slice].store_rows = Layout::slice_rows(slice);
         state.mat_config[slice].store_columns = Constants::kTileN;
+        status = dayan_resource_init(&state.c[slice]);
+        if (status < 0)
+            dayan_proc_exit(status);
         for (int index = 0; index < Constants::kABufferCount;
              ++index) {
             LocalBuffer *buffer = &state.a[slice][index];
@@ -1161,11 +1266,13 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     if (status >= 0)
         status = dayan_create_proc("remote-copy", remote_copy, &state);
     if (status >= 0)
-        status = dayan_create_proc("mat-store-0", mat_worker,
+        status = dayan_create_proc("mat-0", mat_worker,
                                    &mat_args[0]);
     if (status >= 0)
-        status = dayan_create_proc("mat-store-1", mat_worker,
+        status = dayan_create_proc("mat-1", mat_worker,
                                    &mat_args[1]);
+    if (status >= 0)
+        status = dayan_create_proc("c-store", c_store_worker, &state);
     if (status < 0)
         dayan_proc_exit(status);
 

@@ -168,12 +168,15 @@ slice 在 K 循环内常驻，合计占用 1.375MiB URAM。M 维在两行 Core �
 每行再按 512 行推进；N 维按 384 列 tile 交错分给两列 Core。
 
 每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 负责 A，core 01/10 负责
-B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker 和两个 MatStore
-worker。DRAM Loader 发射本代首条 D2U 后通过本地 `dayan_resource_t` 允许 Copy
+B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker、两个 Mat worker 和一个
+C-Store worker。DRAM Loader 发射本代首条 D2U 后通过本地 `dayan_resource_t` 允许 Copy
 进入；源数据真正完成后再通过 Atomic Cache 中的 `dayan_shared_resource_t`
 发布给远端。Copy 使用 D2U 从源 Core URAM 拉取已完成的数据，MAT 只消费本地
-Resource。两个 MatStore 静态交替处理线性 job：前一条 MAT 成功入队后才用本地
+Resource。两个 Mat worker 静态交替处理线性 job：前一条 MAT 成功入队后才用本地
 Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射顺序不会反转。
+最后一个 K 分片完成后，MAT 只发布对应 C slice 的本地 Resource；C-Store 按 slice
+顺序取走结果，每次发射两条 U2D 后统一等待完成，再释放 C buffer 供下一 output tile
+使用。这样 MAT 不再承担写回等待，同时保持 RTL 可安全承载的两路 Store outstanding。
 整个数据面不使用自写 generation 原子轮询或动态抢任务。
 对应日志为
 `build/demo/matmul_4c_cmodel.log`、`build/demo/matmul_4c_dayan_server.log` 和
