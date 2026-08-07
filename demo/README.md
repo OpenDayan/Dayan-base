@@ -99,25 +99,23 @@ Service 转发给发起算子的 Runtime Session，并由 demo 进程输出；`d
 A[M][K] (BF16) × BT[N][K] (BF16) -> C[M][N] (FP32)
 ```
 
-这里 Host 直接按转置布局提供 B。Device 算法沿用 output-stationary 分块：
-`tileM=384`、`tileN=256`、`tileK=256`。一个 root proc 负责 B 的 DMA producer；三个
-子 proc 各自负责一个固定的 M slice。A 使用三个 slice buffer，B 使用两个 full-tile
-buffer 真双缓冲，C 使用三个跨 K 循环常驻的 slice buffer。B 的代际与 producer /
-consumer 关系由 `dayan_resource_init/alloc/produce/wait/consume` 管理；LSU 和 MAT
-完成等待分别使用 `dayan_wait_lsu()` 与 `dayan_wait_mat()`。
+这里 Host 直接按转置布局提供 B。Device 使用 output-stationary 分块：
+`tileM=128`、`tileN=384`、`tileK=256`。两个数据流由同一个模板生成并同时编入 kernel：
+当 `M < N` 时，root producer 双缓冲读取 A，三个 consumer 按 N 切片读取 B 并计算；
+否则 root producer 双缓冲读取 B，三个 consumer 按 M 切片读取 A。共享 tile 的代际与
+producer / consumer 关系由 `dayan_resource_init/alloc/produce/wait/consume` 管理；
+LSU 和 MAT 完成等待分别使用 `dayan_wait_lsu()` 与 `dayan_wait_mat()`。
 
-默认 Host case 为 `M=768, N=512, K=1536`，与四 Core 默认 case 中每个 Core
-承担的矩阵范围和 tile 数量完全一致，便于直接比较单核流水与跨核协作开销。它会生成
-确定性 BF16 输入、执行 Device kernel、回传无 profile 扰动的 Device `mcycle`
-吞吐，并逐元素和 CPU 参考结果比较：
+默认 Host case 为 `M=768, N=512, K=1536`。程序生成确定性 BF16 输入、执行 Device
+kernel、回传 Device `mcycle` 吞吐，并逐元素和 CPU 参考结果比较：
 
 ```sh
 build/demo/matmul_bf16_1c
-build/demo/matmul_bf16_1c 384 256 512
+build/demo/matmul_bf16_1c 128 5088 1272
 ```
 
-当前保留原分块算法的对齐约束：`N` 必须是 16 的整数倍，`K` 必须是 256 的整数倍。
-编译期可把切片模式改成单 slice；切换已有产物时用 `-B` 强制重新构建：
+`N` 必须是 16 的整数倍；K 尾块通过实际 `MAT_K` 和窄 DMA 请求处理，不要求是 256
+的整数倍。编译期可把切片模式改成单 slice；切换已有产物时用 `-B` 强制重新构建：
 
 ```sh
 make -B -C demo MATMUL_SLICES=1
@@ -146,7 +144,7 @@ matmul 使用独立的一键脚本，默认只启动一个 Hart：
 
 ```sh
 make -C demo run-matmul
-bash demo/run_matmul_cmodel.sh 384 64 256
+bash demo/run_matmul_cmodel.sh 64 384 248
 ```
 
 对应日志为 `build/demo/matmul_cmodel.log`、
