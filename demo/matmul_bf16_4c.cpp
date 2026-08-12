@@ -47,15 +47,8 @@ struct MatmulBf16Shape {
 
 #if defined(__DAYAN_DEVICE__)
 
+#include <dayan_intrinsics.h>
 #include <dayan_sys.h>
-/* Only raw instruction builders and the public DAPI are used. */
-#define _NPU_ALIAS_HPP_
-#include <npu_instruction.hpp>
-#include <npu_lsu_csr.hpp>
-#include <npu_mat_csr.hpp>
-
-/* npu_instruction.hpp resets its temporary register aliases to `z`. */
-__asm__(".globl z\n.set z, 0");
 
 namespace matmul_bf16_4c_detail {
 

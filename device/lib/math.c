@@ -4,8 +4,8 @@
 
 /*
  * Small single-precision routines for rv64imaf.  The range reduction used by
- * expf/logf follows the same fdlibm-style structure as npu-kernels, but keeps
- * every operation in float so this file never needs soft-double helpers.
+ * expf/logf use an fdlibm-style range reduction, but keep every operation in
+ * float so this file never needs soft-double helpers.
  */
 
 static uint32_t float_bits(float value)

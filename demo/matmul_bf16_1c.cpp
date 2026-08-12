@@ -37,18 +37,8 @@ struct MatmulBf16Perf {
 
 #if defined(__DAYAN_DEVICE__)
 
+#include <dayan_intrinsics.h>
 #include <dayan_sys.h>
-/* The generated instruction header's optional aliases pull in the legacy
- * kernel ABI.  This demo uses only the raw instruction builders and DAPI. */
-#define _NPU_ALIAS_HPP_
-#include <npu_instruction.hpp>
-#include <npu_lsu_csr.hpp>
-#include <npu_mat_csr.hpp>
-
-/* npu_instruction.hpp resets temporary assembler aliases to the symbol `z`.
- * Make that reset symbol an absolute zero so the relocatable kernel has no
- * spurious unresolved API dependency. */
-__asm__(".globl z\n.set z, 0");
 
 namespace matmul_bf16_1c_detail {
 

@@ -78,9 +78,9 @@ make check QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64
 这些测试覆盖标准 RV64IMAF 上可独立执行的 Device 基础组件；Dayan 自定义执行单元和
 Host↔Device 完整链路仍由 `host/driver/run_cmodel_smoke.sh` 在 RVTNG cmodel 中验证。
 
-默认目标为 `rv64imaf_zicsr_zifencei` / `lp64`，与 `npu-kernels` 的软浮点调用
-约定兼容，同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机
-启动所需的系统扩展。固件输出位于 `build/device/`：
+默认目标为 `rv64imaf_zicsr_zifencei` / `lp64`，使用标准 RV64 `lp64` 调用约定，
+同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机启动所需的系统
+扩展。固件输出位于 `build/device/`：
 
 `gp` 专用于全局寄存器变量 `shared`，表示当前 proc 的 Host coherent allocation
 基址；它不再承担 RISC-V small-data global pointer 的传统职责。BL1 为 scheduler/init

@@ -26,13 +26,8 @@ struct LsuBandwidthResults {
 
 #if defined(__DAYAN_DEVICE__)
 
+#include <dayan_intrinsics.h>
 #include <dayan_sys.h>
-/* This benchmark only uses raw instruction builders and the public DAPI. */
-#define _NPU_ALIAS_HPP_
-#include <npu_instruction.hpp>
-#include <npu_lsu_csr.hpp>
-
-__asm__(".globl z\n.set z, 0");
 
 namespace lsu_bandwidth_detail {
 

@@ -8,7 +8,6 @@
 ```text
 demo/
 ├── Makefile
-├── device_include/cstdint       # freestanding Device 指令头兼容层
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
@@ -32,12 +31,9 @@ make -C demo
 产物为 `build/demo/print_demo`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
-`build/demo/matmul_bf16_broadcast_4c`。矩阵指令定义来自相邻的
-`npu-kernels` 仓库，默认路径是 `../npu-kernels`，也可显式覆盖：
-
-```sh
-make -C demo NPU_KERNELS_DIR=/path/to/npu-kernels
-```
+`build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令、LSU TCSR 和 MAT TCSR
+定义由本仓库 `device/include/api/dayan_intrinsics.h` 提供；dycc 自动加入该公开 API
+目录，构建 demo 不需要额外的源码仓库或 include 参数。
 
 两个 Host 程序默认连接
 `/tmp/dayan-server.sock`，也可以通过环境变量覆盖：

@@ -75,7 +75,6 @@ export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 - 可执行的 TestCluster 和匹配其 RTL 配置的 DRAM 配置文件；
 - Linux FUSE 支持、可访问的 `/dev/fuse` 和 `fusermount3`；
 - Device 构建所需的 LLVM/RISC-V 工具链；
-- `~/npu-kernels`，或构建时通过 `NPU_KERNELS_DIR` 指定其它位置；
 - 没有其它进程占用本次使用的 FUSE mount point 和 Dayan socket。
 
 不要执行 `TestCluster --help`。该 binary 会把参数交给 Verilator，仍然启动模拟器。

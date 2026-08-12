@@ -1,8 +1,10 @@
 GCC=riscv64-unknown-elf-gcc
 OBJCOPY=riscv64-unknown-elf-objcopy
 OBJDUMP=riscv64-unknown-elf-objdump
+QEMU?=/workspace/npu-qemu/build/qemu-system-riscv64
+DEBUG_ELF?=../../build/device/npu-os.elf
 
-.PHONY: clean all
+.PHONY: clean all testDbg
 .ONESHELL:
 
 all: bootrom.img bootrom.elf bootrom.objdump
@@ -23,7 +25,8 @@ clean:
 	rm -f *.elf *.img *.objdump *.bin
 
 testDbg:
-	export QEMU="/workspace/npu-qemu/build/qemu-system-riscv64"
-	export QEMU_FLAGS="-bios /workspace/npu-firmware/device/bl0/bootrom.elf -machine rvtng-v0 -nographic -m 4096"
+	test -f "$(DEBUG_ELF)"
+	export QEMU="$(QEMU)"
+	export QEMU_FLAGS="-bios $(CURDIR)/bootrom.elf -machine rvtng-v0 -nographic -m 4096"
 	setsid ./run_bg.sh $$$$ &
-	exec gdb-multiarch -q /workspace/npu-kernels/general_entry_fpga.elf -ex "target remote localhost:1234" -ex "b *0x80000000"
+	exec gdb-multiarch -q "$(DEBUG_ELF)" -ex "target remote localhost:1234" -ex "b *0x80000000"
