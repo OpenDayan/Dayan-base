@@ -22,7 +22,8 @@ int main(void)
     assert(sizeof(struct rpc_proc_info) == 96);
     assert(sizeof(struct rpc_proc_ps_snapshot) == 1872);
     assert(sizeof(struct rpc_proc_kill_result) == 48);
-    assert(sizeof(struct rpc_profile_event) == 24);
+    assert(sizeof(struct rpc_profile_record) == 8);
+    assert(sizeof(struct rpc_profile_slot_define) == 24);
     assert(sizeof(struct rpc_profile_config) == 64);
     assert(sizeof(struct rpc_profile_flush_request) == 40);
     assert(sizeof(struct rpc_profile_flush_response) == 32);
@@ -35,7 +36,7 @@ int main(void)
     assert(offsetof(struct rpc_proc_create_request, uram_base) == 192);
     assert(offsetof(struct rpc_proc_create_request, name) == 208);
     assert(offsetof(struct rpc_proc_info, name) == 80);
-    assert(offsetof(struct rpc_profile_event, name) == 8);
+    assert(offsetof(struct rpc_profile_slot_define, name) == 8);
     assert(RPC_PROC_SLOTS_PER_HART == 16);
     assert(RPC_PROC_NAME_SIZE == 16);
     assert(RPC_PROC_MAX_CHILD_PROCS == 15);
@@ -57,9 +58,11 @@ int main(void)
     assert(RPC_DCACHE_FLUSH_RESPONSE ==
            (RPC_DCACHE_FLUSH | 0x8000));
     assert(RPC_DCACHE_FLUSH_VERSION == 1U);
-    assert(RPC_PROFILE_VERSION == 3U);
+    assert(RPC_PROFILE_VERSION == 4U);
     assert(RPC_PROFILE_PROC_RUNNING == 0U);
     assert(RPC_PROFILE_PROC_KILL_WAIT_PRODUCE == 7U);
+    assert(RPC_PROFILE_RECORD_SLOT_DEFINE == 0x80U);
+    assert(RPC_PROFILE_SLOT_COUNT == 20U);
     assert(RPC_PROC_PS_VERSION == 3U);
     assert(sizeof(struct trap_record) == 320);
     assert(DAYAN_DEVICE_MAILBOX(3) == 0x1018U);

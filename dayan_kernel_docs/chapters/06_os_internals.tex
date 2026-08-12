@@ -100,17 +100,17 @@ transaction 被取消，已由 send proc 持有的 transaction 在释放调用�
 
 \subsection{proc profile}
 
-每 Hart 有一份 profile 状态和一段由 Host 指定的 FIFO slice。profile v3 事件固定为
-24 bytes：32-bit cycle、16-bit proc ID、16-bit 目标状态，以及固定 16-byte proc 名称；
-状态编码与表~\ref{tab:kernel-051} 一致。START 先记录 receive、send、profile 及所有现存
-算子 proc 的当前状态，随后每次实际状态变化写入一项。采样期间新建的 proc 从带名称的
-\code{WAIT_START} 事件开始，因此 Host 不需要再次做全量快照。每 Hart FIFO 至少容纳完整
-的 19 项初始快照，事件不要求成对。
+每 Hart 有一份 profile 状态和一段由 Host 指定的 FIFO slice。profile v4 普通状态记录
+固定为 8 bytes：48-bit counter、8-bit slot 和 8-bit state；slot 绑定新 Thread 时先写
+一条带 16-byte proc 名称的 24-byte \code{SLOT_DEFINE}，其余状态切换不重复名称。状态
+编码与表~\ref{tab:kernel-051} 一致。START 先为 receive、send、profile 及所有现存算子
+proc 记录定义和当前状态，随后每次实际状态变化只写 8 bytes。每 Hart FIFO 至少容纳完整
+的 19 项初始快照。
 
 FIFO 写满时，状态更新路径只置位并唤醒专用 profile proc，不直接执行 RPC。profile proc
 clean 已写数据后发送 \code{RPC_PROFILE_FLUSH}，根据 Host response 继续记录或关闭本
 Hart profile。Host STOP 先关闭记录路径；若 flush 正在进行则等待其结束，随后 clean 并
-返回尚未填满的事件数。
+返回尚未填满的字节数。
 
 \subsection{私有堆}
 

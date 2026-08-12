@@ -20,8 +20,7 @@ daemon 与 logical task scheduler。本章记录 \code{service.h} 和 \code{serv
   \code{npu_service_output_fn} & 接收 Cluster/Core/proc 的 WRITE 或 CLEAR 输出事件。 \\
   \code{npu_service_trap_fn} & 接收目标 Hart 上报的 trap record。 \\
   \code{npu_service_proc_exit_fn} & 接收 Host root proc 的返回值和 launch cookie。 \\
-  \code{npu_service_profile_event_t} & 24-B 原始 Device profile event，含 cycle、event ID、状态和 Proc 名称。 \\
-  \code{npu_service_profile_fn} & 接收某 Cluster/Core 的一批原始 profile events。 \\
+  \code{npu_service_profile_fn} & 接收某 Cluster/Core 的一段原始 profile 字节流和 byte size。 \\
   \code{npu_service_options_t} & RPC polling、默认 timeout、四类 callback 及 callback context。 \\
   \code{npu_service_launch_desc_t} & 物理 target、entry、参数、logical task、shared/URAM、子 proc、名称和 cookie。 \\
   \code{npu_service_launch_info_t} & launch 状态、目标、proc ID、返回状态、task ID、名称和 cookie。 \\
@@ -37,8 +36,8 @@ Service API 定义。
 
 \begin{dayantable}{Service 常量与枚举}{tab:api-service-constants}{X[47,l] X[53,l]}
   API & 含义 \\
-  \code{NPU_SERVICE_OPTIONS_VERSION} / \code{NPU_SERVICE_LAUNCH_DESC_VERSION} & 当前 options 版本 6、launch descriptor 版本 4。 \\
-  \code{DAYAN_SERVER_OPTIONS_VERSION} & 当前 Server options 版本 6。 \\
+  \code{NPU_SERVICE_OPTIONS_VERSION} / \code{NPU_SERVICE_LAUNCH_DESC_VERSION} & 当前 options 版本 7、launch descriptor 版本 4。 \\
+  \code{DAYAN_SERVER_OPTIONS_VERSION} & 当前 Server options 版本 7。 \\
   \code{NPU_SERVICE_TIMEOUT_INFINITE} & Service 调用无限等待。 \\
   \code{NPU_SERVICE_LAUNCH_MAX_ARGS} & root Proc 最多 8 个 64-bit 参数。 \\
   \code{NPU_SERVICE_PROC_NAME_SIZE} & Proc 名称固定 16 B，其中必须含一个 NUL。 \\
@@ -108,8 +107,8 @@ shared 和 URAM 使用 HAL allocation handle 加 offset/size，Service 会再次
   \code{npu_service_profile_stop} & 对各 Hart 发送 STOP、取回尾批次并释放 profile allocation。 \\
 \end{dayantable}
 
-profile 是 Device-wide 单 owner 能力；不同 Hart 拥有独立 FIFO slice。Service callback
-中的 event 保留 Device cycle、event ID、状态和固定 16-byte proc 名称。
+profile 是 Device-wide 单 owner 能力；不同 Hart 拥有独立 FIFO slice。Service 不解析
+profile v4，callback 收到 Device 原样写出的紧密 8-B/24-B 变长字节流。
 
 \subsection{Runtime Server}
 

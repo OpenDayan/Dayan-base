@@ -90,7 +90,7 @@ int proc_create_child(struct proc *parent, const char *name, proc_fn entry,
 int proc_join(uint32_t proc_id, int64_t *result);
 int proc_join_all(void);
 int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot);
-/* Emits one profile event for the current state of every existing proc. */
+/* Emits a slot definition and initial state for every existing proc. */
 void proc_profile_snapshot(void);
 int proc_kill_all(struct rpc_proc_kill_result *result);
 struct proc *proc_self(void);

@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define NPU_SERVICE_OPTIONS_VERSION 6U
+#define NPU_SERVICE_OPTIONS_VERSION 7U
 #define NPU_SERVICE_LAUNCH_DESC_VERSION 4U
 #define NPU_SERVICE_TIMEOUT_INFINITE UINT32_MAX
 #define NPU_SERVICE_LAUNCH_MAX_ARGS 8U
@@ -47,32 +47,9 @@ typedef void (*npu_service_proc_exit_fn)(void *context, uint32_t cluster,
                                          uint32_t core, uint32_t proc,
                                          int64_t result, uint64_t cookie);
 
-typedef struct npu_service_profile_event {
-    uint32_t cycle;
-    uint16_t event_id;
-    uint16_t state;
-    char name[NPU_SERVICE_PROC_NAME_SIZE];
-} npu_service_profile_event_t;
-
-#ifdef __cplusplus
-static_assert(sizeof(npu_service_profile_event_t) == 24,
-              "Service profile event ABI");
-static_assert(offsetof(npu_service_profile_event_t, state) == 6,
-              "Service profile state offset");
-static_assert(offsetof(npu_service_profile_event_t, name) == 8,
-              "Service profile name offset");
-#else
-_Static_assert(sizeof(npu_service_profile_event_t) == 24,
-               "Service profile event ABI");
-_Static_assert(offsetof(npu_service_profile_event_t, state) == 6,
-               "Service profile state offset");
-_Static_assert(offsetof(npu_service_profile_event_t, name) == 8,
-               "Service profile name offset");
-#endif
-
 typedef int (*npu_service_profile_fn)(
     void *context, uint32_t cluster, uint32_t core,
-    const npu_service_profile_event_t *events, size_t count);
+    const void *data, size_t size);
 
 typedef struct npu_service_options {
     uint32_t version;

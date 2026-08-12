@@ -88,10 +88,7 @@ struct server_event {
 
 struct server_stream {
     uint64_t id;
-    int32_t priority;
-    uint32_t flags;
     uint32_t references;
-    int64_t last_status;
     struct server_context *context;
     struct server_command *head;
     struct server_command *tail;
@@ -141,18 +138,16 @@ struct server_output {
 
 struct server_profile_chunk {
     struct server_profile_chunk *next;
-    size_t count;
+    size_t size;
     size_t offset;
     uint32_t cluster;
     uint32_t hart;
-    npu_ipc_profile_event_t events[];
+    unsigned char data[];
 };
 
 struct server_launch_group {
     npu_hal_allocation_t *shared_allocation;
-    uint32_t expected;
     uint32_t active;
-    uint32_t completed;
     struct server_launch_group *next;
 };
 
@@ -191,7 +186,6 @@ struct server_command {
             NPULaunchConfig config;
             uint64_t next_unit;
             uint64_t total_units;
-            uint64_t completed_units;
             int64_t aggregate_status;
             uint64_t cookie;
             char task_name[NPU_PROC_NAME_SIZE];
@@ -208,7 +202,6 @@ struct server_context {
     uint32_t owner;
     uint32_t max_pending_commands;
     uint32_t pending_commands;
-    uint32_t flags;
     uint32_t closing;
     struct server_session *session;
     struct server_buffer *buffers;

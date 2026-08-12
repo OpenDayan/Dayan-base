@@ -4,13 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-_Static_assert(sizeof(npu_profile_event_t) ==
-               sizeof(npu_ipc_profile_event_t),
-               "Runtime and IPC profile event ABI");
 _Static_assert(NPU_PROFILE_BATCH_END == NPU_IPC_PROFILE_END,
                "Runtime and IPC profile batch flags");
-_Static_assert(NPU_PROFILE_MAX_BATCH_EVENTS ==
-               NPU_IPC_PROFILE_CHUNK_EVENTS,
+_Static_assert(NPU_PROFILE_MAX_BATCH_BYTES ==
+               NPU_IPC_PROFILE_CHUNK_BYTES,
                "Runtime and IPC profile batch capacity");
 
 void npu_profile_options_init(npu_profile_options_t *options)
@@ -124,8 +121,8 @@ int npu_profile_stop(npu_profile_t *profile)
     return profile_stop(profile, 0);
 }
 
-int npu_profile_read(npu_profile_t *profile, npu_profile_event_t *events,
-                     uint32_t capacity, uint32_t timeout_ms,
+int npu_profile_read(npu_profile_t *profile, void *data,
+                     uint32_t capacity_bytes, uint32_t timeout_ms,
                      npu_profile_batch_info_t *batch_out)
 {
     npu_ipc_profile_read_t request;
@@ -136,8 +133,8 @@ int npu_profile_read(npu_profile_t *profile, npu_profile_event_t *events,
     size_t expected;
     int status;
 
-    if (!profile || !profile->runtime || !events || !capacity || !batch_out ||
-        capacity > NPU_PROFILE_MAX_BATCH_EVENTS)
+    if (!profile || !profile->runtime || !data || !capacity_bytes ||
+        !batch_out || capacity_bytes > NPU_PROFILE_MAX_BATCH_BYTES)
         return -EINVAL;
     runtime = profile->runtime;
     pthread_mutex_lock(&runtime->mutex);
@@ -147,7 +144,7 @@ int npu_profile_read(npu_profile_t *profile, npu_profile_event_t *events,
         return -EINVAL;
     }
     pthread_mutex_unlock(&runtime->mutex);
-    request.max_events = capacity;
+    request.max_bytes = capacity_bytes;
     request.timeout_ms = timeout_ms;
     status = runtime_control_call_variable(
         runtime, NPU_IPC_PROFILE_READ, profile->id, &request,
@@ -159,22 +156,20 @@ int npu_profile_read(npu_profile_t *profile, npu_profile_event_t *events,
         goto out;
     }
     batch = payload;
-    expected = sizeof(*batch) +
-               (size_t)batch->count * sizeof(npu_ipc_profile_event_t);
-    if (batch->count > capacity ||
+    expected = sizeof(*batch) + batch->byte_count;
+    if (batch->byte_count > capacity_bytes ||
         (batch->flags & ~NPU_IPC_PROFILE_END) ||
-        ((batch->flags & NPU_IPC_PROFILE_END) && batch->count) ||
+        ((batch->flags & NPU_IPC_PROFILE_END) && batch->byte_count) ||
         payload_size != expected) {
         status = -EPROTO;
         goto out;
     }
     batch_out->cluster = batch->cluster;
     batch_out->hart = batch->hart;
-    batch_out->count = batch->count;
+    batch_out->byte_count = batch->byte_count;
     batch_out->flags = batch->flags;
-    if (batch->count)
-        memcpy(events, batch + 1,
-               (size_t)batch->count * sizeof(*events));
+    if (batch->byte_count)
+        memcpy(data, batch + 1, batch->byte_count);
     status = 0;
 
 out:

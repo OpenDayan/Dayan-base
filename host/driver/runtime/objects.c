@@ -124,8 +124,6 @@ int npu_context_create(npu_runtime_t *runtime,
     }
     context->runtime = runtime;
     context->id = id;
-    context->memory_quota = desc->memory_quota;
-    context->max_pending_commands = desc->max_pending_commands;
     pthread_mutex_lock(&runtime->mutex);
     if (runtime->closing) {
         pthread_mutex_unlock(&runtime->mutex);
@@ -307,7 +305,6 @@ int npu_buffer_create(npu_context_t *context, const npu_buffer_desc_t *desc,
     buffer->context = context;
     buffer->id = id;
     buffer->size = desc->size;
-    buffer->flags = desc->flags;
     pthread_mutex_lock(&runtime->mutex);
     if (context->closing) {
         pthread_mutex_unlock(&runtime->mutex);
@@ -345,7 +342,6 @@ int npu_buffer_create_view(npu_buffer_t *buffer, uint64_t offset,
         free(view);
         return -EOVERFLOW;
     }
-    view->flags = buffer->flags;
     view->parent = root;
     *view_out = view;
     return 0;
@@ -423,7 +419,6 @@ int npu_stream_create(npu_context_t *context, const npu_stream_desc_t *desc,
     }
     stream->context = context;
     stream->id = id;
-    stream->priority = desc->priority;
     pthread_mutex_lock(&runtime->mutex);
     if (context->closing) {
         pthread_mutex_unlock(&runtime->mutex);

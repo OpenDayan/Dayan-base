@@ -17,27 +17,40 @@
 #define DYPERF_DEFAULT_DURATION_MS 1000U
 #define DYPERF_READ_INTERVAL_MS    100U
 #define DYPERF_DRAIN_TIMEOUT_MS    5000U
-#define DYPERF_EVENT_ID_COUNT      65536U
 #define DYPERF_TRACE_PID_BASE      UINT64_C(0x10000)
+#define DYPERF_PENDING_BYTES       (NPU_PROFILE_SLOT_DEFINE_SIZE - 1U)
+
+struct trace_thread_order;
+
+struct trace_slot {
+    uint32_t generation;
+    uint8_t state;
+    unsigned char defined;
+    unsigned char state_valid;
+    char name[NPU_PROC_NAME_SIZE];
+};
 
 struct trace_target {
     struct trace_target *next;
     uint64_t epoch;
-    uint32_t last_cycle;
+    uint64_t last_counter;
     uint32_t cluster;
     uint32_t hart;
+    size_t pending_size;
     int have_cycle;
     int have_execution_state;
     int scheduler_running;
-    unsigned char *proc_seen;
-    unsigned char *state_valid;
-    uint16_t *proc_state;
-    char (*proc_names)[NPU_PROC_NAME_SIZE];
+    size_t thread_count;
+    size_t thread_capacity;
+    struct trace_thread_order *threads;
+    struct trace_slot slots[NPU_PROFILE_SLOT_COUNT];
+    unsigned char pending[DYPERF_PENDING_BYTES];
 };
 
 struct trace_thread_order {
-    const char *name;
-    uint16_t event_id;
+    char name[NPU_PROC_NAME_SIZE];
+    uint8_t slot;
+    uint32_t generation;
 };
 
 struct trace_writer {
@@ -231,32 +244,33 @@ static uint64_t trace_process_sort_index(uint32_t cluster, uint32_t hart)
 }
 
 static uint64_t trace_thread_id(const struct trace_target *target,
-                                uint16_t event_id)
+                                uint8_t slot, uint32_t generation)
 {
+    uint64_t local_id;
+
     /* Perfetto identifies tid == pid as the process main thread. */
-    return event_id ? event_id : trace_pid(target->cluster, target->hart);
+    if (slot == NPU_PROFILE_SLOT_SCHEDULER)
+        return trace_pid(target->cluster, target->hart);
+    local_id = ((uint64_t)generation - 1U) * UINT8_MAX + slot;
+    return local_id;
 }
 
 static int trace_proc_metadata(struct trace_writer *writer,
                                struct trace_target *target,
-                               uint16_t event_id,
+                               uint8_t slot, uint32_t generation,
                                const char *name)
 {
     size_t name_length = strnlen(name, NPU_PROC_NAME_SIZE);
 
     if (!name_length || name_length == NPU_PROC_NAME_SIZE)
         return -EPROTO;
-    if (target->proc_seen[event_id])
-        return strcmp(target->proc_names[event_id], name) ? -EPROTO : 0;
-    target->proc_seen[event_id] = 1;
-    memcpy(target->proc_names[event_id], name, name_length + 1U);
     if (trace_item_begin(writer) < 0 ||
         fprintf(writer->file,
                 "{\"name\":\"thread_name\",\"ph\":\"M\","
                 "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ",\"args\":{"
                 "\"name\":",
                 trace_pid(target->cluster, target->hart),
-                trace_thread_id(target, event_id)) < 0 ||
+                trace_thread_id(target, slot, generation)) < 0 ||
         trace_json_string(writer->file, name, name_length) < 0 ||
         fputs("}}", writer->file) == EOF)
         return -EIO;
@@ -276,21 +290,6 @@ static struct trace_target *trace_target_get(struct trace_writer *writer,
     target = calloc(1, sizeof(*target));
     if (!target)
         return 0;
-    target->proc_seen = calloc(DYPERF_EVENT_ID_COUNT, 1);
-    target->state_valid = calloc(DYPERF_EVENT_ID_COUNT, 1);
-    target->proc_state = calloc(DYPERF_EVENT_ID_COUNT,
-                                sizeof(*target->proc_state));
-    target->proc_names = calloc(DYPERF_EVENT_ID_COUNT,
-                                sizeof(*target->proc_names));
-    if (!target->proc_seen || !target->state_valid || !target->proc_state ||
-        !target->proc_names) {
-        free(target->proc_names);
-        free(target->proc_state);
-        free(target->state_valid);
-        free(target->proc_seen);
-        free(target);
-        return 0;
-    }
     target->cluster = cluster;
     target->hart = hart;
     target->next = writer->targets;
@@ -311,23 +310,24 @@ static struct trace_target *trace_target_get(struct trace_writer *writer,
                 "\"sort_index\":%" PRIu64 "}}",
                 trace_pid(cluster, hart),
                 trace_process_sort_index(cluster, hart)) < 0 ||
-        trace_proc_metadata(writer, target, 0, "scheduler") < 0) {
+        trace_proc_metadata(writer, target, NPU_PROFILE_SLOT_SCHEDULER,
+                            0, "scheduler") < 0) {
         writer->failed = 1;
         return 0;
     }
     return target;
 }
 
-static uint64_t extend_cycle(struct trace_target *target, uint32_t cycle)
+static uint64_t extend_counter(struct trace_target *target, uint64_t counter)
 {
-    if (target->have_cycle && cycle < target->last_cycle)
-        target->epoch += UINT64_C(1) << 32;
-    target->last_cycle = cycle;
+    if (target->have_cycle && counter < target->last_counter)
+        target->epoch += UINT64_C(1) << 48;
+    target->last_counter = counter;
     target->have_cycle = 1;
-    return target->epoch + cycle;
+    return target->epoch + counter;
 }
 
-static const char *trace_state_name(uint16_t state)
+static const char *trace_state_name(uint8_t state)
 {
     switch (state) {
     case NPU_PROFILE_PROC_RUNNING:
@@ -353,9 +353,10 @@ static const char *trace_state_name(uint16_t state)
 
 static int trace_state_event(struct trace_writer *writer,
                              const struct trace_target *target,
-                             uint16_t event_id, uint16_t state,
+                             uint8_t slot, uint32_t generation,
+                             uint8_t state,
                              const char *phase, uint64_t cycle,
-                             uint32_t raw_cycle)
+                             uint64_t raw_counter)
 {
     const char *name = trace_state_name(state);
     char timestamp[48];
@@ -372,19 +373,19 @@ static int trace_state_event(struct trace_writer *writer,
                 "{\"name\":\"%s\",\"cat\":\"proc_state\","
                 "\"ph\":\"%s\",\"pid\":%" PRIu64 ","
                 "\"tid\":%" PRIu64 ",\"ts\":%s,\"args\":{"
-                "\"cycle\":%u,\"state\":%u}}",
+                "\"counter\":%" PRIu64 ",\"state\":%u}}",
                 name, phase, trace_pid(target->cluster, target->hart),
-                trace_thread_id(target, event_id), timestamp, raw_cycle,
-                state) < 0)
+                trace_thread_id(target, slot, generation), timestamp,
+                raw_counter, state) < 0)
         return -EIO;
     return 0;
 }
 
 static int trace_scheduler_update(struct trace_writer *writer,
                                   struct trace_target *target,
-                                  uint16_t old_state, int old_state_valid,
-                                  uint16_t new_state,
-                                  uint64_t cycle, uint32_t raw_cycle)
+                                  uint8_t old_state, int old_state_valid,
+                                  uint8_t new_state,
+                                  uint64_t cycle, uint64_t raw_counter)
 {
     int leaves_cpu = old_state_valid &&
                      old_state == NPU_PROFILE_PROC_RUNNING &&
@@ -394,93 +395,219 @@ static int trace_scheduler_update(struct trace_writer *writer,
     if (!target->have_execution_state) {
         target->have_execution_state = 1;
         if (!enters_cpu) {
-            if (trace_state_event(writer, target, 0,
+            if (trace_state_event(writer, target,
+                                  NPU_PROFILE_SLOT_SCHEDULER, 0,
                                   NPU_PROFILE_PROC_RUNNING, "B", cycle,
-                                  raw_cycle) < 0)
+                                  raw_counter) < 0)
                 return -EIO;
             target->scheduler_running = 1;
         }
     } else if (leaves_cpu && !target->scheduler_running) {
-        if (trace_state_event(writer, target, 0,
+        if (trace_state_event(writer, target,
+                              NPU_PROFILE_SLOT_SCHEDULER, 0,
                               NPU_PROFILE_PROC_RUNNING, "B", cycle,
-                              raw_cycle) < 0)
+                              raw_counter) < 0)
             return -EIO;
         target->scheduler_running = 1;
     }
     if (enters_cpu && target->scheduler_running) {
-        if (trace_state_event(writer, target, 0,
+        if (trace_state_event(writer, target,
+                              NPU_PROFILE_SLOT_SCHEDULER, 0,
                               NPU_PROFILE_PROC_RUNNING, "E", cycle,
-                              raw_cycle) < 0)
+                              raw_counter) < 0)
             return -EIO;
         target->scheduler_running = 0;
     }
     return 0;
 }
 
+static int trace_slot_define(struct trace_writer *writer,
+                             struct trace_target *target,
+                             uint8_t slot, uint64_t raw_counter,
+                             const char *name)
+{
+    struct trace_slot *entry;
+    struct trace_thread_order *thread;
+    size_t name_length;
+    uint64_t counter;
+
+    if (!slot || slot >= NPU_PROFILE_SLOT_COUNT)
+        return -EPROTO;
+    name_length = strnlen(name, NPU_PROC_NAME_SIZE);
+    if (!name_length || name_length == NPU_PROC_NAME_SIZE)
+        return -EPROTO;
+    entry = &target->slots[slot];
+    counter = extend_counter(target, raw_counter);
+    if (entry->state_valid) {
+        if (trace_state_event(writer, target, slot, entry->generation,
+                              entry->state, "E", counter,
+                              raw_counter) < 0)
+            return -EIO;
+        if (entry->state == NPU_PROFILE_PROC_RUNNING &&
+            !target->scheduler_running) {
+            if (trace_state_event(writer, target,
+                                  NPU_PROFILE_SLOT_SCHEDULER, 0,
+                                  NPU_PROFILE_PROC_RUNNING, "B", counter,
+                                  raw_counter) < 0)
+                return -EIO;
+            target->scheduler_running = 1;
+        }
+    }
+    ++entry->generation;
+    if (!entry->generation)
+        return -EOVERFLOW;
+    entry->defined = 1;
+    entry->state_valid = 0;
+    memset(entry->name, 0, sizeof(entry->name));
+    memcpy(entry->name, name, name_length);
+    if (target->thread_count == target->thread_capacity) {
+        size_t capacity = target->thread_capacity ?
+            target->thread_capacity * 2U : NPU_PROFILE_SLOT_COUNT;
+        void *threads;
+
+        if (capacity < target->thread_capacity ||
+            capacity > SIZE_MAX / sizeof(*target->threads))
+            return -EOVERFLOW;
+        threads = realloc(target->threads,
+                          capacity * sizeof(*target->threads));
+        if (!threads)
+            return -ENOMEM;
+        target->threads = threads;
+        target->thread_capacity = capacity;
+    }
+    thread = &target->threads[target->thread_count++];
+    memset(thread, 0, sizeof(*thread));
+    memcpy(thread->name, name, name_length);
+    thread->slot = slot;
+    thread->generation = entry->generation;
+    return trace_proc_metadata(writer, target, slot, entry->generation,
+                               entry->name);
+}
+
+static int trace_state_record(struct trace_writer *writer,
+                              struct trace_target *target,
+                              uint64_t raw)
+{
+    uint64_t raw_counter = npu_profile_record_counter(raw);
+    uint8_t slot = npu_profile_record_slot(raw);
+    uint8_t state = npu_profile_record_state(raw);
+    struct trace_slot *entry;
+    uint64_t cycle;
+
+    if (!slot || slot >= NPU_PROFILE_SLOT_COUNT || !trace_state_name(state))
+        return -EPROTO;
+    entry = &target->slots[slot];
+    if (!entry->defined)
+        return -EPROTO;
+    cycle = extend_counter(target, raw_counter);
+    if (entry->state_valid &&
+        trace_state_event(writer, target, slot, entry->generation,
+                          entry->state, "E", cycle, raw_counter) < 0)
+        return -EIO;
+    if (trace_scheduler_update(writer, target, entry->state,
+                               entry->state_valid, state, cycle,
+                               raw_counter) < 0)
+        return -EIO;
+    if (trace_state_event(writer, target, slot, entry->generation,
+                          state, "B", cycle, raw_counter) < 0)
+        return -EIO;
+    entry->state = state;
+    entry->state_valid = 1;
+    return 0;
+}
+
+static int trace_decode(struct trace_writer *writer,
+                        struct trace_target *target,
+                        const unsigned char *data, size_t size,
+                        size_t *consumed_out)
+{
+    size_t offset = 0;
+
+    while (size - offset >= NPU_PROFILE_RECORD_SIZE) {
+        uint64_t raw;
+        uint8_t state;
+        size_t record_size;
+        int status;
+
+        memcpy(&raw, data + offset, sizeof(raw));
+        state = npu_profile_record_state(raw);
+        record_size = npu_profile_record_size(raw);
+        if (!record_size)
+            return -EPROTO;
+        if (size - offset < record_size)
+            break;
+        if (state == NPU_PROFILE_RECORD_SLOT_DEFINE) {
+            status = trace_slot_define(
+                writer, target, npu_profile_record_slot(raw),
+                npu_profile_record_counter(raw),
+                (const char *)data + offset + NPU_PROFILE_RECORD_SIZE);
+        } else {
+            status = trace_state_record(writer, target, raw);
+        }
+        if (status < 0)
+            return status;
+        offset += record_size;
+    }
+    *consumed_out = offset;
+    return 0;
+}
+
 static int trace_write_batch(struct trace_writer *writer,
                              const npu_profile_batch_info_t *batch,
-                             const npu_profile_event_t *events)
+                             const void *data)
 {
+    const unsigned char *bytes = data;
     struct trace_target *target;
-    uint32_t index;
+    size_t consumed;
+    size_t combined_size;
+    unsigned char combined[NPU_PROFILE_MAX_BATCH_BYTES +
+                           DYPERF_PENDING_BYTES];
+    int status;
 
-    if (!batch->count)
+    if (!batch->byte_count)
         return 0;
     target = trace_target_get(writer, batch->cluster, batch->hart);
     if (!target)
         return writer->failed ? -EIO : -ENOMEM;
-    for (index = 0; index < batch->count; ++index) {
-        const npu_profile_event_t *event = &events[index];
-        uint64_t cycle;
-
-        if (!trace_state_name(event->state))
-            return -EPROTO;
-        {
-            int metadata_status = trace_proc_metadata(
-                writer, target, event->event_id, event->name);
-
-            if (metadata_status < 0)
-                return metadata_status;
-        }
-        cycle = extend_cycle(target, event->cycle);
-        if (target->state_valid[event->event_id] &&
-            trace_state_event(writer, target, event->event_id,
-                              target->proc_state[event->event_id], "E",
-                              cycle, event->cycle) < 0)
-            return -EIO;
-        if (trace_scheduler_update(
-                writer, target, target->proc_state[event->event_id],
-                target->state_valid[event->event_id], event->state,
-                cycle, event->cycle) < 0)
-            return -EIO;
-        if (trace_state_event(writer, target, event->event_id,
-                              event->state, "B", cycle,
-                              event->cycle) < 0)
-            return -EIO;
-        target->proc_state[event->event_id] = event->state;
-        target->state_valid[event->event_id] = 1;
-    }
+    if (batch->byte_count > NPU_PROFILE_MAX_BATCH_BYTES ||
+        target->pending_size > sizeof(target->pending))
+        return -EPROTO;
+    combined_size = target->pending_size + batch->byte_count;
+    memcpy(combined, target->pending, target->pending_size);
+    memcpy(combined + target->pending_size, bytes, batch->byte_count);
+    status = trace_decode(writer, target, combined, combined_size, &consumed);
+    if (status < 0)
+        return status;
+    target->pending_size = combined_size - consumed;
+    if (target->pending_size > sizeof(target->pending))
+        return -EPROTO;
+    memcpy(target->pending, combined + consumed, target->pending_size);
     return 0;
 }
 
 static int trace_close_states(struct trace_writer *writer,
                               const struct trace_target *target)
 {
-    uint64_t cycle = target->epoch + target->last_cycle;
-    uint32_t event_id;
+    uint64_t cycle = target->epoch + target->last_counter;
+    uint32_t slot;
 
+    if (target->pending_size)
+        return -EPROTO;
     if (!target->have_cycle)
         return 0;
-    for (event_id = 0; event_id < DYPERF_EVENT_ID_COUNT; ++event_id) {
-        if (target->state_valid[event_id] &&
-            trace_state_event(writer, target, (uint16_t)event_id,
-                              target->proc_state[event_id], "E", cycle,
-                              target->last_cycle) < 0)
+    for (slot = 1; slot < NPU_PROFILE_SLOT_COUNT; ++slot) {
+        const struct trace_slot *entry = &target->slots[slot];
+
+        if (entry->state_valid &&
+            trace_state_event(writer, target, (uint8_t)slot,
+                              entry->generation, entry->state, "E", cycle,
+                              target->last_counter) < 0)
             return -EIO;
     }
     if (target->scheduler_running &&
-        trace_state_event(writer, target, 0, NPU_PROFILE_PROC_RUNNING,
-                          "E", cycle, target->last_cycle) < 0)
+        trace_state_event(writer, target, NPU_PROFILE_SLOT_SCHEDULER, 0,
+                          NPU_PROFILE_PROC_RUNNING, "E", cycle,
+                          target->last_counter) < 0)
         return -EIO;
     return 0;
 }
@@ -493,31 +620,28 @@ static int trace_thread_order_compare(const void *left, const void *right)
 
     if (order)
         return order;
-    return a->event_id < b->event_id ? -1 : a->event_id != b->event_id;
+    if (a->slot != b->slot)
+        return a->slot < b->slot ? -1 : 1;
+    return a->generation < b->generation ? -1 :
+           a->generation != b->generation;
 }
 
 static int trace_thread_sort_metadata(struct trace_writer *writer,
                                       const struct trace_target *target)
 {
     struct trace_thread_order *threads;
-    uint32_t event_id;
-    size_t count = 0;
+    size_t count = target->thread_count + 1U;
     size_t index = 0;
 
-    for (event_id = 0; event_id < DYPERF_EVENT_ID_COUNT; ++event_id) {
-        if (target->proc_seen[event_id])
-            ++count;
-    }
     threads = calloc(count, sizeof(*threads));
     if (!threads)
         return -ENOMEM;
-    for (event_id = 0; event_id < DYPERF_EVENT_ID_COUNT; ++event_id) {
-        if (!target->proc_seen[event_id])
-            continue;
-        threads[index].name = target->proc_names[event_id];
-        threads[index].event_id = (uint16_t)event_id;
-        ++index;
-    }
+    memcpy(threads[index].name, "scheduler", sizeof("scheduler"));
+    threads[index].slot = NPU_PROFILE_SLOT_SCHEDULER;
+    threads[index].generation = 0;
+    ++index;
+    memcpy(threads + index, target->threads,
+           target->thread_count * sizeof(*threads));
     qsort(threads, count, sizeof(*threads), trace_thread_order_compare);
     for (index = 0; index < count; ++index) {
         if (trace_item_begin(writer) < 0 ||
@@ -526,7 +650,8 @@ static int trace_thread_sort_metadata(struct trace_writer *writer,
                     "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ",\"args\":{"
                     "\"sort_index\":%zu}}",
                     trace_pid(target->cluster, target->hart),
-                    trace_thread_id(target, threads[index].event_id),
+                    trace_thread_id(target, threads[index].slot,
+                                    threads[index].generation),
                     index) < 0) {
             free(threads);
             return -EIO;
@@ -580,10 +705,7 @@ static int trace_writer_close(struct trace_writer *writer)
     while (target) {
         struct trace_target *next = target->next;
 
-        free(target->proc_names);
-        free(target->proc_state);
-        free(target->state_valid);
-        free(target->proc_seen);
+        free(target->threads);
         free(target);
         target = next;
     }
@@ -595,17 +717,17 @@ static int trace_writer_close(struct trace_writer *writer)
 static int read_one(npu_profile_t *profile, struct trace_writer *writer,
                     uint32_t timeout_ms, int *end_out)
 {
-    npu_profile_event_t events[NPU_PROFILE_MAX_BATCH_EVENTS];
+    unsigned char data[NPU_PROFILE_MAX_BATCH_BYTES];
     npu_profile_batch_info_t batch;
     int status;
 
     memset(&batch, 0, sizeof(batch));
-    status = npu_profile_read(profile, events,
-                              NPU_PROFILE_MAX_BATCH_EVENTS,
+    status = npu_profile_read(profile, data,
+                              NPU_PROFILE_MAX_BATCH_BYTES,
                               timeout_ms, &batch);
     if (status < 0)
         return status;
-    status = trace_write_batch(writer, &batch, events);
+    status = trace_write_batch(writer, &batch, data);
     if (status < 0)
         return status;
     *end_out = !!(batch.flags & NPU_PROFILE_BATCH_END);

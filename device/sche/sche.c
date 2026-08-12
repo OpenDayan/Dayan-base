@@ -82,6 +82,21 @@ _Static_assert(PROC_NAME_SIZE == DAYAN_PROC_NAME_SIZE,
                "scheduler and public proc name sizes must match");
 _Static_assert(PROC_NAME_SIZE == RPC_PROC_NAME_SIZE,
                "scheduler and RPC proc name sizes must match");
+_Static_assert(CONFIG_PROC_SLOT_COUNT + RPC_PROFILE_SLOT_USER_BASE ==
+                   RPC_PROFILE_SLOT_RPC_RECEIVE,
+               "profile user slot range");
+
+static uint8_t proc_slot_profile_id(const struct proc_slot *slot)
+{
+    uintptr_t hart = platform_hart_id();
+    const struct proc_slot *base = hart_proc_slots[hart];
+    size_t index;
+
+    if (slot < base || slot >= base + CONFIG_PROC_SLOT_COUNT)
+        platform_halt();
+    index = (size_t)(slot - base);
+    return (uint8_t)(RPC_PROFILE_SLOT_USER_BASE + index);
+}
 
 struct proc *proc_self(void)
 {
@@ -195,6 +210,7 @@ int proc_slot_acquire(size_t stack_size, size_t printf_size,
     if (!slot)
         return -ENOMEM;
     memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->proc.thread.profile_slot = proc_slot_profile_id(slot);
     slot->stack_size = stack_size;
     slot->printf_size = printf_size;
     slot->state = PROC_SLOT_ROOT;
@@ -255,8 +271,11 @@ int thread_init(struct thread *thread, uint32_t type)
     thread->pc = 0;
     thread->type = type;
     thread->state = THREAD_WAIT_START;
+    thread->profile_defined = 0;
+    if (type == THREAD_TYPE_PROC && !thread->profile_slot)
+        return -EINVAL;
     if (type == THREAD_TYPE_PROC && sche->profile_enabled)
-        profile_record_proc_state(container_of(thread, struct proc, thread));
+        profile_record_proc_start(container_of(thread, struct proc, thread));
     return 0;
 }
 
@@ -587,6 +606,7 @@ static struct proc_slot *family_slot_acquire(struct proc_family *family)
     family->free_slots = slot->free_next;
     slot->free_next = 0;
     memset(&slot->proc, 0, sizeof(slot->proc));
+    slot->proc.thread.profile_slot = proc_slot_profile_id(slot);
     slot->state = PROC_SLOT_CHILD;
     return slot;
 }
@@ -835,14 +855,14 @@ void proc_profile_snapshot(void)
     uintptr_t hart = platform_hart_id();
     uint32_t index;
 
-    profile_record_proc_state(&cpu->rpc.receive);
-    profile_record_proc_state(&cpu->rpc.send);
-    profile_record_proc_state(profile_proc());
+    profile_record_proc_start(&cpu->rpc.receive);
+    profile_record_proc_start(&cpu->rpc.send);
+    profile_record_proc_start(profile_proc());
     for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
         struct proc_slot *slot = &hart_proc_slots[hart][index];
 
         if (snapshot_slot_flags(slot, 0))
-            profile_record_proc_state(&slot->proc);
+            profile_record_proc_start(&slot->proc);
     }
 }
 

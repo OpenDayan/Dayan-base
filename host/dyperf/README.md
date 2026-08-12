@@ -51,14 +51,16 @@ Runtime 连接、提交 memcpy 或 launch。
 
 每个 Hart 映射为独立 `pid`，并通过 `process_sort_index` 固定按 Cluster、Hart 编号升序
 排列；同一 Hart 内的轨道通过 `thread_sort_index` 按 Proc 名称排序，同名 Proc 再按 tid
-排序。每个 Device proc ID 映射为独立 `tid`，每条 `thread_name` metadata 使用该 Proc
-的固定 16-byte 名称。tid 0 保留为 `scheduler` 轨道：工具根据当前 Proc 离开
+排序。Device 输入是紧密排列的 profile v4 字节流：普通状态记录为 8 B，`SLOT_DEFINE`
+为 24 B。工具读取每个 8-B header 的 state/tag 决定记录长度，并保留跨 Runtime batch
+的未完整记录。每次 slot 重新定义都会产生新的 generation，因此同一 slot 上先后运行的
+Thread 不会合并为一个 `tid`。`scheduler` 轨道由工具根据当前 Proc 离开
 `RUNNING` 到下一个 Proc 进入 `RUNNING` 之间的区间合成该轨道，不增加 Device profile
-事件。Device 在 START 时先报告所有现存 proc 的初始状态，之后报告每次状态切换后的
-目标状态；采样期间新建的 Proc 会先产生带名称的 `WAIT_START`，因此新 tid 会被持续
-发现并立即命名。工具把这些事件展开成
+记录。Device 在 START 时为所有现存 Proc 先报告 `SLOT_DEFINE` 和初始状态，之后状态
+切换只报告 8-B 目标状态；采样期间 slot 分配给新 Thread 时再报告一次 24-B 定义，名称
+不会在每次状态切换中重复。工具把这些记录展开成
 `RUNNING`、`READY`、`WAIT_POLL`、`WAIT_EVENT`、`WAIT_START`、`WAIT_EXIT`、
 `WAIT_PRODUCE` 和 `KILL_WAIT_PRODUCE` 状态区间。JSON 中的 `B/E` 只用于表达区间，不是
-Device 原始事件类型。工具会按 Hart 独立扩展 32-bit cycle 回绕，并按
+Device 原始状态记录类型。工具会按 Hart 独立扩展 48-bit counter 回绕，并按
 `1 cycle = 1 ns` 转换时间。Chrome Trace 的 `ts` 使用带三位小数的微秒值保存纳秒精度，
 同时设置 `displayTimeUnit: "ns"`。

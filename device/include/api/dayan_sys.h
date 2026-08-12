@@ -102,6 +102,10 @@ DAYAN_API void dayan_wait_vec(void);
 DAYAN_API void dayan_wait_macro(void);
 /* DMA is implemented by LSU and retains the original API spelling. */
 DAYAN_API void dayan_wait_dma(void);
+/* Operate on every cache line intersecting [address, address + size). */
+/* These functions do not wait for an execution unit or synchronize harts. */
+DAYAN_API void dayan_cache_invalidate(const void *address, size_t size);
+DAYAN_API void dayan_cache_flush(const void *address, size_t size);
 
 /* Per-hart resource functions use no atomic operations. */
 /* Functions return 0 on success and a negative value on failure. */

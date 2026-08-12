@@ -187,7 +187,7 @@ static void output_list_free(struct server_output *output)
 
 static size_t profile_chunk_charge(const struct server_profile_chunk *chunk)
 {
-    return sizeof(*chunk) + chunk->count * sizeof(chunk->events[0]);
+    return sizeof(*chunk) + chunk->size;
 }
 
 static void profile_chunk_list_free(struct server_profile_chunk *chunk)
@@ -380,8 +380,7 @@ static void server_device_proc_exit(void *context, uint32_t cluster,
 
 static int server_device_profile(void *context, uint32_t cluster,
                                  uint32_t core,
-                                 const npu_service_profile_event_t *events,
-                                 size_t count)
+                                 const void *data, size_t size)
 {
     dayan_server_t *server = context;
     struct server_profile_chunk *chunk;
@@ -389,20 +388,16 @@ static int server_device_profile(void *context, uint32_t cluster,
     int status = 0;
     int callback_status = 0;
 
-    _Static_assert(sizeof(npu_service_profile_event_t) ==
-                   sizeof(npu_ipc_profile_event_t),
-                   "Service and socket profile event ABI");
-    if (!server || !events || !count ||
-        count > (SIZE_MAX - sizeof(*chunk)) / sizeof(chunk->events[0]))
+    if (!server || !data || !size || size > SIZE_MAX - sizeof(*chunk))
         return -EINVAL;
-    chunk = malloc(sizeof(*chunk) + count * sizeof(chunk->events[0]));
+    chunk = malloc(sizeof(*chunk) + size);
     if (!chunk)
         return -ENOMEM;
     memset(chunk, 0, sizeof(*chunk));
-    chunk->count = count;
+    chunk->size = size;
     chunk->cluster = cluster;
     chunk->hart = core;
-    memcpy(chunk->events, events, count * sizeof(chunk->events[0]));
+    memcpy(chunk->data, data, size);
     charge = profile_chunk_charge(chunk);
 
     pthread_mutex_lock(&server->mutex);
@@ -426,7 +421,7 @@ static int server_device_profile(void *context, uint32_t cluster,
     free(chunk);
     if (server->service_profile)
         callback_status = server->service_profile(
-            server->service_callback_context, cluster, core, events, count);
+            server->service_callback_context, cluster, core, data, size);
     return status < 0 ? status : callback_status;
 }
 
@@ -1012,7 +1007,6 @@ static int context_create_locked(dayan_server_t *server,
     context->owner = server->next_owner;
     context->memory_quota = request->memory_quota;
     context->max_pending_commands = request->max_pending_commands;
-    context->flags = request->flags;
     context->session = session;
     context->next = session->contexts;
     session->contexts = context;
@@ -1115,8 +1109,6 @@ static int stream_create_locked(dayan_server_t *server,
         free(stream);
         return status;
     }
-    stream->priority = request->priority;
-    stream->flags = request->flags;
     stream->context = context;
     stream->next = context->streams;
     context->streams = stream;
@@ -1799,8 +1791,8 @@ static int profile_read_locked(dayan_server_t *server,
     size_t count;
     int status;
 
-    if (!request->max_events ||
-        request->max_events > NPU_IPC_PROFILE_CHUNK_EVENTS)
+    if (!request->max_bytes ||
+        request->max_bytes > NPU_IPC_PROFILE_CHUNK_BYTES)
         return -EINVAL;
     if (server->profile_owner != session ||
         server->profile_id != profile_id)
@@ -1827,16 +1819,15 @@ static int profile_read_locked(dayan_server_t *server,
         *response_size = sizeof(*response);
         return 0;
     }
-    remaining = chunk->count - chunk->offset;
-    count = remaining < request->max_events ? remaining :
-                                               request->max_events;
+    remaining = chunk->size - chunk->offset;
+    count = remaining < request->max_bytes ? remaining :
+                                              request->max_bytes;
     response->cluster = chunk->cluster;
     response->hart = chunk->hart;
-    response->count = (uint32_t)count;
-    memcpy(response + 1, chunk->events + chunk->offset,
-           count * sizeof(chunk->events[0]));
+    response->byte_count = (uint32_t)count;
+    memcpy(response + 1, chunk->data + chunk->offset, count);
     chunk->offset += count;
-    if (chunk->offset == chunk->count) {
+    if (chunk->offset == chunk->size) {
         size_t charge = profile_chunk_charge(chunk);
 
         server->profile_head = chunk->next;
@@ -1845,8 +1836,7 @@ static int profile_read_locked(dayan_server_t *server,
         server->profile_bytes -= charge;
         free(chunk);
     }
-    *response_size = sizeof(*response) +
-                     count * sizeof(npu_ipc_profile_event_t);
+    *response_size = sizeof(*response) + count;
     return 0;
 }
 
@@ -2446,8 +2436,7 @@ static void *connection_main(void *argument)
                 } output;
                 struct {
                     npu_ipc_profile_batch_t header;
-                    npu_ipc_profile_event_t
-                        events[NPU_IPC_PROFILE_CHUNK_EVENTS];
+                    unsigned char data[NPU_IPC_PROFILE_CHUNK_BYTES];
                 } profile;
             } response;
             int handles[NPU_HAL_DATA_MAX_HANDLES];

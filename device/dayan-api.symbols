@@ -1,6 +1,8 @@
 abort
 calloc
 copysignf
+dayan_cache_flush
+dayan_cache_invalidate
 dayan_resource_alloc
 dayan_resource_consume
 dayan_resource_init

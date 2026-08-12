@@ -261,8 +261,11 @@ static int run_grid(npu_stream_t *stream, npu_kernel_t *kernel,
 
 static int finish_profile(npu_profile_t *profile, unsigned core_count)
 {
-    npu_profile_event_t events[NPU_PROFILE_MAX_BATCH_EVENTS];
-    uint64_t event_count = 0;
+    unsigned char data[NPU_PROFILE_MAX_BATCH_BYTES];
+    char slot_names[32][NPU_PROFILE_SLOT_COUNT][NPU_PROC_NAME_SIZE] = {
+        { { 0 } },
+    };
+    uint64_t record_count = 0;
     uint32_t first_hart_mask = 0;
     unsigned first_hart_count = 0;
     int saw_running = 0;
@@ -280,42 +283,63 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
         return status;
     while (!end) {
         npu_profile_batch_info_t batch;
-        uint32_t index;
+        size_t offset = 0;
 
-        status = npu_profile_read(profile, events,
-                                  NPU_PROFILE_MAX_BATCH_EVENTS, 10000,
+        status = npu_profile_read(profile, data,
+                                  NPU_PROFILE_MAX_BATCH_BYTES, 10000,
                                   &batch);
         if (status < 0)
             return status;
         if (batch.cluster || batch.hart >= core_count ||
             (batch.flags & ~NPU_PROFILE_BATCH_END))
             return -EIO;
-        if (batch.count == 128U)
+        if (batch.byte_count >=
+            1024U - NPU_PROFILE_SLOT_DEFINE_SIZE)
             saw_full = 1;
-        if (batch.count && !(first_hart_mask & (UINT32_C(1) << batch.hart))) {
-            if (batch.count < 3U || events[0].event_id != 1U ||
-                events[0].state != NPU_PROFILE_PROC_RUNNING ||
-                strcmp(events[0].name, "rpc-receive") != 0 ||
-                events[1].event_id != 2U ||
-                strcmp(events[1].name, "rpc-send") != 0 ||
-                events[2].event_id != 3U ||
-                strcmp(events[2].name, "profile-flush") != 0)
+        if (batch.byte_count &&
+            !(first_hart_mask & (UINT32_C(1) << batch.hart))) {
+            if (batch.byte_count < 96U)
                 return -EIO;
             first_hart_mask |= UINT32_C(1) << batch.hart;
             ++first_hart_count;
         }
-        for (index = 0; index < batch.count; ++index) {
-            if (!events[index].name[0] ||
-                strnlen(events[index].name, sizeof(events[index].name)) ==
-                    sizeof(events[index].name))
+        while (offset < batch.byte_count) {
+            uint64_t raw;
+            uint8_t slot;
+            uint8_t state;
+
+            if (batch.byte_count - offset < NPU_PROFILE_RECORD_SIZE)
                 return -EIO;
-            if (strcmp(events[index].name, "grid-kernel") == 0 ||
-                strcmp(events[index].name, "kill-test") == 0)
-                saw_named_root = 1;
-            if (strcmp(events[index].name, "child-write") == 0 ||
-                strcmp(events[index].name, "nested-write") == 0)
-                saw_named_child = 1;
-            switch (events[index].state) {
+            memcpy(&raw, data + offset, sizeof(raw));
+            slot = npu_profile_record_slot(raw);
+            state = npu_profile_record_state(raw);
+            if (!slot || slot >= NPU_PROFILE_SLOT_COUNT)
+                return -EIO;
+            if (state == NPU_PROFILE_RECORD_SLOT_DEFINE) {
+                const char *name;
+
+                if (batch.byte_count - offset <
+                    NPU_PROFILE_SLOT_DEFINE_SIZE)
+                    return -EIO;
+                name = (const char *)data + offset +
+                       NPU_PROFILE_RECORD_SIZE;
+                if (!name[0] || strnlen(name, NPU_PROC_NAME_SIZE) ==
+                                NPU_PROC_NAME_SIZE)
+                    return -EIO;
+                memcpy(slot_names[batch.hart][slot], name,
+                       NPU_PROC_NAME_SIZE);
+                if (strcmp(name, "grid-kernel") == 0 ||
+                    strcmp(name, "kill-test") == 0)
+                    saw_named_root = 1;
+                if (strcmp(name, "child-write") == 0 ||
+                    strcmp(name, "nested-write") == 0)
+                    saw_named_child = 1;
+                offset += NPU_PROFILE_SLOT_DEFINE_SIZE;
+                continue;
+            }
+            if (!slot_names[batch.hart][slot][0])
+                return -EIO;
+            switch (state) {
             case NPU_PROFILE_PROC_RUNNING:
                 saw_running = 1;
                 break;
@@ -335,11 +359,12 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
             default:
                 return -EIO;
             }
+            offset += NPU_PROFILE_RECORD_SIZE;
+            ++record_count;
         }
-        event_count += batch.count;
         end = !!(batch.flags & NPU_PROFILE_BATCH_END);
     }
-    if (!event_count || first_hart_count != core_count || !saw_running ||
+    if (!record_count || first_hart_count != core_count || !saw_running ||
         !saw_ready || !saw_wait || !saw_exit || !saw_full ||
         !saw_named_root || !saw_named_child)
         return -EIO;
@@ -468,9 +493,8 @@ int main(int argc, char **argv)
 
         stage = "profile start";
         npu_profile_options_init(&options);
-        /* Exactly 128 events/Hart fits the snapshot and forces a flush. */
-        options.buffer_size = (uint64_t)core_count * 128U *
-                              sizeof(npu_profile_event_t);
+        /* Exactly 1024 bytes/Hart fits the snapshot and forces a flush. */
+        options.buffer_size = (uint64_t)core_count * 1024U;
         status = npu_profile_start(runtime, &options, &profile);
     }
     if (status == 0) {

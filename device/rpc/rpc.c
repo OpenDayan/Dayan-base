@@ -180,12 +180,14 @@ int rpc_init(void)
     rpc_transaction_init(&rpc->trap, 0, 0, 0);
     platform_rpc_init();
 
+    rpc->receive.thread.profile_slot = RPC_PROFILE_SLOT_RPC_RECEIVE;
     status = proc_init(&rpc->receive, "rpc-receive", rpc_receive_main,
                        (void *)base, CONFIG_RPC_STACK_SIZE, 0,
                        0, 0, 0);
     if (status < 0)
         return status;
     base += CONFIG_RPC_STACK_SIZE;
+    rpc->send.thread.profile_slot = RPC_PROFILE_SLOT_RPC_SEND;
     status = proc_init(&rpc->send, "rpc-send", rpc_send_main,
                        (void *)base, CONFIG_RPC_STACK_SIZE, 0,
                        0, 0, 0);

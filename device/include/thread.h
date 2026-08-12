@@ -37,6 +37,8 @@ struct thread {
     uintptr_t sp;
     uintptr_t pc;
     uint32_t type;
+    uint8_t profile_slot;
+    uint8_t profile_defined;
 };
 
 _Static_assert(offsetof(struct thread, id) == 0, "thread.id offset");
@@ -47,6 +49,10 @@ _Static_assert(offsetof(struct thread, sp) == THREAD_SP_OFFSET,
 _Static_assert(offsetof(struct thread, pc) == THREAD_PC_OFFSET,
                "thread.pc offset");
 _Static_assert(offsetof(struct thread, type) == 32, "thread.type offset");
+_Static_assert(offsetof(struct thread, profile_slot) == 36,
+               "thread.profile_slot offset");
+_Static_assert(offsetof(struct thread, profile_defined) == 37,
+               "thread.profile_defined offset");
 _Static_assert(sizeof(struct thread) == 40, "thread layout must stay fixed");
 
 int thread_init(struct thread *thread, uint32_t type);

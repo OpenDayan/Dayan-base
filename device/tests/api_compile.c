@@ -40,6 +40,49 @@ static void compile_intrinsics(long destination, long left, long right)
     __tx_mat_conv2d<0>(destination, left, right);
     __tx_mat_conv2da<0>(destination, left, right);
     __tx_mat_setptr<0>(destination, left, right);
+    __tx_vec_tcsr_write<0>(0);
+    __tx_vec_tcsr_read<0>(value);
+    __tx_vec_sb_bar(value);
+    __tx_vec_lsu_u2v<0, 0>(left);
+    __tx_vec_lsu_u2v_broadcast32<1, 1>(right);
+    __tx_vec_lsu_v2u<0, 0>(destination);
+    __tx_vec_lsu_v2u_mask<1, 1, 0>(destination);
+    __tx_vec_shuffle_xor<0, 0>(1);
+    __tx_vec_shuffle_compress<1, 1>(1);
+    __tx_vec_vv_fp32_add<0, 0, 0, 0>();
+    __tx_vec_vv_fp32_sub<0, 0, 0, 0>();
+    __tx_vec_vv_fp32_mul<0, 0, 0, 0>();
+    __tx_vec_vv_mux2<0, 0, 0, 0>();
+    __tx_vec_vv_int32_cmp<0, 0, 0, 0>();
+    __tx_vec_vv_fp32_cmp<0, 0, 0, 0>();
+    __tx_vec_v_fp32_sfu<0, 0, 0>();
+    __tx_vec_cvt_fp32_int32<0, 0, 0>();
+    __tx_vec_cvt_fp32_fp16<0, 0, 0>();
+    __tx_vec_cvt_fp32_bf16<0, 0, 0>();
+    __tx_vec_cvt_fp16_fp32<0, 0, 0>();
+    __tx_vec_cvt_bf16_fp32<0, 0, 0>();
+    __tx_vec_s_int32_add<0, 0, 0>();
+    __tx_vec_s_bitwise<0, 0, 0, 0, 0>();
+    __tx_macro_tcsr_write<0>(0);
+    __tx_macro_elemwise_add_fp32<0, 0>((void *)destination, (void *)left,
+                                             (void *)right);
+    __tx_macro_elemwise_sub_fp32<0, 0>((void *)destination, (void *)left,
+                                             (void *)right);
+    __tx_macro_elemwise_mul_fp32<0, 0>((void *)destination, (void *)left,
+                                             (void *)right);
+    __tx_macro_elemwise_max_fp32<0, 0>((void *)destination, (void *)left,
+                                             (void *)right);
+    __tx_macro_elemwise_min_fp32<0, 0>((void *)destination, (void *)left,
+                                             (void *)right);
+    __tx_macro_reduce_max_fp32<0, 0>((void *)destination, (void *)left,
+                                           (void *)right);
+    __tx_macro_reduce_add_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_sfu_log2_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_sfu_exp2_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_sfu_sin_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_sfu_cos_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_sfu_rsqrt_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_sfu_recip_fp32<0>((void *)destination, (void *)left);
     (void)checksum;
     (void)value;
 }
@@ -90,6 +133,8 @@ int operator_api_compile(dayan_resource_t *resource,
     dayan_wait_mat();
     dayan_wait_vec();
     dayan_wait_macro();
+    dayan_cache_invalidate(memory, 64);
+    dayan_cache_flush(memory, 64);
     (void)printf("status=%d", status);
     (void)fflush(stdout);
     free(memory);

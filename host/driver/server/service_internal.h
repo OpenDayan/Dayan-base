@@ -115,7 +115,6 @@ struct npu_service_device {
     npu_hal_allocation_t *profile_allocation;
     struct npu_service_profile_core *profile_cores;
     size_t profile_core_count;
-    uint64_t profile_buffer_size;
     uint64_t profile_generation;
     uint64_t profile_next_generation;
     uint32_t profile_active;

@@ -224,7 +224,24 @@ struct rpc_proc_kill_result {
     uint64_t reserved;
 };
 
-#define RPC_PROFILE_VERSION 3U
+#define RPC_PROFILE_VERSION 4U
+#define RPC_PROFILE_RECORD_SIZE 8U
+#define RPC_PROFILE_SLOT_DEFINE_SIZE 24U
+#define RPC_PROFILE_COUNTER_BITS 48U
+#define RPC_PROFILE_COUNTER_MASK 0x0000ffffffffffffULL
+#define RPC_PROFILE_SLOT_SHIFT 48U
+#define RPC_PROFILE_STATE_SHIFT 56U
+
+#define RPC_PROFILE_SLOT_SCHEDULER 0U
+#define RPC_PROFILE_SLOT_USER_BASE 1U
+#define RPC_PROFILE_SLOT_RPC_RECEIVE \
+    (RPC_PROFILE_SLOT_USER_BASE + RPC_PROC_SLOTS_PER_HART)
+#define RPC_PROFILE_SLOT_RPC_SEND (RPC_PROFILE_SLOT_RPC_RECEIVE + 1U)
+#define RPC_PROFILE_SLOT_FLUSH (RPC_PROFILE_SLOT_RPC_SEND + 1U)
+#define RPC_PROFILE_SLOT_COUNT (RPC_PROFILE_SLOT_FLUSH + 1U)
+#define RPC_PROFILE_SNAPSHOT_MAX_BYTES \
+    (RPC_PROC_PS_MAX_RECORDS * \
+     (RPC_PROFILE_SLOT_DEFINE_SIZE + RPC_PROFILE_RECORD_SIZE))
 
 enum rpc_profile_proc_state {
     RPC_PROFILE_PROC_RUNNING = 0,
@@ -237,17 +254,47 @@ enum rpc_profile_proc_state {
     RPC_PROFILE_PROC_KILL_WAIT_PRODUCE = 7,
 };
 
+enum rpc_profile_record_tag {
+    RPC_PROFILE_RECORD_SLOT_DEFINE = 0x80,
+};
+
 enum rpc_profile_command {
     RPC_PROFILE_START = 1,
     RPC_PROFILE_STOP = 2,
 };
 
-struct rpc_profile_event {
-    uint32_t cycle;
-    uint16_t event_id;
-    uint16_t state;
+struct rpc_profile_record {
+    uint64_t value;
+};
+
+struct rpc_profile_slot_define {
+    struct rpc_profile_record header;
     char name[RPC_PROC_NAME_SIZE];
 };
+
+static inline uint64_t rpc_profile_record_pack(uint64_t counter,
+                                               uint8_t slot,
+                                               uint8_t state)
+{
+    return (counter & RPC_PROFILE_COUNTER_MASK) |
+           ((uint64_t)slot << RPC_PROFILE_SLOT_SHIFT) |
+           ((uint64_t)state << RPC_PROFILE_STATE_SHIFT);
+}
+
+static inline uint64_t rpc_profile_record_counter(uint64_t value)
+{
+    return value & RPC_PROFILE_COUNTER_MASK;
+}
+
+static inline uint8_t rpc_profile_record_slot(uint64_t value)
+{
+    return (uint8_t)(value >> RPC_PROFILE_SLOT_SHIFT);
+}
+
+static inline uint8_t rpc_profile_record_state(uint64_t value)
+{
+    return (uint8_t)(value >> RPC_PROFILE_STATE_SHIFT);
+}
 
 /* Host-owned descriptor used by RPC_PROFILE_CONFIG. */
 struct rpc_profile_config {
@@ -256,10 +303,10 @@ struct rpc_profile_config {
     uint32_t command;
     uint32_t flags;
     uint32_t hart_id;
-    uint32_t capacity;
+    uint32_t capacity; /* Byte capacity of buffer_addr. */
     uint64_t buffer_addr;
     uint64_t generation;
-    uint32_t count;
+    uint32_t count; /* Bytes written when stopping. */
     uint32_t enabled;
     int64_t status;
     uint64_t reserved;
@@ -271,8 +318,8 @@ struct rpc_profile_flush_request {
     uint32_t hart_id;
     uint32_t flags;
     uint64_t buffer_addr;
-    uint32_t count;
-    uint32_t capacity;
+    uint32_t count; /* Bytes written. */
+    uint32_t capacity; /* Byte capacity. */
     uint64_t generation;
 };
 
@@ -343,14 +390,13 @@ _Static_assert(offsetof(struct rpc_proc_kill_result, status) == 16,
                "Host proc kill result status offset");
 _Static_assert(sizeof(struct rpc_proc_kill_result) == 48,
                "Host proc kill result ABI must stay fixed");
-_Static_assert(sizeof(struct rpc_profile_event) == 24,
-               "proc profile event ABI must stay fixed");
-_Static_assert(offsetof(struct rpc_profile_event, event_id) == 4,
-               "proc profile event ID offset");
-_Static_assert(offsetof(struct rpc_profile_event, state) == 6,
-               "proc profile event state offset");
-_Static_assert(offsetof(struct rpc_profile_event, name) == 8,
-               "proc profile event name offset");
+_Static_assert(sizeof(struct rpc_profile_record) == RPC_PROFILE_RECORD_SIZE,
+               "proc profile record ABI must stay fixed");
+_Static_assert(sizeof(struct rpc_profile_slot_define) ==
+                   RPC_PROFILE_SLOT_DEFINE_SIZE,
+               "proc profile slot definition ABI must stay fixed");
+_Static_assert(offsetof(struct rpc_profile_slot_define, name) == 8,
+               "proc profile slot definition name offset");
 _Static_assert(sizeof(struct rpc_profile_config) == 64,
                "proc profile config ABI must stay fixed");
 _Static_assert(sizeof(struct rpc_profile_flush_request) == 40,

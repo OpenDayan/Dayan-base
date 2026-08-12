@@ -31,7 +31,7 @@ RPC 是 BL1 与 Host Service 之间的 mailbox 线协议，也是 Device 系统�
   \code{RPC_HEAP_RELEASE} & 将此前取得的 Device heap 区间交还 Host。 \\
   \code{RPC_TRAP_REPORT} & 上报 trap record；具体 record 属于内部 trap ABI。 \\
   \code{RPC_PROC_EXIT} & 上报 Host root Proc 的返回值和 cookie。 \\
-  \code{RPC_PROFILE_FLUSH} & 将当前 Hart 的 profile event batch 交给 Host。 \\
+  \code{RPC_PROFILE_FLUSH} & 将当前 Hart 的 profile byte batch 交给 Host。 \\
 \end{dayantable}
 
 \begin{dayantable}{Host 到 Device 管理 opcode}{tab:api-rpc-h2d-opcode}{X[42,l] X[58,l]}
@@ -107,14 +107,21 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
 
 \begin{dayantable}{Profile wire 类型}{tab:api-rpc-profile-wire}{X[41,l] X[59,l]}
   类型 & ABI / 用途 \\
-  \code{RPC_PROFILE_VERSION} & 当前 profile wire ABI 版本 3。 \\
+  \code{RPC_PROFILE_VERSION} & 当前 profile wire ABI 版本 4。 \\
   \code{rpc_profile_proc_state} & RUNNING、READY、各类 WAIT 及 KILL\_WAIT\_PRODUCE 共八种采样状态。 \\
   \code{rpc_profile_command} & \code{RPC_PROFILE_START} 或 \code{RPC_PROFILE_STOP}。 \\
-  \code{rpc_profile_event} & 24 B；32-bit cycle、event ID、状态和 16-B Proc 名称。 \\
-  \code{rpc_profile_config} & 64 B Host-owned descriptor；指定 Hart、buffer、容量、generation 和 start/stop。 \\
-  \code{rpc_profile_flush_request} & 40 B；Device 上报 event buffer、数量、容量和 generation。 \\
+  \code{rpc_profile_record} & 8 B；48-bit counter、8-bit slot 和 8-bit state/tag。 \\
+  \code{rpc_profile_slot_define} & 24 B；tag 为 \code{SLOT_DEFINE} 的 header 加 16-B Proc 名称。 \\
+  \code{rpc_profile_config} & 64 B Host-owned descriptor；指定 Hart、buffer、byte capacity、generation 和 start/stop。 \\
+  \code{rpc_profile_flush_request} & 40 B；Device 上报 byte buffer、byte count、capacity 和 generation。 \\
   \code{rpc_profile_flush_response} & 32 B；Host 返回是否继续采样、状态和 generation。 \\
 \end{dayantable}
+
+状态值 0--7 的记录长度为 8 B；tag \code{RPC_PROFILE_RECORD_SLOT_DEFINE}（0x80）的记录
+长度为 24 B。记录在 Device buffer 内紧密排列，不含 padding。slot 1--16 对应用户 Proc
+slot，17--19 对应三个系统 Proc，slot 0 保留给 Host 合成 scheduler。一个 slot 分配给新
+Thread 时先写定义再写状态；普通状态切换不重复名称。config 与 flush descriptor 的
+\code{count}/\code{capacity} 均为字节数。
 
 \begin{dayantable}{Profile Proc 状态值}{tab:api-rpc-profile-state}{X[51,l] X[49,l]}
   API & 含义 \\
@@ -144,7 +151,7 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
   \code{rpc_heap_acquire} & 申请 Host 管理的 Device heap 区间。 \\
   \code{rpc_heap_release} & 释放指定 Device heap 区间。 \\
   \code{rpc_proc_exit} & 上报 Host root Proc 的返回值；当前公开实现要求 root flag 且 parent ID 为零。 \\
-  \code{rpc_profile_flush} & 同步提交一批 profile events，并取得 Host 的继续/停止决定。 \\
+  \code{rpc_profile_flush} & 同步提交一批 profile bytes，并取得 Host 的继续/停止决定。 \\
 \end{dayantable}
 
 \end{document}

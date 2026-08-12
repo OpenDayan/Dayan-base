@@ -31,6 +31,7 @@ assert thread_names[(hart0_pid, 1)] == "zeta"
 assert thread_names[(hart3_pid, hart3_pid)] == "scheduler"
 assert thread_names[(hart3_pid, 7)] == "worker"
 assert thread_names[(hart3_pid, 9)] == 'late"child'
+assert thread_names[(hart3_pid, 262)] == "worker-2"
 assert all(
     (tid == pid) == (name == "scheduler")
     for (pid, tid), name in thread_names.items()
@@ -44,6 +45,7 @@ thread_sort = {
 assert thread_sort[(hart3_pid, 9)] == 0
 assert thread_sort[(hart3_pid, hart3_pid)] == 1
 assert thread_sort[(hart3_pid, 7)] == 2
+assert thread_sort[(hart3_pid, 262)] == 3
 
 worker_wait = next(
     event
@@ -61,8 +63,34 @@ worker_wait_end = next(
     and event["name"] == "WAIT_EVENT"
     and event["ph"] == "E"
 )
-assert math.isclose(worker_wait["ts"], 4294967.280, abs_tol=1e-9)
-assert math.isclose(worker_wait_end["ts"], 4294967.312, abs_tol=1e-9)
+assert math.isclose(worker_wait["ts"], 281474976710.640, abs_tol=1e-9)
+assert math.isclose(worker_wait_end["ts"], 281474976710.672, abs_tol=1e-9)
+assert any(
+    event.get("pid") == hart3_pid
+    and event.get("tid") == 262
+    and event["name"] == "RUNNING"
+    and event["ph"] == "B"
+    for event in events
+)
+scheduler_reuse_begin = next(
+    event
+    for event in events
+    if event.get("pid") == hart3_pid
+    and event.get("tid") == hart3_pid
+    and event["name"] == "RUNNING"
+    and event["ph"] == "B"
+    and event["args"]["counter"] == 0x30
+)
+scheduler_reuse_end = next(
+    event
+    for event in events
+    if event.get("pid") == hart3_pid
+    and event.get("tid") == hart3_pid
+    and event["name"] == "RUNNING"
+    and event["ph"] == "E"
+    and event["args"]["counter"] == 0x38
+)
+assert scheduler_reuse_begin["ts"] < scheduler_reuse_end["ts"]
 assert any(
     event.get("pid") == hart3_pid
     and event.get("tid") == hart3_pid

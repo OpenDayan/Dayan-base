@@ -41,8 +41,6 @@ struct npu_runtime {
 struct npu_context {
     npu_runtime_t *runtime;
     uint64_t id;
-    uint64_t memory_quota;
-    uint32_t max_pending_commands;
     uint32_t closing;
     uint32_t transfer_jobs;
     struct npu_buffer *buffers;
@@ -57,7 +55,6 @@ struct npu_buffer {
     uint64_t id;
     uint64_t size;
     uint64_t base_offset;
-    uint32_t flags;
     struct npu_buffer *parent;
     struct npu_buffer *next;
 };
@@ -65,7 +62,6 @@ struct npu_buffer {
 struct npu_stream {
     struct npu_context *context;
     uint64_t id;
-    int32_t priority;
     struct npu_stream *next;
 };
 

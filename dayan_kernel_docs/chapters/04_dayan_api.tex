@@ -24,6 +24,20 @@ wait 接口把当前 \code{tp} 作为 Produce token 写入对应硬件队列，�
 表示该 token 已完成，不涵盖其它执行单元或调用后发射的工作。\code{dayan_yield} 也不
 提供跨核内存顺序。
 
+\subsection{D-cache 可见性}
+
+\begin{dayantable}{D-cache 接口}{tab:kernel-030-cache}{X[38,l] X[62,l]}
+  符号 & 行为 \\
+  \code{dayan_cache_flush(address, size)} & 将本 Hart 与给定字节范围相交的脏 cache line 回写到后级内存。 \\
+  \code{dayan_cache_invalidate(address, size)} & 丢弃本 Hart 与给定字节范围相交的 cache line，使后续读取重新取得数据。 \\
+\end{dayantable}
+
+\code{size=0} 时两个接口均为空操作；非零范围会向 cache-line 边界扩展，因此调用者必须
+保证同一 line 内没有仍需保留的私有脏数据。典型发布顺序是生产者完成写入后调用
+\code{dayan_cache_flush}，消费者在明确的 resource、barrier 或其它协议通知之后调用
+\code{dayan_cache_invalidate} 再读取。它们只处理当前 Hart 的 D-cache 可见性，不等待
+LSU/MAT/VEC/MACRO，不刷新 I-cache，也不能替代跨 Hart 同步原语。
+
 \subsection{子 proc 与实例内存}
 
 \begin{dayantable}{proc 与内存接口}{tab:kernel-030-proc}{X[38,l] X[62,l]}

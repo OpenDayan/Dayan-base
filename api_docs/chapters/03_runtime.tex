@@ -29,7 +29,7 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{npu_buffer_flags_t} & Buffer 的位置、coherency 和 read/write 能力位。 \\
   \code{npu_kernel_arg_kind_t} / \code{npu_kernel_arg_access_t} & 参数载荷种类和 Buffer 访问方向。 \\
   \code{npu_event_state_t} & Event 的 queued/running/终态枚举。 \\
-  \code{npu_profile_proc_state_t} & Profile event 中的 Proc scheduler 状态。 \\
+  \code{npu_profile_proc_state_t} & Profile 状态记录中的 Proc scheduler 状态。 \\
   \code{npu_runtime_options_t} & socket、连接/默认 timeout 和 Device output callback。 \\
   \code{npu_context_desc_t} & Context quota 与最大 pending commands。 \\
   \code{npu_buffer_desc_t} & Buffer 大小、对齐和 read/write/coherent/local flags。 \\
@@ -39,8 +39,9 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{npu_event_info_t} & event state、command type、status、sequence 和 cookie。 \\
   \code{npu_kernel_info_t} & task mode、并发、参数及 stack/coherent/resident/URAM 资源元数据。 \\
   \code{npu_profile_options_t} & profile buffer 大小和 flags。 \\
-  \code{npu_profile_event_t} & 原始 Device cycle、event ID、proc state 和名称。 \\
-  \code{npu_profile_batch_info_t} & 一批事件的 Cluster、Hart、数量和 END flag。 \\
+  \code{npu_profile_record_t} & 8-B 原始记录 header：48-bit counter、8-bit slot 和 8-bit state/tag。 \\
+  \code{npu_profile_slot_define_t} & 24-B slot 定义记录，header 后跟 16-B Proc 名称。 \\
+  \code{npu_profile_batch_info_t} & 一批原始字节的 Cluster、Hart、byte count 和 END flag。 \\
 \end{dayantable}
 
 \begin{dayantable}{Runtime 版本与通用限制}{tab:api-runtime-constants}{X[48,l] X[52,l]}
@@ -53,7 +54,8 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{NPU_PROC_NAME_SIZE} & Task/Proc 名称固定 16 B。 \\
   \code{NPU_DEFAULT_SERVER_SOCKET} & 默认 control socket 为 \code{/tmp/dayan-server.sock}。 \\
   \code{NPU_PROFILE_DEFAULT_BUFFER_SIZE} & 默认 Device-wide profile buffer 为 16 MiB。 \\
-  \code{NPU_PROFILE_MAX_BATCH_EVENTS} & 单次 \code{npu_profile_read} 最多返回 4096 个 event。 \\
+  \code{NPU_PROFILE_MAX_BATCH_BYTES} & 单次 \code{npu_profile_read} 最多返回 64 KiB 原始 trace。 \\
+  \code{NPU_PROFILE_RECORD_SIZE} / \code{NPU_PROFILE_SLOT_DEFINE_SIZE} & 普通状态记录为 8 B，slot 定义记录为 24 B。 \\
 \end{dayantable}
 
 \begin{dayantable}{Runtime flags 与状态}{tab:api-runtime-enums}{X[48,l] X[52,l]}
@@ -66,7 +68,7 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{NPU_KERNEL_ARG_READ} / \code{NPU_KERNEL_ARG_WRITE} & Kernel 对 Buffer 参数的访问方向。 \\
   \code{NPU_EVENT_QUEUED} / \code{NPU_EVENT_RUNNING} & Event 尚未执行或正在执行。 \\
   \code{NPU_EVENT_COMPLETE} / \code{NPU_EVENT_FAILED} / \code{NPU_EVENT_CANCELLED} & Event 的三个终态。 \\
-  \code{NPU_PROFILE_BATCH_END} & 此 batch 是 stop 后的最后一批 profile event。 \\
+  \code{NPU_PROFILE_BATCH_END} & 此 batch 是 stop 后的最后一批 profile 字节。 \\
 \end{dayantable}
 
 所有版本化描述符必须先调用对应 init 函数。
@@ -145,7 +147,7 @@ Core。Runtime 不接受 Cluster/Core 参数，物理放置由 Server scheduler 
 \begin{dayantable}{Profile API}{tab:api-runtime-profile}{X[37,l] X[63,l]}
   API & 行为 \\
   \code{npu_profile_start} & 取得全局 profile owner 并让 Service 配置所有 booted Hart。 \\
-  \code{npu_profile_read} & 读取一批同一 Cluster/Hart 的 events；支持 timeout。 \\
+  \code{npu_profile_read} & 读取一批同一 Cluster/Hart 的紧密原始字节流；支持 timeout，记录可跨 batch。 \\
   \code{npu_profile_stop} & 停止 Device 采样并让剩余 batch 可被读取。 \\
   \code{npu_profile_destroy} & 在 stop 且尾批次排空后释放 profile handle。 \\
 \end{dayantable}

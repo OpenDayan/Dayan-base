@@ -112,7 +112,6 @@ void server_complete_command_locked(dayan_server_t *server,
         stream->tail = 0;
     if (context->pending_commands)
         --context->pending_commands;
-    stream->last_status = status;
     event->status = status;
     event->command = 0;
     if (status == -ECANCELED)
@@ -765,7 +764,6 @@ static struct dispatch_result dispatch_group(
         result.invocations = invocation;
         ++result.launched;
         ++group->active;
-        ++group->expected;
     }
     return result;
 }
@@ -1024,7 +1022,6 @@ static void merge_dispatch_result_locked(
             (void)npu_hal_memory_free(server->hal,
                                       result.group->shared_allocation);
         free(result.group);
-        ++command->data.launch.completed_units;
     }
     if (result.status < 0 && !command->data.launch.aggregate_status) {
         command->data.launch.aggregate_status = result.status;
@@ -1087,7 +1084,6 @@ static void remove_group_locked(dayan_server_t *server,
         (void)npu_hal_memory_free(server->hal,
                                   group->shared_allocation);
     free(group);
-    ++command->data.launch.completed_units;
 }
 
 static int poll_invocation(dayan_server_t *server,
@@ -1149,7 +1145,6 @@ static int poll_invocation(dayan_server_t *server,
                                       invocation->uram_allocation);
         if (group->active)
             --group->active;
-        ++group->completed;
         free(invocation);
         if (completion < 0 && !command->data.launch.aggregate_status) {
             command->data.launch.aggregate_status = completion;

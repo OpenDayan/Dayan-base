@@ -101,14 +101,13 @@ static void default_proc_exit(void *context, uint32_t cluster,
 }
 
 static int default_profile(void *context, uint32_t cluster, uint32_t core,
-                           const npu_service_profile_event_t *events,
-                           size_t count)
+                           const void *data, size_t size)
 {
     (void)context;
     (void)cluster;
     (void)core;
-    (void)events;
-    (void)count;
+    (void)data;
+    (void)size;
     return 0;
 }
 

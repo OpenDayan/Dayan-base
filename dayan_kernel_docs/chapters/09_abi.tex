@@ -62,11 +62,11 @@ bootstrap 入口为 \code{proc_bootstrap + (8 - argc) * 4}，只执行所需的�
 每个 Hart 的算子 proc ABI 上限为 16 个 slot，root 占一个，因此
 \code{DAYAN\_KERNEL\_MAX\_CHILD\_PROCS} 为 15。init、RPC 与 profile proc 不从该池分配。
 
-proc profile v3 event 固定为 24 bytes：\code{cycle} 位于 offset 0，16-bit event ID
-位于 offset 4，16-bit 目标 proc 状态位于 offset 6，固定 16-byte proc 名称位于 offset 8。
-名称必须在字段内以 NUL 结尾。状态编码与
-\code{THREAD_RUNNING--THREAD_KILL_WAIT_PRODUCE} 的 0--7 一致；Host 将一个 cycle
-解释为 1 ns。
+proc profile v4 是紧密排列的变长字节流。普通记录为 8 bytes：低 48 bit counter、
+8-bit slot 和 8-bit state；\code{SLOT_DEFINE} 记录为 24 bytes，在同一 header 后追加
+固定 16-byte proc 名称。名称必须在字段内以 NUL 结尾。状态编码与
+\code{THREAD_RUNNING--THREAD_KILL_WAIT_PRODUCE} 的 0--7 一致；Host 将一个 counter
+tick 解释为 1 ns。RPC descriptor 的 count/capacity 均以 byte 为单位。
 
 \subsection{目标文件与符号解析}
 

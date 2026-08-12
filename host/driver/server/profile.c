@@ -5,11 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-_Static_assert(sizeof(npu_service_profile_event_t) ==
-               sizeof(struct rpc_profile_event),
-               "Host and Device profile event ABI");
-_Static_assert(NPU_SERVICE_PROC_NAME_SIZE == RPC_PROC_NAME_SIZE,
-               "Host and Device profile name ABI");
+_Static_assert(RPC_PROFILE_RECORD_SIZE == 8U,
+               "Host and Device profile record ABI");
 
 static int profile_config_call(npu_service_device_t *device,
                                struct npu_service_profile_core *core,
@@ -120,10 +117,9 @@ int npu_service_profile_copy(npu_service_device_t *device,
                              uint32_t count, int *continue_out)
 {
     struct npu_service_profile_core *core;
-    npu_service_profile_event_t *events;
+    unsigned char *data;
     npu_hal_allocation_t *allocation;
     size_t index;
-    size_t bytes;
     int callback_status;
     int status;
 
@@ -143,35 +139,18 @@ int npu_service_profile_copy(npu_service_device_t *device,
     ++device->profile_readers;
     pthread_mutex_unlock(&device->mutex);
 
-    bytes = (size_t)count * sizeof(*events);
-    events = malloc(bytes);
-    if (!events) {
+    data = malloc(count);
+    if (!data) {
         status = -ENOMEM;
         callback_status = status;
     } else {
-        status = npu_hal_memory_read(device->hal, allocation, target, events,
-                                     core->offset, bytes);
-        if (status == 0) {
-            size_t event_index;
-
-            for (event_index = 0; event_index < count; ++event_index) {
-                if (!events[event_index].event_id ||
-                    events[event_index].state >
-                        RPC_PROFILE_PROC_KILL_WAIT_PRODUCE ||
-                    !events[event_index].name[0] ||
-                    strnlen(events[event_index].name,
-                            sizeof(events[event_index].name)) ==
-                        sizeof(events[event_index].name)) {
-                    status = -EPROTO;
-                    break;
-                }
-            }
-        }
+        status = npu_hal_memory_read(device->hal, allocation, target, data,
+                                     core->offset, count);
         callback_status = status < 0 ? status : device->options.profile(
             device->options.callback_context, target.cluster, target.core,
-            events, count);
+            data, count);
     }
-    free(events);
+    free(data);
 
     pthread_mutex_lock(&device->mutex);
     *continue_out = callback_status == 0 && device->profile_active &&
@@ -224,10 +203,9 @@ static int allocate_profile(npu_service_device_t *device,
         free(booted_cores);
         return -ENODEV;
     }
-    slice_size = (buffer_size / booted_count) & ~UINT64_C(15);
-    if (slice_size < RPC_PROC_PS_MAX_RECORDS *
-                         sizeof(struct rpc_profile_event) ||
-        slice_size / sizeof(struct rpc_profile_event) > UINT32_MAX) {
+    slice_size = (buffer_size / booted_count) & ~UINT64_C(7);
+    if (slice_size < RPC_PROFILE_SNAPSHOT_MAX_BYTES ||
+        slice_size > UINT32_MAX) {
         status = -EINVAL;
         goto fail_booted;
     }
@@ -270,8 +248,7 @@ static int allocate_profile(npu_service_device_t *device,
             cores[index].target = target;
             cores[index].offset = ordinal * slice_size;
             cores[index].address = base + cores[index].offset;
-            cores[index].capacity =
-                (uint32_t)(slice_size / sizeof(struct rpc_profile_event));
+            cores[index].capacity = (uint32_t)slice_size;
             ++ordinal;
         }
     }
@@ -295,7 +272,6 @@ static void clear_profile_locked(npu_service_device_t *device)
     device->profile_allocation = 0;
     device->profile_cores = 0;
     device->profile_core_count = 0;
-    device->profile_buffer_size = 0;
     device->profile_generation = 0;
     device->profile_active = 0;
     device->profile_transition = 0;
@@ -353,7 +329,6 @@ int npu_service_profile_start(npu_service_device_t *device,
     device->profile_allocation = allocation;
     device->profile_cores = cores;
     device->profile_core_count = core_slots;
-    device->profile_buffer_size = usable_size;
     device->profile_generation = generation;
     device->profile_active = 1;
     pthread_mutex_unlock(&device->mutex);

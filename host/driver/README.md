@@ -178,19 +178,23 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 
 profile 是设备级、单会话能力。`npu_profile_start()` 默认通过 HAL 分配 16 MiB 普通
 Device RAM；Service 根据已启动 Hart 数量把它均分为独立 FIFO，避免多个 Hart 写同一
-write index。profile v3 的每条原始事件为 24 bytes：8-byte cycle/proc/state 头加
-16-byte Proc 名称。容量可通过
-`npu_profile_options_t.buffer_size` 配置。
+write index。profile v4 是紧密排列的变长字节流，容量、写入计数和 flush 计数都以
+byte 为单位。容量可通过 `npu_profile_options_t.buffer_size` 配置。
 
-每个事件头的低 32 bit 是 `cycle`，中间 16 bit 是 proc ID，最高 16 bit 是状态变化后的
-目标状态，数值与 Device 的 `THREAD_*` 状态一致：
-0/1 分别为 RUNNING/READY，2--7 为各种等待、退出与 kill-wait-produce 状态。START 会先
-写入该 Hart 所有现存 proc 的初始状态（receive、send、profile 以及最多 16 个算子
-proc），之后每次 proc 状态实际变化只写一个事件。profile 运行期间新建的 Proc 会先写
-带名称的 `WAIT_START`，因此 Host 能立即建立新的 tid/name 映射。每 Hart FIFO 至少要
-容纳完整的 19 项初始快照，事件数不要求成对。FIFO 写满时，专用 profile 系统 proc 清理 cache 并
-发送 `RPC_PROFILE_FLUSH`；Host response 的 `continue_profile` 决定该 Hart 是否继续记录。
-STOP 会关闭记录、等待正在进行的 flush，并把未满尾批次交给 Host。
+普通状态记录固定 8 B：低 48 bit 是 Device counter，中间 8 bit 是 Hart 内 slot，最高
+8 bit 是状态。状态 `0..7` 与 Device 的 `THREAD_*` 一致；`0/1` 分别是 RUNNING/READY，
+`2..7` 是各种等待、退出与 kill-wait-produce 状态。tag `0x80` 表示 24-B
+`SLOT_DEFINE`：相同的 8-B header 后紧跟 16-B NUL 结尾 Proc 名称。用户 Proc 使用 slot
+`1..16`，三个系统 Proc 固定使用 `17..19`，slot 0 留给 `dyperf` 合成 scheduler 轨道。
+
+START 会为该 Hart 所有现存 Proc 依次写 `SLOT_DEFINE + state`。之后状态切换只增加 8 B；
+只有一个 slot 分配给新的 Thread 时，才先增加 24-B `SLOT_DEFINE`，再增加 8-B 初始
+state。Device FIFO 内记录无 padding；若尾部不足以原子容纳最坏的 32 B 组合，则提前
+flush，未使用尾部不计入 `count`。Host Runtime batch 可以在任意 byte 边界切分，解析器
+必须根据首个 8-B header 的 state/tag 得到长度，并保留跨 batch 残片。FIFO flush 时专用
+profile 系统 Proc clean cache 并发送 `RPC_PROFILE_FLUSH`；Host response 的
+`continue_profile` 决定该 Hart 是否继续记录。STOP 会关闭记录、等待正在进行的 flush，
+并把未满尾批次交给 Host。
 
 Server 可同时服务多个 Runtime Session；每个 Session 使用独立的 control/data socket，
 每条连接由独立线程处理。profile read 的条件变量等待会释放 Server mutex，因此
@@ -202,23 +206,25 @@ socket 串行化限制。Runtime API 为：
 ```c
 npu_profile_options_t options;
 npu_profile_t *profile;
-npu_profile_event_t events[NPU_PROFILE_MAX_BATCH_EVENTS];
+unsigned char trace[NPU_PROFILE_MAX_BATCH_BYTES];
 npu_profile_batch_info_t batch;
 
 npu_profile_options_init(&options);
 npu_profile_start(runtime, &options, &profile);
-npu_profile_read(profile, events, NPU_PROFILE_MAX_BATCH_EVENTS,
+npu_profile_read(profile, trace, sizeof(trace),
                  1000, &batch);
 npu_profile_stop(profile);       /* flush 每个 Hart 的尾批次 */
 /* 继续 read，直到 batch.flags 含 NPU_PROFILE_BATCH_END */
 npu_profile_destroy(profile);
 ```
 
-`batch.cluster/hart` 只描述观测数据来源，不参与 Runtime 的 kernel 调度接口。
+`batch.cluster/hart` 只描述观测数据来源，`batch.byte_count` 是本次返回的原始字节数；
+这些字段不参与 Runtime 的 kernel 调度接口。
 `host/dyperf` 封装上述流程并生成 Chrome Trace Viewer JSON；每个 Hart 是独立 pid，
-Hart 按 Cluster/Hart 编号升序排列。每个 proc ID 是独立 tid，同一 Hart 内按 Proc 名称
-排序；tid 0 的 `scheduler` 轨道由相邻 Proc 的 `RUNNING` 边界合成。`thread_name` 使用
-事件携带的 Proc 名称，各目标状态被展开为连续的状态区间。Device cycle 按 1 ns 解释，
+Hart 按 Cluster/Hart 编号升序排列。每次 slot 定义是独立 generation，Host 使用
+`(cluster, hart, slot, generation)` 区分轨道；同一 Hart 内按 Proc 名称排序。`scheduler`
+轨道由相邻 Proc 的 `RUNNING` 边界合成。`thread_name` 只使用 `SLOT_DEFINE` 中的名称，
+各目标状态被展开为连续的状态区间。Device counter 按 1 ns 解释，
 Trace `ts` 写为带纳秒精度的小数微秒。
 推荐使用
 `dyperf [OPTIONS] -- COMMAND [ARG...]`：工具先启动 profile，再以另一个 Runtime Session

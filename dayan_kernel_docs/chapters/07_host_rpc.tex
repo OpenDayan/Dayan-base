@@ -139,11 +139,11 @@ slot 数和仍处于 Produce 延迟回收的数量。系统 proc 永不被终止
 
 \subsection{proc profile 服务}
 
-Host 用 64-byte v2 \code{rpc_profile_config} 对每个目标 Hart START/STOP。描述符包含版本、
+Host 用 64-byte v4 \code{rpc_profile_config} 对每个目标 Hart START/STOP。描述符包含版本、
 command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返回未满尾批次的
-事件数。Service 默认分配一个 16 MiB 的 Device-scope allocation，并按已启动 Hart
-均分独立 FIFO slice，因此原始事件无需携带 Hart ID。每 Hart slice 至少容纳 19 个事件，
-保证 START 可先写入三个系统 proc 和最多 16 个算子 proc 的初始状态。
+字节数。Service 默认分配一个 16 MiB 的 Device-scope allocation，并按已启动 Hart
+均分独立 FIFO slice，因此原始记录无需携带 Hart ID。每 Hart slice 至少容纳 19 组
+24-byte 定义和 8-byte 初始状态，保证 START 可报告三个系统 proc 和最多 16 个算子 proc。
 
 满缓冲请求为 40-byte \code{rpc_profile_flush_request}，包含 hart、地址、count、capacity
 和 generation；32-byte response 包含 status 与 \code{continue_profile}。Host 必须先

@@ -7,7 +7,7 @@
 #include "hal/dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
-#define NPU_IPC_VERSION           7U
+#define NPU_IPC_VERSION           8U
 #define NPU_IPC_HEADER_SIZE       40U
 #define NPU_IPC_MAX_PAYLOAD       (64U * 1024U * 1024U)
 #define NPU_IPC_RESPONSE          (1U << 0)
@@ -21,7 +21,7 @@
 #define NPU_IPC_OUTPUT_CLEAR        (1U << 0)
 #define NPU_IPC_OUTPUT_CONTINUED    (1U << 1)
 #define NPU_IPC_OUTPUT_CHUNK_SIZE   4096U
-#define NPU_IPC_PROFILE_CHUNK_EVENTS 4096U
+#define NPU_IPC_PROFILE_CHUNK_BYTES (64U * 1024U)
 #define NPU_IPC_PROFILE_END          (1U << 0)
 #define NPU_IPC_PROC_NAME_SIZE       16U
 
@@ -219,23 +219,16 @@ typedef struct npu_ipc_profile_start {
 } npu_ipc_profile_start_t;
 
 typedef struct npu_ipc_profile_read {
-    uint32_t max_events;
+    uint32_t max_bytes;
     uint32_t timeout_ms;
 } npu_ipc_profile_read_t;
 
 typedef struct npu_ipc_profile_batch {
     uint32_t cluster;
     uint32_t hart;
-    uint32_t count;
+    uint32_t byte_count;
     uint32_t flags;
 } npu_ipc_profile_batch_t;
-
-typedef struct npu_ipc_profile_event {
-    uint32_t cycle;
-    uint16_t event_id;
-    uint16_t state;
-    char name[NPU_IPC_PROC_NAME_SIZE];
-} npu_ipc_profile_event_t;
 
 #ifdef __cplusplus
 static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
@@ -258,12 +251,6 @@ static_assert(sizeof(npu_ipc_profile_start_t) == 16,
               "Dayan profile start IPC ABI");
 static_assert(sizeof(npu_ipc_profile_batch_t) == 16,
               "Dayan profile batch IPC ABI");
-static_assert(sizeof(npu_ipc_profile_event_t) == 24,
-              "Dayan profile event IPC ABI");
-static_assert(offsetof(npu_ipc_profile_event_t, state) == 6,
-              "Dayan profile state IPC offset");
-static_assert(offsetof(npu_ipc_profile_event_t, name) == 8,
-              "Dayan profile name IPC offset");
 #else
 _Static_assert(sizeof(npu_ipc_header_t) == NPU_IPC_HEADER_SIZE,
                "Dayan socket header ABI");
@@ -285,12 +272,6 @@ _Static_assert(sizeof(npu_ipc_profile_start_t) == 16,
                "Dayan profile start IPC ABI");
 _Static_assert(sizeof(npu_ipc_profile_batch_t) == 16,
                "Dayan profile batch IPC ABI");
-_Static_assert(sizeof(npu_ipc_profile_event_t) == 24,
-               "Dayan profile event IPC ABI");
-_Static_assert(offsetof(npu_ipc_profile_event_t, state) == 6,
-               "Dayan profile state IPC offset");
-_Static_assert(offsetof(npu_ipc_profile_event_t, name) == 8,
-               "Dayan profile name IPC offset");
 #endif
 
 void npu_ipc_header_init(npu_ipc_header_t *header, uint16_t opcode,

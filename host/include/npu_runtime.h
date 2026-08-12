@@ -22,7 +22,18 @@ extern "C" {
 #define NPU_PROFILE_OPTIONS_VERSION 1U
 #define NPU_PROFILE_DEFAULT_BUFFER_SIZE (16ULL * 1024ULL * 1024ULL)
 #define NPU_PROFILE_BATCH_END       (1U << 0)
-#define NPU_PROFILE_MAX_BATCH_EVENTS 4096U
+#define NPU_PROFILE_MAX_BATCH_BYTES (64U * 1024U)
+#define NPU_PROFILE_RECORD_SIZE     8U
+#define NPU_PROFILE_SLOT_DEFINE_SIZE 24U
+#define NPU_PROFILE_COUNTER_MASK    0x0000ffffffffffffULL
+#define NPU_PROFILE_SLOT_SHIFT      48U
+#define NPU_PROFILE_STATE_SHIFT     56U
+#define NPU_PROFILE_SLOT_SCHEDULER  0U
+#define NPU_PROFILE_SLOT_USER_BASE  1U
+#define NPU_PROFILE_SLOT_RPC_RECEIVE 17U
+#define NPU_PROFILE_SLOT_RPC_SEND   18U
+#define NPU_PROFILE_SLOT_FLUSH      19U
+#define NPU_PROFILE_SLOT_COUNT      20U
 
 typedef struct NPUTaskDim3 {
     uint32_t x;
@@ -176,13 +187,15 @@ typedef struct npu_profile_options {
     uint64_t buffer_size;
 } npu_profile_options_t;
 
-/* Raw Device event plus the fixed 16-byte name of the referenced proc. */
-typedef struct npu_profile_event {
-    uint32_t cycle;
-    uint16_t event_id;
-    uint16_t state;
+typedef struct npu_profile_record {
+    /* [47:0] counter, [55:48] slot, [63:56] state or record tag. */
+    uint64_t value;
+} npu_profile_record_t;
+
+typedef struct npu_profile_slot_define {
+    npu_profile_record_t header;
     char name[NPU_PROC_NAME_SIZE];
-} npu_profile_event_t;
+} npu_profile_slot_define_t;
 
 typedef enum npu_profile_proc_state {
     NPU_PROFILE_PROC_RUNNING = 0,
@@ -195,10 +208,41 @@ typedef enum npu_profile_proc_state {
     NPU_PROFILE_PROC_KILL_WAIT_PRODUCE = 7,
 } npu_profile_proc_state_t;
 
+typedef enum npu_profile_record_tag {
+    NPU_PROFILE_RECORD_SLOT_DEFINE = 0x80,
+} npu_profile_record_tag_t;
+
+static inline uint64_t npu_profile_record_counter(uint64_t value)
+{
+    return value & NPU_PROFILE_COUNTER_MASK;
+}
+
+static inline uint8_t npu_profile_record_slot(uint64_t value)
+{
+    return (uint8_t)(value >> NPU_PROFILE_SLOT_SHIFT);
+}
+
+static inline uint8_t npu_profile_record_state(uint64_t value)
+{
+    return (uint8_t)(value >> NPU_PROFILE_STATE_SHIFT);
+}
+
+static inline size_t npu_profile_record_size(uint64_t value)
+{
+    uint8_t state = npu_profile_record_state(value);
+
+    if (state <= NPU_PROFILE_PROC_KILL_WAIT_PRODUCE)
+        return NPU_PROFILE_RECORD_SIZE;
+    if (state == NPU_PROFILE_RECORD_SLOT_DEFINE)
+        return NPU_PROFILE_SLOT_DEFINE_SIZE;
+    return 0;
+}
+
 typedef struct npu_profile_batch_info {
     uint32_t cluster;
     uint32_t hart;
-    uint32_t count;
+    /* Number of raw trace bytes returned, not a record count. */
+    uint32_t byte_count;
     uint32_t flags;
 } npu_profile_batch_info_t;
 
@@ -278,8 +322,9 @@ int npu_event_destroy(npu_event_t *event);
 int npu_profile_start(npu_runtime_t *runtime,
                       const npu_profile_options_t *options,
                       npu_profile_t **profile_out);
-int npu_profile_read(npu_profile_t *profile, npu_profile_event_t *events,
-                     uint32_t capacity, uint32_t timeout_ms,
+/* Raw records are tightly packed; one record may span consecutive reads. */
+int npu_profile_read(npu_profile_t *profile, void *data,
+                     uint32_t capacity_bytes, uint32_t timeout_ms,
                      npu_profile_batch_info_t *batch_out);
 int npu_profile_stop(npu_profile_t *profile);
 int npu_profile_destroy(npu_profile_t *profile);
@@ -293,11 +338,13 @@ static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
 static_assert(offsetof(npu_launch_desc_t, args) == 56,
               "NPU launch argument offset");
 static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
-static_assert(sizeof(npu_profile_event_t) == 24, "NPU profile event ABI");
-static_assert(offsetof(npu_profile_event_t, state) == 6,
-              "NPU profile state offset");
-static_assert(offsetof(npu_profile_event_t, name) == 8,
-              "NPU profile name offset");
+static_assert(sizeof(npu_profile_record_t) == NPU_PROFILE_RECORD_SIZE,
+              "NPU profile record ABI");
+static_assert(sizeof(npu_profile_slot_define_t) ==
+                  NPU_PROFILE_SLOT_DEFINE_SIZE,
+              "NPU profile slot definition ABI");
+static_assert(offsetof(npu_profile_slot_define_t, name) == 8,
+              "NPU profile slot definition name offset");
 static_assert(sizeof(npu_profile_batch_info_t) == 16,
               "NPU profile batch ABI");
 #else
@@ -310,11 +357,13 @@ _Static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
 _Static_assert(offsetof(npu_launch_desc_t, args) == 56,
                "NPU launch argument offset");
 _Static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
-_Static_assert(sizeof(npu_profile_event_t) == 24, "NPU profile event ABI");
-_Static_assert(offsetof(npu_profile_event_t, state) == 6,
-               "NPU profile state offset");
-_Static_assert(offsetof(npu_profile_event_t, name) == 8,
-               "NPU profile name offset");
+_Static_assert(sizeof(npu_profile_record_t) == NPU_PROFILE_RECORD_SIZE,
+               "NPU profile record ABI");
+_Static_assert(sizeof(npu_profile_slot_define_t) ==
+                   NPU_PROFILE_SLOT_DEFINE_SIZE,
+               "NPU profile slot definition ABI");
+_Static_assert(offsetof(npu_profile_slot_define_t, name) == 8,
+               "NPU profile slot definition name offset");
 _Static_assert(sizeof(npu_profile_batch_info_t) == 16,
                "NPU profile batch ABI");
 #endif

@@ -106,7 +106,7 @@ static void *run_blocking_profile_read(void *argument)
     void *response = 0;
 
     memset(&request, 0, sizeof(request));
-    request.max_events = 1;
+    request.max_bytes = NPU_PROFILE_RECORD_SIZE;
     request.timeout_ms = 3000;
     state->status = runtime_control_call_variable(
         state->runtime, NPU_IPC_PROFILE_READ, state->profile_id, &request,

@@ -20,7 +20,7 @@ _Static_assert((uint32_t)THREAD_READY == RPC_PROFILE_PROC_READY,
 _Static_assert((uint32_t)THREAD_WAIT_POLL == RPC_PROFILE_PROC_WAIT_POLL,
                "profile poll state ABI");
 _Static_assert((uint32_t)THREAD_WAIT_EVENT == RPC_PROFILE_PROC_WAIT_EVENT,
-               "profile event state ABI");
+               "profile proc state ABI");
 _Static_assert((uint32_t)THREAD_WAIT_START == RPC_PROFILE_PROC_WAIT_START,
                "profile start state ABI");
 _Static_assert((uint32_t)THREAD_WAIT_EXIT == RPC_PROFILE_PROC_WAIT_EXIT,
@@ -35,13 +35,12 @@ struct profile_state {
     struct proc worker;
     struct list_head wake;
     struct list_head flush_done;
-    struct rpc_profile_event *buffer;
+    unsigned char *buffer;
     uint32_t capacity;
     uint32_t count;
     uint32_t enabled;
     uint32_t full_pending;
     uint32_t flushing;
-    uint32_t reserved;
     uint64_t generation;
 };
 
@@ -53,37 +52,102 @@ static inline struct profile_state *profile_self(void)
     return &profile_states[platform_hart_id()];
 }
 
-static inline uint32_t profile_cycle(void)
+static inline uint64_t profile_counter(void)
 {
-    uintptr_t cycle;
+    uint64_t cycle;
 
     __asm__ volatile("csrr %0, cycle" : "=r"(cycle));
-    return (uint32_t)cycle;
+    return cycle & RPC_PROFILE_COUNTER_MASK;
 }
 
-static inline void profile_queue_event(struct profile_state *state,
-                                       const struct proc *proc)
+static void profile_queue_record(struct profile_state *state,
+                                 uint64_t counter, uint8_t slot,
+                                 uint8_t record_state)
 {
-    struct rpc_profile_event *event = &state->buffer[state->count++];
+    uint64_t value = rpc_profile_record_pack(counter, slot, record_state);
 
-    event->cycle = profile_cycle();
-    event->event_id = (uint16_t)proc->thread.id;
-    event->state = (uint16_t)proc->thread.state;
-    memcpy(event->name, proc->name, sizeof(event->name));
+    memcpy(state->buffer + state->count, &value, sizeof(value));
+    state->count += sizeof(value);
 }
 
-void profile_record_proc_state(const struct proc *proc)
+static void profile_queue_slot_define(struct profile_state *state,
+                                      const struct proc *proc,
+                                      uint64_t counter)
+{
+    uint8_t slot = proc->thread.profile_slot;
+
+    profile_queue_record(state, counter, slot,
+                         RPC_PROFILE_RECORD_SLOT_DEFINE);
+    memcpy(state->buffer + state->count, proc->name, sizeof(proc->name));
+    state->count += sizeof(proc->name);
+}
+
+static void profile_mark_full(struct profile_state *state)
+{
+    state->full_pending = 1;
+    cpu_self()->sche.profile_enabled = 0;
+    (void)proc_event_wake_one(&state->wake);
+}
+
+static uint8_t profile_proc_slot(const struct proc *proc)
+{
+    uint8_t slot = proc->thread.profile_slot;
+
+    if (!slot || slot >= RPC_PROFILE_SLOT_COUNT || !proc->thread.id ||
+        proc->thread.state > RPC_PROFILE_PROC_KILL_WAIT_PRODUCE)
+        platform_halt();
+    return slot;
+}
+
+static int profile_reserve(struct profile_state *state, uint32_t required)
+{
+    if (state->full_pending)
+        return 0;
+    if (required > state->capacity - state->count) {
+        profile_mark_full(state);
+        return 0;
+    }
+    return 1;
+}
+
+static void profile_finish_record(struct profile_state *state)
+{
+    if (state->capacity - state->count <
+        RPC_PROFILE_SLOT_DEFINE_SIZE + RPC_PROFILE_RECORD_SIZE)
+        profile_mark_full(state);
+}
+
+void profile_record_proc_start(struct proc *proc)
 {
     struct profile_state *state = profile_self();
+    uint8_t slot = profile_proc_slot(proc);
+    uint64_t counter;
 
-    if (state->full_pending)
+    proc->thread.profile_defined = 0;
+    if (!profile_reserve(state, RPC_PROFILE_SLOT_DEFINE_SIZE +
+                                RPC_PROFILE_RECORD_SIZE))
         return;
-    profile_queue_event(state, proc);
-    if (state->count == state->capacity) {
-        state->full_pending = 1;
-        cpu_self()->sche.profile_enabled = 0;
-        (void)proc_event_wake_one(&state->wake);
+    counter = profile_counter();
+    profile_queue_slot_define(state, proc, counter);
+    profile_queue_record(state, counter, slot, (uint8_t)proc->thread.state);
+    proc->thread.profile_defined = 1;
+    profile_finish_record(state);
+}
+
+void profile_record_proc_state(struct proc *proc)
+{
+    struct profile_state *state = profile_self();
+    uint8_t slot = profile_proc_slot(proc);
+
+    if (!proc->thread.profile_defined) {
+        profile_record_proc_start(proc);
+        return;
     }
+    if (!profile_reserve(state, RPC_PROFILE_RECORD_SIZE))
+        return;
+    profile_queue_record(state, profile_counter(), slot,
+                         (uint8_t)proc->thread.state);
+    profile_finish_record(state);
 }
 
 static int profile_response_valid(
@@ -114,8 +178,7 @@ static void profile_main(void)
             continue;
         }
         state->flushing = 1;
-        platform_cache_clean(state->buffer,
-                             (size_t)state->count * sizeof(*state->buffer));
+        platform_cache_clean(state->buffer, state->count);
         memset(&request, 0, sizeof(request));
         request.version = RPC_PROFILE_VERSION;
         request.size = sizeof(request);
@@ -147,10 +210,9 @@ static void profile_main(void)
 
 static int profile_buffer_valid(uint64_t address, uint32_t capacity)
 {
-    uint64_t bytes = (uint64_t)capacity * sizeof(struct rpc_profile_event);
-
-    return !(address & 7U) && capacity >= RPC_PROC_PS_MAX_RECORDS &&
-           address >= CONFIG_RAM_BASE && bytes <= UINT64_MAX - address;
+    return !(address & 7U) && !(capacity & 7U) &&
+           capacity >= RPC_PROFILE_SNAPSHOT_MAX_BYTES &&
+           address >= CONFIG_RAM_BASE && capacity <= UINT64_MAX - address;
 }
 
 static int profile_start(struct profile_state *state,
@@ -159,7 +221,7 @@ static int profile_start(struct profile_state *state,
     if (state->buffer || state->flushing || !config->generation ||
         !profile_buffer_valid(config->buffer_addr, config->capacity))
         return state->buffer || state->flushing ? -EBUSY : -EINVAL;
-    state->buffer = (struct rpc_profile_event *)(uintptr_t)config->buffer_addr;
+    state->buffer = (unsigned char *)(uintptr_t)config->buffer_addr;
     state->capacity = config->capacity;
     state->count = 0;
     state->generation = config->generation;
@@ -185,8 +247,7 @@ static int profile_stop(struct profile_state *state,
         proc_wait_event(&state->flush_done);
     }
     if (state->count)
-        platform_cache_clean(state->buffer,
-                             (size_t)state->count * sizeof(*state->buffer));
+        platform_cache_clean(state->buffer, state->count);
     config->count = state->count;
     state->buffer = 0;
     state->capacity = 0;
@@ -232,6 +293,7 @@ int profile_init(void)
     INIT_LIST_HEAD(&state->wake);
     INIT_LIST_HEAD(&state->flush_done);
     stack = __profile_stack_start + hart * CONFIG_PROFILE_STACK_SIZE;
+    state->worker.thread.profile_slot = RPC_PROFILE_SLOT_FLUSH;
     return proc_init(&state->worker, "profile-flush", profile_main,
                      stack, CONFIG_PROFILE_STACK_SIZE, 0, 0, 0, 0);
 }
