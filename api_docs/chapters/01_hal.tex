@@ -24,7 +24,7 @@ allocation、HAL 和 data client 都是不透明 handle；创建者负责按本�
   \code{npu_hal_memory_scope_t} & Device、Cluster 或 Core 可见范围。 \\
   \code{npu_hal_memory_usage_t} & Buffer、firmware、kernel、heap、launch、shared、URAM、profile 或 Atomic Cache backing。 \\
   \code{npu_hal_memory_region_t} & 一个可分配地址区间及其 class、scope 和归属位置。 \\
-  \code{npu_hal_options_t} & backend、设备编号、Cluster stride、topology、地址偏移和 region 表。 \\
+  \code{npu_hal_options_t} & backend、设备编号、Cluster stride、topology、地址偏移、默认 Normal memory 容量和 region 表。 \\
   \code{npu_hal_info_t} & 已打开设备的 ABI、topology、data provider 和传输限制。 \\
   \code{npu_hal_memory_request_t} & allocation 的 class/scope/usage/owner/位置/大小/对齐或固定地址请求。 \\
   \code{npu_hal_allocation_info_t} & 已分配对象的地址、大小、属性和归属位置快照。 \\

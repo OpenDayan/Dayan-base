@@ -56,7 +56,9 @@ struct npu_buffer {
     struct npu_context *context;
     uint64_t id;
     uint64_t size;
+    uint64_t base_offset;
     uint32_t flags;
+    struct npu_buffer *parent;
     struct npu_buffer *next;
 };
 

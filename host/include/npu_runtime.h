@@ -228,6 +228,8 @@ int npu_context_destroy(npu_context_t *context);
 
 int npu_buffer_create(npu_context_t *context, const npu_buffer_desc_t *desc,
                       npu_buffer_t **buffer_out);
+int npu_buffer_create_view(npu_buffer_t *buffer, uint64_t offset,
+                           uint64_t size, npu_buffer_t **view_out);
 int npu_buffer_destroy(npu_buffer_t *buffer);
 int npu_buffer_get_size(const npu_buffer_t *buffer, uint64_t *size_out);
 

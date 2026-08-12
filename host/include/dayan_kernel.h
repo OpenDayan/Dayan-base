@@ -26,7 +26,7 @@ typedef struct dayan_kernel_resource_desc {
     uint32_t version;
     uint32_t size;
     uint32_t max_child_procs;
-    uint32_t flags;
+    uint32_t max_tasks_per_core;
     uint64_t atomic_cache_size;
     uint64_t uram_size;
 } dayan_kernel_resource_desc_t;
@@ -51,8 +51,17 @@ typedef struct dayan_kernel_resource_desc {
         sizeof(dayan_kernel_resource_desc_t),                                 \
         (child_procs), 0U, (atomic_bytes), (uram_bytes)                        \
     }
+#define DAYAN_KERNEL_TASK_DESC(kernel, tasks, child_procs, atomic_bytes, uram_bytes) \
+    DAYAN_KERNEL_DESC_LINKAGE __device__                                      \
+    __attribute__((visibility("default"), section(".dayan.kernel_desc")))     \
+    const dayan_kernel_resource_desc_t kernel##__desc = {                     \
+        DAYAN_KERNEL_RESOURCE_DESC_VERSION,                                   \
+        sizeof(dayan_kernel_resource_desc_t),                                 \
+        (child_procs), (tasks), (atomic_bytes), (uram_bytes)                   \
+    }
 #else
 #define DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes)
+#define DAYAN_KERNEL_TASK_DESC(kernel, tasks, child_procs, atomic_bytes, uram_bytes)
 #endif
 
 #ifdef __cplusplus

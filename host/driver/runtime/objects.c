@@ -323,6 +323,34 @@ int npu_buffer_create(npu_context_t *context, const npu_buffer_desc_t *desc,
     return 0;
 }
 
+int npu_buffer_create_view(npu_buffer_t *buffer, uint64_t offset,
+                           uint64_t size, npu_buffer_t **view_out)
+{
+    struct npu_buffer *view;
+    struct npu_buffer *root;
+
+    if (!buffer || !view_out || !runtime_context_valid(buffer->context) ||
+        !size || offset > buffer->size || size > buffer->size - offset)
+        return -EINVAL;
+    *view_out = 0;
+    view = calloc(1, sizeof(*view));
+    if (!view)
+        return -ENOMEM;
+    root = buffer->parent ? buffer->parent : buffer;
+    view->context = buffer->context;
+    view->id = root->id;
+    view->size = size;
+    view->base_offset = buffer->base_offset + offset;
+    if (view->base_offset < buffer->base_offset) {
+        free(view);
+        return -EOVERFLOW;
+    }
+    view->flags = buffer->flags;
+    view->parent = root;
+    *view_out = view;
+    return 0;
+}
+
 int npu_buffer_destroy(npu_buffer_t *buffer)
 {
     struct npu_buffer **link;
@@ -331,6 +359,10 @@ int npu_buffer_destroy(npu_buffer_t *buffer)
 
     if (!buffer || !runtime_context_valid(buffer->context))
         return -EINVAL;
+    if (buffer->parent) {
+        free(buffer);
+        return 0;
+    }
     runtime = buffer->context->runtime;
     status = runtime_control_call(runtime, NPU_IPC_BUFFER_DESTROY, buffer->id,
                                   0, 0, 0, 0, 0);

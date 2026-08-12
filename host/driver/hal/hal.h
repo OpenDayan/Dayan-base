@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define NPU_HAL_ABI_VERSION          5U
-#define NPU_HAL_OPTIONS_VERSION      2U
+#define NPU_HAL_OPTIONS_VERSION      3U
 #define NPU_HAL_MEMORY_REQUEST_VERSION 1U
 #define NPU_HAL_MAX_CLUSTERS         32U
 #define NPU_HAL_MAX_CORES_PER_CLUSTER 32U
@@ -75,7 +75,7 @@ typedef struct npu_hal_options {
     uint64_t memory_address_bias;
     const npu_hal_memory_region_t *memory_regions;
     uint32_t memory_region_count;
-    uint32_t reserved;
+    uint32_t normal_memory_size_mib;
 } npu_hal_options_t;
 
 typedef struct npu_hal_info {

@@ -671,12 +671,14 @@ int dayan_server_create(dayan_server_t **server_out,
     server->options.service.callback_context = server;
     server_log("startup",
                "configuration: socket=%s backend=%u device_prefix=%s "
-               "device_index=%u requested_clusters=%u cluster_stride=%u",
+               "device_index=%u requested_clusters=%u cluster_stride=%u "
+               "normal_memory_mib=%u",
                options->socket_path, options->hal.backend,
                options->hal.device_prefix ? options->hal.device_prefix :
                                             "<default>",
                options->hal.device_index, options->hal.cluster_count,
-               options->hal.cluster_device_stride);
+               options->hal.cluster_device_stride,
+               options->hal.normal_memory_size_mib);
     server_log("startup",
                "requested masks: clusters=0x%08x cores=0x%08x; "
                "firmware=%s; api_elf=%s",

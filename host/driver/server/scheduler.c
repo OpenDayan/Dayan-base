@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -735,6 +736,12 @@ static struct dispatch_result dispatch_group(
             status = npu_service_launch(server->device, &desc,
                                         &invocation->launch);
         if (status < 0) {
+            fprintf(stderr,
+                    "dayan_server: launch failed: task='%s' hart=%u "
+                    "task_id=[%u,%u,%u] unit=%llu status=%d\n",
+                    command->data.launch.task_name, target.core,
+                    desc.task_id[0], desc.task_id[1], desc.task_id[2],
+                    (unsigned long long)unit, status);
             if (uram_allocation)
                 (void)npu_hal_memory_free(server->hal, uram_allocation);
             free(invocation);

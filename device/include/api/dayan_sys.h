@@ -23,7 +23,7 @@ typedef struct dayan_kernel_resource_desc {
     uint32_t version;
     uint32_t size;
     uint32_t max_child_procs;
-    uint32_t flags;
+    uint32_t max_tasks_per_core;
     uint64_t atomic_cache_size;
     uint64_t uram_size;
 } dayan_kernel_resource_desc_t;

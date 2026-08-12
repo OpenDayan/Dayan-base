@@ -307,7 +307,12 @@ int npu_kernel_launch(npu_stream_t *stream, npu_kernel_t *kernel,
                 goto fail;
             }
             destination->value_or_buffer = buffer->id;
-            destination->offset = source->data.buffer.offset;
+            destination->offset = buffer->base_offset +
+                                  source->data.buffer.offset;
+            if (destination->offset < buffer->base_offset) {
+                status = -EOVERFLOW;
+                goto fail;
+            }
         }
     }
     status = runtime_control_call(context->runtime, NPU_IPC_KERNEL_LAUNCH, 0,

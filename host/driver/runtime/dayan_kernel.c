@@ -65,7 +65,8 @@ int npu_kernel_descriptor_create(
         argument_count > NPU_PACKAGE_MAX_ARGS ||
         (argument_count && !arguments) || !resources ||
         resources->version != DAYAN_KERNEL_RESOURCE_DESC_VERSION ||
-        resources->size != sizeof(*resources) || resources->flags ||
+        resources->size != sizeof(*resources) ||
+        resources->max_tasks_per_core > 4U ||
         resources->max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
         (resources->uram_size & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
         !descriptor_out)
@@ -89,7 +90,8 @@ int npu_kernel_descriptor_create(
     kernel.name = entry_symbol;
     kernel.entry_symbol = entry_symbol;
     kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
-    kernel.max_tasks_per_core = 1;
+    kernel.max_tasks_per_core = resources->max_tasks_per_core ?
+        resources->max_tasks_per_core : 1U;
     kernel.max_child_procs = resources->max_child_procs;
     kernel.atomic_cache_size = resources->atomic_cache_size;
     kernel.uram_size = resources->uram_size;

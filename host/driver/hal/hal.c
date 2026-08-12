@@ -99,8 +99,9 @@ static int options_valid(const npu_hal_options_t *options)
            options->cluster_count <= NPU_HAL_MAX_CLUSTERS &&
            options->cores_per_cluster &&
            options->cores_per_cluster <= NPU_HAL_MAX_CORES_PER_CLUSTER &&
-           options->cluster_device_stride && !options->reserved &&
-           (!options->memory_region_count || options->memory_regions);
+           options->cluster_device_stride &&
+           (!options->memory_region_count ||
+            (options->memory_regions && !options->normal_memory_size_mib));
 }
 
 int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)

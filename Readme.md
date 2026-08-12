@@ -200,6 +200,8 @@ NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 ./run_cmodel_server.sh
 ```
 
+脚本默认给 QEMU DRAM 和 HAL Normal memory 配置 4096 MiB，可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者。BL1 的 `RAM_SIZE` 仍只描述固件链接区域。
+
 脚本就绪后，在另一个终端运行：
 
 ```sh

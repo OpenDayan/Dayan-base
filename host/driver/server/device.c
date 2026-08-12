@@ -874,6 +874,12 @@ int npu_service_launch(npu_service_device_t *device,
         goto fail;
     if (rpc_command_opcode(response) != RPC_PROC_CREATE_RESPONSE ||
         rpc_command_arg(response) != request_address) {
+        fprintf(stderr,
+                "dayan_server: PROC_CREATE response mismatch: hart=%u "
+                "request=0x%llx response=0x%llx opcode=0x%x arg=0x%llx\n",
+                desc->target.core, (unsigned long long)request_address,
+                (unsigned long long)response, rpc_command_opcode(response),
+                (unsigned long long)rpc_command_arg(response));
         status = -EPROTO;
         goto fail;
     }
@@ -889,6 +895,16 @@ int npu_service_launch(npu_service_device_t *device,
         (request.state != RPC_PROC_RUNNING &&
          request.state != RPC_PROC_EXITED &&
          request.state != RPC_PROC_FAILED)) {
+        fprintf(stderr,
+                "dayan_server: PROC_CREATE request mismatch: hart=%u "
+                "address=0x%llx version=%u size=%u request_hart=%u "
+                "cookie=%llu expected_cookie=%llu state=%u name='%.*s' "
+                "expected_name='%s'\n",
+                desc->target.core, (unsigned long long)request_address,
+                request.version, request.size, request.hart_id,
+                (unsigned long long)request.cookie,
+                (unsigned long long)desc->cookie, request.state,
+                (int)sizeof(request.name), request.name, desc->name);
         status = -EPROTO;
         goto fail;
     }

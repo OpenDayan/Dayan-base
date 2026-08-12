@@ -50,6 +50,7 @@ static void usage(FILE *stream, const char *program)
             "  --cluster-stride N      XDMA index stride per Cluster\n"
             "  --cluster-mask MASK     enabled Cluster mask\n"
             "  --core-mask MASK        enabled Core mask within Cluster\n"
+            "  --normal-memory-size-mib N  default Normal memory size in MiB\n"
             "  --help                  show this text\n",
             program);
 }
@@ -100,6 +101,12 @@ int main(int argc, char **argv)
             status = parse_u32(value, &options.enabled_cluster_mask);
         else if (strcmp(argument, "--core-mask") == 0)
             status = parse_u32(value, &options.enabled_core_mask);
+        else if (strcmp(argument, "--normal-memory-size-mib") == 0) {
+            status = parse_u32(value,
+                               &options.hal.normal_memory_size_mib);
+            if (status == 0 && !options.hal.normal_memory_size_mib)
+                status = -EINVAL;
+        }
         else {
             fprintf(stderr, "dayan_server: unknown option %s\n", argument);
             return 2;

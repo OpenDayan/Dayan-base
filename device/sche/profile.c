@@ -150,8 +150,7 @@ static int profile_buffer_valid(uint64_t address, uint32_t capacity)
     uint64_t bytes = (uint64_t)capacity * sizeof(struct rpc_profile_event);
 
     return !(address & 7U) && capacity >= RPC_PROC_PS_MAX_RECORDS &&
-           bytes <= CONFIG_RAM_SIZE && address >= CONFIG_RAM_BASE &&
-           address - CONFIG_RAM_BASE <= CONFIG_RAM_SIZE - bytes;
+           address >= CONFIG_RAM_BASE && bytes <= UINT64_MAX - address;
 }
 
 static int profile_start(struct profile_state *state,

@@ -517,6 +517,7 @@ public:
 private:
     struct KernelResources {
         uint32_t max_child_procs = 0;
+        uint32_t max_tasks_per_core = 0;
         uint64_t atomic_cache_size = 0;
         uint64_t uram_size = 0;
     };
@@ -817,13 +818,14 @@ private:
             }
         }
         if (fields[0] != 1U || fields[1] != 32U || fields[2] > 15U ||
-            fields[3] != 0U || (fields[5] & 1023U)) {
+            fields[3] > 4U || (fields[5] & 1023U)) {
             diagnose(decl, "invalid kernel resources: expected version=1, "
-                           "size=32, flags=0, child_procs<=15 and "
+                           "size=32, child_procs<=15, tasks_per_core<=4 and "
                            "1 KiB-aligned URAM size");
             return false;
         }
         resources.max_child_procs = static_cast<uint32_t>(fields[2]);
+        resources.max_tasks_per_core = static_cast<uint32_t>(fields[3]);
         resources.atomic_cache_size = fields[4];
         resources.uram_size = fields[5];
         return true;
@@ -917,7 +919,8 @@ private:
                "__dayan_resources = {\n"
             << "        DAYAN_KERNEL_RESOURCE_DESC_VERSION, "
                "sizeof(::dayan_kernel_resource_desc_t), "
-            << resources.max_child_procs << "U, 0U, UINT64_C("
+            << resources.max_child_procs << "U, "
+            << resources.max_tasks_per_core << "U, UINT64_C("
             << resources.atomic_cache_size << "), UINT64_C("
             << resources.uram_size << ")\n"
             << "    };\n";

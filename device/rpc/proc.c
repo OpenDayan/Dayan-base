@@ -17,39 +17,45 @@ static int range_inside(uint64_t address, uint64_t size,
            address - base <= capacity - size;
 }
 
+static int host_normal_range_valid(uint64_t address, uint64_t size)
+{
+    return size && address >= CONFIG_RAM_BASE &&
+           size <= UINT64_MAX - address;
+}
+
 static int proc_request_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
-           range_inside(address, sizeof(struct rpc_proc_create_request),
-                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+           host_normal_range_valid(
+               address, sizeof(struct rpc_proc_create_request));
 }
 
 static int proc_ps_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
-           range_inside(address, sizeof(struct rpc_proc_ps_snapshot),
-                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+           host_normal_range_valid(
+               address, sizeof(struct rpc_proc_ps_snapshot));
 }
 
 static int proc_kill_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
-           range_inside(address, sizeof(struct rpc_proc_kill_result),
-                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+           host_normal_range_valid(
+               address, sizeof(struct rpc_proc_kill_result));
 }
 
 static int profile_config_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
-           range_inside(address, sizeof(struct rpc_profile_config),
-                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+           host_normal_range_valid(address,
+                                   sizeof(struct rpc_profile_config));
 }
 
 static int dcache_flush_address_valid(uint64_t address)
 {
     return !(address & 7U) &&
-           range_inside(address, sizeof(struct rpc_dcache_flush_request),
-                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+           host_normal_range_valid(
+               address, sizeof(struct rpc_dcache_flush_request));
 }
 
 static int dcache_flush_request_valid(
@@ -59,8 +65,7 @@ static int dcache_flush_request_valid(
            request->size == sizeof(*request) &&
            request->hart_id == platform_hart_id() && !request->flags &&
            !request->reserved && request->length &&
-           range_inside(request->address, request->length,
-                        CONFIG_RAM_BASE, CONFIG_RAM_SIZE);
+           host_normal_range_valid(request->address, request->length);
 }
 
 static int proc_request_valid(const struct rpc_proc_create_request *request)
@@ -86,7 +91,7 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
         request->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         request->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
         (request->entry & 1U) ||
-        !range_inside(request->entry, 2, CONFIG_RAM_BASE, CONFIG_RAM_SIZE) ||
+        !host_normal_range_valid(request->entry, 2) ||
         !request->task_dim[0] || !request->task_dim[1] ||
         !request->task_dim[2] ||
         request->task_id[0] >= request->task_dim[0] ||

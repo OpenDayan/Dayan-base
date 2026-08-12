@@ -102,7 +102,11 @@ static int submit_host_transfer(npu_stream_t *stream,
 
     if (!runtime_stream_valid(stream) || !event_out || !host_buffer || !size ||
         (destination && destination->context != stream->context) ||
-        (source && source->context != stream->context))
+        (source && source->context != stream->context) ||
+        (destination && (destination_offset > destination->size ||
+                         size > destination->size - destination_offset)) ||
+        (source && (source_offset > source->size ||
+                    size > source->size - source_offset)))
         return -EINVAL;
     *event_out = 0;
     event = calloc(1, sizeof(*event));
@@ -116,9 +120,10 @@ static int submit_host_transfer(npu_stream_t *stream,
     request.context_id = stream->context->id;
     request.stream_id = stream->id;
     request.destination_buffer = destination ? destination->id : 0;
-    request.destination_offset = destination_offset;
+    request.destination_offset = destination ? destination->base_offset +
+                                                destination_offset : 0;
     request.source_buffer = source ? source->id : 0;
-    request.source_offset = source_offset;
+    request.source_offset = source ? source->base_offset + source_offset : 0;
     request.size = size;
     request.direction = direction;
     status = runtime_control_call(stream->context->runtime,
@@ -187,7 +192,10 @@ int npu_memcpy_d2d_async(npu_stream_t *stream, npu_buffer_t *destination,
 
     if (!runtime_stream_valid(stream) || !destination || !source || !size ||
         !event_out || destination->context != stream->context ||
-        source->context != stream->context)
+        source->context != stream->context ||
+        destination_offset > destination->size ||
+        size > destination->size - destination_offset ||
+        source_offset > source->size || size > source->size - source_offset)
         return -EINVAL;
     *event_out = 0;
     event = calloc(1, sizeof(*event));
@@ -197,9 +205,10 @@ int npu_memcpy_d2d_async(npu_stream_t *stream, npu_buffer_t *destination,
     request.context_id = stream->context->id;
     request.stream_id = stream->id;
     request.destination_buffer = destination->id;
-    request.destination_offset = destination_offset;
+    request.destination_offset = destination->base_offset +
+                                 destination_offset;
     request.source_buffer = source->id;
-    request.source_offset = source_offset;
+    request.source_offset = source->base_offset + source_offset;
     request.size = size;
     request.direction = NPU_IPC_TRANSFER_D2D;
     status = runtime_control_call(stream->context->runtime,

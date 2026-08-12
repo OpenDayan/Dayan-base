@@ -25,8 +25,12 @@ struct npu_kernel_export {
     uint64_t value;
 };
 
+struct npu_kernel_object {
+    const void *identity;
+    struct npu_kernel_object *next;
+};
+
 struct npu_kernel_module {
-    const void *object_identity;
     size_t object_size;
     uint32_t cluster;
     uint64_t base;
@@ -34,6 +38,7 @@ struct npu_kernel_module {
     npu_hal_allocation_t *allocation;
     struct npu_kernel_export *exports;
     size_t export_count;
+    struct npu_kernel_object *objects;
     struct npu_kernel_module *next;
 };
 

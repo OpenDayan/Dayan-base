@@ -459,6 +459,44 @@ static void free_kernel_exports(struct npu_kernel_export *exports,
     free(exports);
 }
 
+static void free_kernel_objects(struct npu_kernel_object *object)
+{
+    while (object) {
+        struct npu_kernel_object *next = object->next;
+
+        free(object);
+        object = next;
+    }
+}
+
+static int module_has_object(const struct npu_kernel_module *module,
+                             const void *identity)
+{
+    const struct npu_kernel_object *object;
+
+    for (object = module->objects; object; object = object->next) {
+        if (object->identity == identity)
+            return 1;
+    }
+    return 0;
+}
+
+static int module_add_object(struct npu_kernel_module *module,
+                             const void *identity)
+{
+    struct npu_kernel_object *object;
+
+    if (module_has_object(module, identity))
+        return 0;
+    object = calloc(1, sizeof(*object));
+    if (!object)
+        return -ENOMEM;
+    object->identity = identity;
+    object->next = module->objects;
+    module->objects = object;
+    return 0;
+}
+
 static int append_kernel_export(struct npu_kernel_export **exports,
                                 size_t *count, const char *name,
                                 uint64_t value)
@@ -1207,7 +1245,6 @@ static int load_kernel_module(npu_service_device_t *runtime,
         status = -ENOMEM;
         goto fail;
     }
-    module->object_identity = object;
     module->object_size = object_size;
     module->cluster = target.cluster;
     module->base = base;
@@ -1215,6 +1252,9 @@ static int load_kernel_module(npu_service_device_t *runtime,
     module->allocation = allocation;
     module->exports = exports;
     module->export_count = export_count;
+    status = module_add_object(module, object);
+    if (status < 0)
+        goto fail;
     exports = 0;
     export_count = 0;
     *module_out = module;
@@ -1227,8 +1267,11 @@ fail:
     free(symbol_valid);
     free(sections);
     free_kernel_exports(exports, export_count);
-    if (status < 0)
+    if (status < 0) {
+        if (module)
+            free_kernel_objects(module->objects);
         free(module);
+    }
     return status;
 }
 
@@ -1260,10 +1303,24 @@ int npu_service_kernel_resolve(npu_service_device_t *runtime,
         return -EINVAL;
     pthread_mutex_lock(&runtime->kernel_mutex);
     for (module = runtime->kernel_modules; module; module = module->next) {
-        if (module->object_identity == object &&
-            module->object_size == object_size &&
-            module->cluster == target.cluster)
+        if (module->object_size == object_size &&
+            module->cluster == target.cluster &&
+            module_has_object(module, object))
             break;
+    }
+    if (!module) {
+        /* Entry-point packages can embed the same Device object at different addresses. */
+        for (module = runtime->kernel_modules; module; module = module->next) {
+            if (module->object_size == object_size &&
+                module->cluster == target.cluster &&
+                memcmp(module->objects->identity, object, object_size) == 0)
+                break;
+        }
+        if (module) {
+            status = module_add_object(module, object);
+            if (status < 0)
+                goto out;
+        }
     }
     if (!module) {
         if (!runtime->api_symbol_count) {
@@ -1296,9 +1353,24 @@ int npu_service_kernel_forget(npu_service_device_t *runtime,
     link = &runtime->kernel_modules;
     while (*link) {
         struct npu_kernel_module *module = *link;
+        struct npu_kernel_object **object_link = &module->objects;
 
-        if (module->object_identity != object ||
-            module->object_size != object_size) {
+        if (module->object_size != object_size) {
+            link = &module->next;
+            continue;
+        }
+        while (*object_link && (*object_link)->identity != object)
+            object_link = &(*object_link)->next;
+        if (!*object_link) {
+            link = &module->next;
+            continue;
+        }
+        found = 1;
+        if ((*object_link)->next || module->objects != *object_link) {
+            struct npu_kernel_object *removed = *object_link;
+
+            *object_link = removed->next;
+            free(removed);
             link = &module->next;
             continue;
         }
@@ -1306,9 +1378,9 @@ int npu_service_kernel_forget(npu_service_device_t *runtime,
         if (status < 0)
             goto out;
         *link = module->next;
+        free_kernel_objects(module->objects);
         free_kernel_exports(module->exports, module->export_count);
         free(module);
-        found = 1;
     }
     if (!found)
         status = -ENOENT;
@@ -1328,6 +1400,7 @@ void npu_service_kernel_state_destroy(npu_service_device_t *runtime)
         struct npu_kernel_module *next = module->next;
 
         (void)npu_hal_memory_free(runtime->hal, module->allocation);
+        free_kernel_objects(module->objects);
         free_kernel_exports(module->exports, module->export_count);
         free(module);
         module = next;

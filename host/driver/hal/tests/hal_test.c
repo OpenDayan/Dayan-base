@@ -306,7 +306,11 @@ int main(void)
     hal = 0;
     options.memory_regions = 0;
     options.memory_region_count = 0;
+    options.normal_memory_size_mib = 4096;
     assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_NORMAL, core1,
+                                   &capacity) == 0);
+    assert(capacity == UINT64_C(0x100000000));
     assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM, core1,
                                    &capacity) == 0);
     assert(capacity == 0x180000);
@@ -339,6 +343,7 @@ int main(void)
            -EIO);
     npu_hal_close(hal);
     hal = 0;
+    options.normal_memory_size_mib = 0;
     options.memory_regions = overlapping_regions;
     options.memory_region_count =
         sizeof(overlapping_regions) / sizeof(overlapping_regions[0]);

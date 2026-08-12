@@ -154,24 +154,27 @@ bash demo/run_matmul_cmodel.sh 64 384 248
 
 ```sh
 make -C demo run-matmul-4c
-bash demo/run_matmul_4c_cmodel.sh 1024 1536 1536
+bash demo/run_matmul_4c_cmodel.sh 256 768 248
 ```
 
 默认 case 为 `M=1024, N=1536, K=1536`：M 正好覆盖一个完整的 2-Core tile，
 N 正好覆盖两个完整的 2-Core tile，K 包含 6 个分片，可以充分展开 slice 流水并
 避免 M/N 边缘碎片。每个 Core 使用 `tileM=512`、`tileN=384`、
-`tileK=256`；四个 M slice 均为 128 行，并严格按线性顺序执行。
-A 的每个 slice 使用单缓冲，B 保持两个 full-tile buffer 真双缓冲，四个 FP32 C
-slice 在 K 循环内常驻，合计占用 1.375MiB URAM。M 维在两行 Core 之间连续等分，
-每行再按 512 行推进；N 维按 384 列 tile 交错分给两列 Core。
+`tileK=256`。两套本地数据流由模板同时编入 kernel：当 `M < N` 时，每个 Core
+双缓冲完整的 A tile，并把 B/C 切成四个 96 列 slice，占用 1.4375MiB URAM；否则
+保留四个 128 行 A/C slice 和两个完整 B tile 的双缓冲，占用 1.375MiB URAM。
+K 尾块使用实际 `MAT_K` 和窄 DMA 请求处理，不要求 K 是 256 的整数倍。M 维在两行
+Core 之间连续等分，每行再按 512 行推进；N 维按 384 列 tile 交错分给两列 Core。
 
 每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 负责 A，core 01/10 负责
 B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker、两个 Mat worker 和一个
 C-Store worker。DRAM Loader 发射本代首条 D2U 后通过本地 `dayan_resource_t` 允许 Copy
 进入；源数据真正完成后再通过 Atomic Cache 中的 `dayan_shared_resource_t`
 发布给远端。Copy 使用 D2U 从源 Core URAM 拉取已完成的数据，MAT 只消费本地
-Resource。两个 Mat worker 静态交替处理线性 job：前一条 MAT 成功入队后才用本地
-Resource 向下一线程交棒，因此最多两条 MAT outstanding，但发射顺序不会反转。
+Resource。共享资源统一表示为四个 sliced buffer 与两个 buffered buffer，模板按
+路径把它们映射到 A 或 B，避免为两套算法维护重复的 Atomic Cache 状态。两个 Mat
+worker 静态交替处理线性 job：前一条 MAT 成功入队后才用本地 Resource 向下一线程
+交棒，因此最多两条 MAT outstanding，但发射顺序不会反转。
 最后一个 K 分片完成后，MAT 只发布对应 C slice 的本地 Resource；C-Store 按 slice
 顺序取走结果，每次发射两条 U2D 后统一等待完成，再释放 C buffer 供下一 output tile
 使用。这样 MAT 不再承担写回等待，同时保持 RTL 可安全承载的两路 Store outstanding。

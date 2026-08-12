@@ -55,6 +55,9 @@ int npu_hal_memory_manager_init(npu_hal_t *hal,
 {
     npu_hal_memory_region_t *defaults = 0;
     const npu_hal_memory_region_t *regions = options->memory_regions;
+    uint64_t normal_size = options->normal_memory_size_mib ?
+        (uint64_t)options->normal_memory_size_mib * UINT64_C(1048576) :
+        NPU_DEFAULT_RAM_SIZE;
     uint32_t count = options->memory_region_count;
     uint32_t index;
 
@@ -67,7 +70,7 @@ int npu_hal_memory_manager_init(npu_hal_t *hal,
         if (!defaults)
             return -ENOMEM;
         defaults[0] = (npu_hal_memory_region_t){
-            NPU_DEFAULT_RAM_BASE, NPU_DEFAULT_RAM_SIZE,
+            NPU_DEFAULT_RAM_BASE, normal_size,
             NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_DEVICE,
             NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE
         };

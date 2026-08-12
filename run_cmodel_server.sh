@@ -7,6 +7,7 @@ cmodel_dir=${RVTNG_CMODEL_DIR:-"$user_home/rvtng-cmodel"}
 qemu=${RVTNG_QEMU:-"$user_home/npu-qemu/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}
+cmodel_memory_mib=${NPU_CMODEL_MEMORY_MIB:-4096}
 socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-server.sock}
 build_jobs=${DAYAN_BUILD_JOBS:-4}
 build_dir=${NPU_CMODEL_BUILD_DIR:-"$repo_dir/build/cmodel"}
@@ -47,6 +48,9 @@ case "$cmodel_harts" in
     1|2|3|4) ;;
     *) echo "NPU_CMODEL_HARTS must be between 1 and 4" >&2; exit 2 ;;
 esac
+case "$cmodel_memory_mib" in
+    ''|*[!0-9]*|0) echo "NPU_CMODEL_MEMORY_MIB must be a positive integer" >&2; exit 2 ;;
+esac
 case "$build_jobs" in
     ''|*[!0-9]*|0) echo "DAYAN_BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -82,7 +86,7 @@ cleanup_devices
 
 "$cmodel_dir/bin/rvt_emulator" -c "$cmodel_harts" \
     "$qemu" -monitor null -bios "$repo_dir/device/bl0/bootrom.elf" \
-    -machine rvtng-v0 -nographic -serial none -m 4096 >"$cmodel_log" 2>&1 &
+    -machine rvtng-v0 -nographic -serial none -m "$cmodel_memory_mib" >"$cmodel_log" 2>&1 &
 emulator_pid=$!
 
 ready=0
@@ -108,7 +112,8 @@ DAYAN_SKIP_BUILD=1 \
 NPU_DEVICE_PREFIX="$mount_dir" \
 NPU_CORE_MASK="$(( (1 << cmodel_harts) - 1 ))" \
 DAYAN_SERVER_SOCKET="$socket_path" \
-    "$repo_dir/run_server.sh" &
+    "$repo_dir/run_server.sh" \
+        --normal-memory-size-mib "$cmodel_memory_mib" &
 server_pid=$!
 
 ready=0
@@ -130,6 +135,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 printf '%s\n' "Dayan cmodel server is ready: $socket_path"
+printf '%s\n' "Device Normal memory: $cmodel_memory_mib MiB"
 printf '%s\n' "Run clients with: DAYAN_SERVER_SOCKET=$socket_path <program>"
 printf '%s\n' "Press Ctrl-C to stop; cmodel log: $cmodel_log"
 
