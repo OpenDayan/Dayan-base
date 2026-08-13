@@ -68,6 +68,9 @@ int npu_kernel_descriptor_create(
         resources->size != sizeof(*resources) ||
         resources->max_tasks_per_core > 4U ||
         resources->max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
+        (resources->flags & ~DAYAN_KERNEL_RESOURCE_FLAGS_ALL) ||
+        ((resources->flags & DAYAN_KERNEL_RESOURCE_LOCKED_TASK) &&
+         resources->max_tasks_per_core > 1U) ||
         (resources->uram_size & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
         !descriptor_out)
         return -EINVAL;
@@ -89,10 +92,14 @@ int npu_kernel_descriptor_create(
     memset(&kernel, 0, sizeof(kernel));
     kernel.name = entry_symbol;
     kernel.entry_symbol = entry_symbol;
-    kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+    kernel.supported_task_modes =
+        resources->flags & DAYAN_KERNEL_RESOURCE_LOCKED_TASK ?
+            NPU_PACKAGE_TASK_MODE_SINGLE_CORE : NPU_PACKAGE_TASK_MODE_ALL;
     kernel.max_tasks_per_core = resources->max_tasks_per_core ?
         resources->max_tasks_per_core : 1U;
     kernel.max_child_procs = resources->max_child_procs;
+    kernel.flags = resources->flags & DAYAN_KERNEL_RESOURCE_LOCKED_TASK ?
+        NPU_PACKAGE_KERNEL_LOCKED_TASK : 0U;
     kernel.atomic_cache_size = resources->atomic_cache_size;
     kernel.uram_size = resources->uram_size;
     kernel.arguments = arguments;

@@ -37,7 +37,7 @@ static int copy_to_device(npu_service_device_t *device, npu_hal_core_t core,
 static int read_packet(npu_service_device_t *device, npu_hal_core_t core,
                        uint64_t address, struct rpc_packet *packet)
 {
-    if (address & 7U)
+    if (address & (RPC_DESCRIPTOR_GRANULE - 1U))
         return -EPROTO;
     return copy_from_device(device, core, packet, address, sizeof(*packet));
 }
@@ -61,6 +61,10 @@ static int packet_layout_valid(npu_service_device_t *device,
 {
     return packet->request_size == request_size &&
            packet->response_size == response_size &&
+           (!request_size ||
+            !(packet->request_addr & (RPC_DESCRIPTOR_GRANULE - 1U))) &&
+           (!response_size ||
+            !(packet->response_addr & (RPC_DESCRIPTOR_GRANULE - 1U))) &&
            (!request_size || range_valid(device, core, packet->request_addr,
                                          request_size)) &&
            (!response_size || range_valid(device, core,
@@ -466,7 +470,6 @@ void *npu_rpc_worker(void *arg)
 
                 pthread_mutex_lock(&device->mutex);
                 if (pending_response(device, core, command)) {
-                    call->response = command;
                     call->status = 0;
                     call->pending = 0;
                     pthread_cond_broadcast(&device->condition);

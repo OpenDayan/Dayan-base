@@ -11,12 +11,29 @@
 
 extern unsigned char __rpc_stack_start[];
 
+struct rpc_descriptor_slot {
+    _Alignas(RPC_DESCRIPTOR_GRANULE)
+    unsigned char bytes[RPC_DESCRIPTOR_GRANULE];
+};
+
 struct rpc_call_context {
     struct rpc_transaction transaction;
-    struct rpc_packet packet;
+    struct rpc_descriptor_slot packet_slot;
+    struct rpc_descriptor_slot request_slot;
+    struct rpc_descriptor_slot response_slot;
     void *response;
     size_t response_size;
 };
+
+_Static_assert(sizeof(struct rpc_descriptor_slot) == RPC_DESCRIPTOR_GRANULE,
+               "RPC descriptor slot size");
+_Static_assert(_Alignof(struct rpc_descriptor_slot) == RPC_DESCRIPTOR_GRANULE,
+               "RPC descriptor slot alignment");
+
+static struct rpc_packet *rpc_call_packet(struct rpc_call_context *call)
+{
+    return (struct rpc_packet *)call->packet_slot.bytes;
+}
 
 static void rpc_transaction_init(struct rpc_transaction *transaction,
                                  uint64_t command,
@@ -200,11 +217,16 @@ int rpc_init(void)
 static void rpc_call_cleanup(struct rpc_transaction *transaction, void *arg)
 {
     struct rpc_call_context *call = arg;
+    struct rpc_packet *packet = rpc_call_packet(call);
 
-    platform_cache_invalidate(&call->packet, sizeof(call->packet));
-    if (call->packet.status >= 0 && call->response_size)
-        platform_cache_invalidate(call->response, call->response_size);
-    transaction->status = (long)call->packet.status;
+    platform_cache_invalidate(packet, sizeof(*packet));
+    if (packet->status >= 0 && call->response_size) {
+        platform_cache_invalidate(call->response_slot.bytes,
+                                  call->response_size);
+        memcpy(call->response, call->response_slot.bytes,
+               call->response_size);
+    }
+    transaction->status = (long)packet->status;
 }
 
 long rpc_call(uint32_t service,
@@ -212,11 +234,14 @@ long rpc_call(uint32_t service,
               void *response, size_t response_size)
 {
     struct rpc_call_context call;
+    struct rpc_packet *packet;
     struct rpc_state *rpc;
     uintptr_t packet_addr;
     int status;
 
     if ((!request && request_size) || (!response && response_size) ||
+        request_size > RPC_DESCRIPTOR_GRANULE ||
+        response_size > RPC_DESCRIPTOR_GRANULE ||
         !service || service > UINT16_MAX)
         return -EINVAL;
     if (!current || current->type != THREAD_TYPE_PROC)
@@ -225,22 +250,32 @@ long rpc_call(uint32_t service,
     if (current == &rpc->send.thread)
         return -EPERM;
 
-    call.packet.request_addr = (uintptr_t)request;
-    call.packet.request_size = request_size;
-    call.packet.response_addr = (uintptr_t)response;
-    call.packet.response_size = response_size;
-    call.packet.status = -EIO;
+    memset(&call.packet_slot, 0, sizeof(call.packet_slot));
+    memset(&call.request_slot, 0, sizeof(call.request_slot));
+    memset(&call.response_slot, 0, sizeof(call.response_slot));
+    packet = rpc_call_packet(&call);
+    if (request_size)
+        memcpy(call.request_slot.bytes, request, request_size);
+    if (response_size)
+        memcpy(call.response_slot.bytes, response, response_size);
+    packet->request_addr = request_size ?
+        (uintptr_t)call.request_slot.bytes : 0;
+    packet->request_size = request_size;
+    packet->response_addr = response_size ?
+        (uintptr_t)call.response_slot.bytes : 0;
+    packet->response_size = response_size;
+    packet->status = -EIO;
     call.response = response;
     call.response_size = response_size;
-    packet_addr = (uintptr_t)&call.packet;
+    packet_addr = (uintptr_t)packet;
     if ((uint64_t)packet_addr & ~RPC_COMMAND_ARG_MASK)
         return -EOVERFLOW;
 
     if (request_size)
-        platform_cache_clean(request, request_size);
+        platform_cache_clean(call.request_slot.bytes, request_size);
     if (response_size)
-        platform_cache_clean(response, response_size);
-    platform_cache_clean(&call.packet, sizeof(call.packet));
+        platform_cache_clean(call.response_slot.bytes, response_size);
+    platform_cache_clean(packet, sizeof(*packet));
 
     rpc_transaction_init(&call.transaction,
                          rpc_command_pack((uint16_t)service, packet_addr),

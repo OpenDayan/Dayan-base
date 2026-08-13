@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "list.h"
+#include "rpc.h"
 #include "sche.h"
 #include "trap.h"
 
@@ -28,7 +29,7 @@ struct rpc_state {
     struct list_head send_queue;
     struct list_head send_event;
     struct rpc_transaction trap;
-    struct trap_record trap_record;
+    _Alignas(RPC_DESCRIPTOR_GRANULE) struct trap_record trap_record;
     uint32_t initialized;
     uint32_t trap_pending;
 };

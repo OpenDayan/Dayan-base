@@ -46,7 +46,6 @@ struct rpc_call_state {
     uint16_t opcode;
     uint32_t timeout_ms;
     uint64_t argument;
-    uint64_t response;
     int status;
     int started;
     int finished;
@@ -122,7 +121,7 @@ static void *run_blocking_rpc(void *argument)
     __atomic_store_n(&state->started, 1, __ATOMIC_RELEASE);
     state->status = npu_service_rpc_call(
         state->device, state->target, state->opcode, state->argument,
-        &state->response, state->timeout_ms);
+        state->timeout_ms, 0);
     __atomic_store_n(&state->finished, 1, __ATOMIC_RELEASE);
     return 0;
 }
@@ -465,6 +464,39 @@ int main(void)
         assert(npu_kernel_release(resource_kernel) == 0);
         assert(npu_module_unload(module) == 0);
         npu_package_free(package);
+
+        resource_kernel = 0;
+        module = 0;
+        package = 0;
+        package_size = 0;
+        kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
+        kernel.max_tasks_per_core = 1;
+        kernel.max_child_procs = 0;
+        kernel.flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
+        kernel.uram_size = 0;
+        assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                                 &package, &package_size) == 0);
+        assert(npu_module_load(context, package, package_size, &module) == 0);
+        assert(npu_module_get_kernel(module, "resource_kernel",
+                                     &resource_kernel) == 0);
+        {
+            npu_kernel_info_t info;
+
+            memset(&info, 0, sizeof(info));
+            assert(npu_kernel_get_info(resource_kernel, &info) == 0);
+            assert(info.flags == NPU_KERNEL_LOCKED_TASK);
+            assert(info.supported_task_modes ==
+                   NPU_PACKAGE_TASK_MODE_SINGLE_CORE);
+        }
+        npu_launch_desc_init(&launch, "locked-test");
+        launch.config.task_dim.x = 4;
+        launch.config.task_mode = NPU_TASK_MODE_FOUR_CORE;
+        assert(npu_kernel_launch(stream, resource_kernel, &launch,
+                                 &unexpected) == -EINVAL);
+        assert(!unexpected);
+        assert(npu_kernel_release(resource_kernel) == 0);
+        assert(npu_module_unload(module) == 0);
+        npu_package_free(package);
     }
     assert(npu_memcpy_h2d_async(stream, buffer, 0, input, sizeof(input),
                                 &event) == 0);
@@ -542,6 +574,65 @@ int main(void)
     server = 0;
     assert(dayan_server_create(&server, &server_options) == 0);
     {
+        static const size_t descriptor_sizes[] = {
+            sizeof(struct rpc_dcache_flush_request),
+            sizeof(struct rpc_profile_config),
+            sizeof(struct rpc_proc_create_request),
+            sizeof(struct rpc_proc_kill_result),
+            sizeof(struct rpc_proc_ps_snapshot),
+        };
+        npu_hal_core_t core = { 0, 0 };
+        size_t index;
+
+        for (index = 0;
+             index < sizeof(descriptor_sizes) / sizeof(descriptor_sizes[0]);
+             ++index) {
+            npu_hal_allocation_info_t info;
+            npu_hal_allocation_t *allocation = 0;
+            uint64_t expected =
+                (descriptor_sizes[index] + RPC_DESCRIPTOR_GRANULE - 1U) &
+                ~((uint64_t)RPC_DESCRIPTOR_GRANULE - 1U);
+
+            assert(npu_service_alloc_rpc_descriptor(
+                       server->device, core, descriptor_sizes[index],
+                       &allocation) == 0);
+            assert(npu_hal_memory_info(server->hal, allocation, &info) == 0);
+            assert(!(info.address & (RPC_DESCRIPTOR_GRANULE - 1U)));
+            assert(info.size == expected);
+            assert(info.usage == NPU_HAL_MEMORY_LAUNCH);
+            assert(npu_hal_memory_free(server->hal, allocation) == 0);
+        }
+    }
+    {
+        npu_hal_allocation_info_t replacement_info;
+        npu_hal_allocation_info_t abandoned_info;
+        npu_hal_allocation_t *replacement = 0;
+        npu_hal_allocation_t *abandoned = 0;
+        npu_service_launch_t *launch = calloc(1, sizeof(*launch));
+        npu_hal_core_t core = { 0, 0 };
+
+        assert(launch);
+        assert(npu_service_alloc_rpc_descriptor(
+                   server->device, core,
+                   sizeof(struct rpc_proc_create_request), &abandoned) == 0);
+        assert(npu_hal_memory_info(server->hal, abandoned,
+                                  &abandoned_info) == 0);
+        launch->device = server->device;
+        launch->target = core;
+        launch->request_allocation = abandoned;
+        pthread_mutex_lock(&server->device->mutex);
+        ++server->device->active_launches;
+        pthread_mutex_unlock(&server->device->mutex);
+        assert(npu_service_launch_abandon(launch) == 0);
+        assert(npu_service_alloc_rpc_descriptor(
+                   server->device, core,
+                   sizeof(struct rpc_proc_create_request), &replacement) == 0);
+        assert(npu_hal_memory_info(server->hal, replacement,
+                                  &replacement_info) == 0);
+        assert(replacement_info.address != abandoned_info.address);
+        assert(npu_hal_memory_free(server->hal, replacement) == 0);
+    }
+    {
         struct rpc_call_state rpc_calls[2];
         pthread_t rpc_threads[2];
         unsigned attempt;
@@ -584,11 +675,10 @@ int main(void)
         pthread_mutex_lock(&server->device->mutex);
         assert(server->device->calls[0].active);
         assert(server->device->calls[0].pending);
+        assert(server->device->calls[0].expected_opcode ==
+               RPC_ICACHE_FLUSH_RESPONSE);
         assert(server->device->calls[0].expected_argument ==
                rpc_calls[0].argument);
-        server->device->calls[0].response = rpc_command_pack(
-            server->device->calls[0].expected_opcode,
-            server->device->calls[0].expected_argument);
         server->device->calls[0].status = 0;
         server->device->calls[0].pending = 0;
         assert(server->device->calls[0].active);
@@ -596,8 +686,6 @@ int main(void)
         pthread_mutex_unlock(&server->device->mutex);
         assert(pthread_join(rpc_threads[0], 0) == 0);
         assert(rpc_calls[0].status == 0);
-        assert(rpc_calls[0].response == rpc_command_pack(
-            RPC_ICACHE_FLUSH_RESPONSE, rpc_calls[0].argument));
         for (attempt = 0; attempt < 1000; ++attempt) {
             int second_pending;
 
@@ -613,17 +701,16 @@ int main(void)
         }
         assert(attempt < 1000);
         pthread_mutex_lock(&server->device->mutex);
-        server->device->calls[0].response = rpc_command_pack(
-            server->device->calls[0].expected_opcode,
-            server->device->calls[0].expected_argument);
+        assert(server->device->calls[0].expected_opcode ==
+               RPC_ICACHE_FLUSH_RESPONSE);
+        assert(server->device->calls[0].expected_argument ==
+               rpc_calls[1].argument);
         server->device->calls[0].status = 0;
         server->device->calls[0].pending = 0;
         pthread_cond_broadcast(&server->device->condition);
         pthread_mutex_unlock(&server->device->mutex);
         assert(pthread_join(rpc_threads[1], 0) == 0);
         assert(rpc_calls[1].status == 0);
-        assert(rpc_calls[1].response == rpc_command_pack(
-            RPC_ICACHE_FLUSH_RESPONSE, rpc_calls[1].argument));
         pthread_mutex_lock(&server->device->mutex);
         assert(!server->device->calls[0].active);
         assert(!server->device->calls[0].pending);
@@ -704,15 +791,6 @@ int main(void)
             npu_delay_us(1000);
         }
         assert(attempt < 1000);
-        pthread_mutex_lock(&server->device->mutex);
-        assert(server->device->rpc_queue_head);
-        assert(server->device->rpc_queue_head->argument ==
-               rpc_calls[2].argument);
-        assert(server->device->rpc_queue_head->next);
-        assert(server->device->rpc_queue_head->next->argument ==
-               rpc_calls[3].argument);
-        assert(!server->device->rpc_queue_head->next->next);
-        pthread_mutex_unlock(&server->device->mutex);
 
         assert(pthread_create(&rpc_threads[4], 0, run_blocking_rpc,
                               &rpc_calls[4]) == 0);
@@ -732,11 +810,10 @@ int main(void)
         pthread_mutex_lock(&server->device->mutex);
         assert(server->device->calls[0].active);
         assert(server->device->calls[0].pending);
+        assert(server->device->calls[0].expected_opcode ==
+               RPC_ICACHE_FLUSH_RESPONSE);
         assert(server->device->calls[0].expected_argument ==
                rpc_calls[0].argument);
-        server->device->calls[0].response = rpc_command_pack(
-            server->device->calls[0].expected_opcode,
-            server->device->calls[0].expected_argument);
         server->device->calls[0].status = 0;
         server->device->calls[0].pending = 0;
         pthread_cond_broadcast(&server->device->condition);
@@ -759,15 +836,6 @@ int main(void)
             npu_delay_us(1000);
         }
         assert(attempt < 1000);
-        pthread_mutex_lock(&server->device->mutex);
-        assert(server->device->rpc_queue_head);
-        assert(server->device->rpc_queue_head->argument ==
-               rpc_calls[3].argument);
-        assert(server->device->rpc_queue_head->next);
-        assert(server->device->rpc_queue_head->next->argument ==
-               rpc_calls[4].argument);
-        assert(!server->device->rpc_queue_head->next->next);
-        pthread_mutex_unlock(&server->device->mutex);
         npu_service_abort(server->device, -ESHUTDOWN);
         for (index = 1; index < sizeof(rpc_calls) / sizeof(rpc_calls[0]);
              ++index) {

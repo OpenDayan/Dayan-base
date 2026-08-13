@@ -7,7 +7,7 @@
 #include "hal/dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
-#define NPU_IPC_VERSION           8U
+#define NPU_IPC_VERSION           9U
 #define NPU_IPC_HEADER_SIZE       40U
 #define NPU_IPC_MAX_PAYLOAD       (64U * 1024U * 1024U)
 #define NPU_IPC_RESPONSE          (1U << 0)
@@ -182,7 +182,7 @@ typedef struct npu_ipc_kernel_info {
     uint32_t max_child_procs;
     uint32_t argument_count;
     uint32_t sync_resource_count;
-    uint32_t reserved;
+    uint32_t flags;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t resident_memory;

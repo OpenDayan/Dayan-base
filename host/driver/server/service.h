@@ -172,7 +172,7 @@ int npu_service_launch_wait(npu_service_launch_t *launch,
                             uint32_t timeout_ms,
                             npu_service_launch_info_t *info);
 int npu_service_launch_release(npu_service_launch_t *launch);
-/* Host-only cleanup for a launch whose Device can no longer be queried. */
+/* Drops the Host handle; its Descriptor stays reserved until HAL close. */
 int npu_service_launch_abandon(npu_service_launch_t *launch);
 
 /* Administrative calls explicitly address one Cluster/Core (Hart). */

@@ -37,7 +37,7 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{npu_kernel_arg_t} & 64-bit value 或 Buffer+offset 参数及访问方向。 \\
   \code{npu_launch_desc_t} & task 配置、参数、cookie 和固定 16-byte Task 名称。 \\
   \code{npu_event_info_t} & event state、command type、status、sequence 和 cookie。 \\
-  \code{npu_kernel_info_t} & task mode、并发、参数及 stack/coherent/resident/URAM 资源元数据。 \\
+  \code{npu_kernel_info_t} & task mode、并发、参数、kernel flags 及 stack/coherent/resident/URAM 资源元数据。 \\
   \code{npu_profile_options_t} & profile buffer 大小和 flags。 \\
   \code{npu_profile_record_t} & 8-B 原始记录 header：48-bit counter、8-bit slot 和 8-bit state/tag。 \\
   \code{npu_profile_slot_define_t} & 24-B slot 定义记录，header 后跟 16-B Proc 名称。 \\
@@ -46,7 +46,7 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
 
 \begin{dayantable}{Runtime 版本与通用限制}{tab:api-runtime-constants}{X[48,l] X[52,l]}
   API & 含义 \\
-  \code{NPU_RUNTIME_OPTIONS_VERSION} / \code{NPU_CONTEXT_DESC_VERSION} & Runtime options 版本 4，Context descriptor 版本 1。 \\
+  \code{NPU_RUNTIME_OPTIONS_VERSION} / \code{NPU_CONTEXT_DESC_VERSION} & Runtime options/handshake 版本 5，Context descriptor 版本 1。 \\
   \code{NPU_BUFFER_DESC_VERSION} / \code{NPU_STREAM_DESC_VERSION} & Buffer 与 Stream descriptor 版本均为 1。 \\
   \code{NPU_LAUNCH_DESC_VERSION} / \code{NPU_PROFILE_OPTIONS_VERSION} & Launch descriptor 版本 3，Profile options 版本 1。 \\
   \code{NPU_TIMEOUT_INFINITE} & Runtime wait/synchronize 的无限 timeout。 \\
@@ -56,6 +56,11 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{NPU_PROFILE_DEFAULT_BUFFER_SIZE} & 默认 Device-wide profile buffer 为 16 MiB。 \\
   \code{NPU_PROFILE_MAX_BATCH_BYTES} & 单次 \code{npu_profile_read} 最多返回 64 KiB 原始 trace。 \\
   \code{NPU_PROFILE_RECORD_SIZE} / \code{NPU_PROFILE_SLOT_DEFINE_SIZE} & 普通状态记录为 8 B，slot 定义记录为 24 B。 \\
+  \code{NPU_PROFILE_COUNTER_MASK} & 8-B header 中低 48-bit counter 的掩码。 \\
+  \code{NPU_PROFILE_SLOT_SHIFT} / \code{NPU_PROFILE_STATE_SHIFT} & slot 与 state/tag 分别位于 bit 48 和 bit 56。 \\
+  \code{NPU_PROFILE_SLOT_SCHEDULER} / \code{NPU_PROFILE_SLOT_USER_BASE} & slot 0 由 Host 合成 scheduler 轨道；用户 Proc slot 从 1 开始。 \\
+  \code{NPU_PROFILE_SLOT_RPC_RECEIVE} / \code{NPU_PROFILE_SLOT_RPC_SEND} / \code{NPU_PROFILE_SLOT_FLUSH} & 三个系统 Proc 的固定 slot 17、18、19。 \\
+  \code{NPU_PROFILE_SLOT_COUNT} & 合法 slot 范围为 0--19，共 20 个。 \\
 \end{dayantable}
 
 \begin{dayantable}{Runtime flags 与状态}{tab:api-runtime-enums}{X[48,l] X[52,l]}
@@ -66,6 +71,7 @@ Runtime 是应用可直接链接的 Host 对象 API。它只通过 Unix control/
   \code{NPU_BUFFER_READ} / \code{NPU_BUFFER_WRITE} & Buffer 允许作为 Device read source 或 write destination。 \\
   \code{NPU_KERNEL_ARG_VALUE} / \code{NPU_KERNEL_ARG_BUFFER} & 立即数参数或 Buffer+offset 参数。 \\
   \code{NPU_KERNEL_ARG_READ} / \code{NPU_KERNEL_ARG_WRITE} & Kernel 对 Buffer 参数的访问方向。 \\
+  \code{NPU_KERNEL_LOCKED_TASK} & \code{npu_kernel_info_t.flags} 表示该 kernel 的 single-Core Task 独占 Hart。 \\
   \code{NPU_EVENT_QUEUED} / \code{NPU_EVENT_RUNNING} & Event 尚未执行或正在执行。 \\
   \code{NPU_EVENT_COMPLETE} / \code{NPU_EVENT_FAILED} / \code{NPU_EVENT_CANCELLED} & Event 的三个终态。 \\
   \code{NPU_PROFILE_BATCH_END} & 此 batch 是 stop 后的最后一批 profile 字节。 \\
@@ -161,11 +167,18 @@ Core。Runtime 不接受 Cluster/Core 参数，物理放置由 Server scheduler 
   \code{NPU_PROFILE_PROC_KILL_WAIT_PRODUCE} & Proc 已被 kill，但 slot 必须等 produce 后才能释放。 \\
 \end{dayantable}
 
+\code{npu_profile_record_tag_t} 当前只定义
+\code{NPU_PROFILE_RECORD_SLOT_DEFINE}（0x80）。Host 逐条读取 header 后，用
+\code{npu_profile_record_counter}、\code{npu_profile_record_slot} 和
+\code{npu_profile_record_state} 解出 counter、slot 与 state/tag，再用
+\code{npu_profile_record_size} 判定记录占 8 B、24 B，或因未知 tag 返回 0。原始 byte
+stream 紧密排列，解码游标按该长度递增；Proc 名称只在 24-B slot 定义中出现。
+
 \subsection{Package 与 dycc wrapper}
 
 \begin{dayantable}{Package API}{tab:api-runtime-package}{X[36,l] X[64,l]}
   API & 行为 \\
-  \code{npu_package_build} & 将 RISC-V ET\_REL、kernel 描述、参数和同步资源编码成 v3 package。 \\
+  \code{npu_package_build} & 将 RISC-V ET\_REL、kernel 描述、参数和同步资源编码成 v4 package。 \\
   \code{npu_package_free} & 释放 package builder 返回的 Host image。 \\
 \end{dayantable}
 
@@ -188,8 +201,8 @@ access flag、immutable module flag、ISA 字符串和 proc/URAM 限制均定义
 
 \begin{dayantable}{Package 格式常量}{tab:api-runtime-package-constants}{X[49,l] X[51,l]}
   API & 含义 \\
-  \code{NPU_PACKAGE_MAGIC} / \code{NPU_PACKAGE_VERSION} / \code{NPU_PACKAGE_HEADER_SIZE} & 当前格式 magic、版本 3 和 128-B header。 \\
-  \code{NPU_PACKAGE_KERNEL_VERSION} / \code{NPU_PACKAGE_MAX_KERNELS} & Kernel record 版本 3；单 package 最多 4096 个 kernel。 \\
+  \code{NPU_PACKAGE_MAGIC} / \code{NPU_PACKAGE_VERSION} / \code{NPU_PACKAGE_HEADER_SIZE} & 当前格式 magic、版本 4 和 128-B header。 \\
+  \code{NPU_PACKAGE_KERNEL_VERSION} / \code{NPU_PACKAGE_MAX_KERNELS} & Kernel record 版本 4；单 package 最多 4096 个 kernel。 \\
   \code{NPU_PACKAGE_MAX_ARGS} & 单 kernel 最多 8 个参数。 \\
   \code{NPU_PACKAGE_HART_MAX_PROCS} / \code{NPU_PACKAGE_MAX_CHILD_PROCS} & 每 Hart 16 个用户 Proc slot，root 最多声明 15 个 child。 \\
   \code{NPU_PACKAGE_PROC_MIN_STACK_SIZE} / \code{NPU_PACKAGE_PROC_STACK_SIZE} & stack 下限 1 KiB，当前固定/上限大小 64 KiB。 \\
@@ -197,6 +210,7 @@ access flag、immutable module flag、ISA 字符串和 proc/URAM 限制均定义
   \code{NPU_PACKAGE_ISA_RV64_DAYAN} & Device object 必须声明的 Dayan RV64 ISA 字符串。 \\
   \code{NPU_PACKAGE_IMMUTABLE_MODULE} & Package object 在 Module 生命周期内不可变。 \\
   \code{NPU_PACKAGE_TASK_MODE_SINGLE_CORE} / \code{NPU_PACKAGE_TASK_MODE_FOUR_CORE} / \code{NPU_PACKAGE_TASK_MODE_ALL} & Kernel 支持的 task-mode bitmap。 \\
+  \code{NPU_PACKAGE_KERNEL_LOCKED_TASK} / \code{NPU_PACKAGE_KERNEL_FLAGS_ALL} & 当前唯一 kernel flag；single-Core logical Task 从 root 建立到整个 Proc family 终态独占一个 Hart。 \\
   \code{NPU_PACKAGE_ARG_VALUE} / \code{NPU_PACKAGE_ARG_BUFFER} & Package 参数 kind。 \\
   \code{NPU_PACKAGE_ARG_READ} / \code{NPU_PACKAGE_ARG_WRITE} & Buffer 参数访问 bitmap。 \\
   \code{NPU_PACKAGE_SYNC_SHARED_RESOURCE} & Atomic Cache 中的跨 Hart resource 描述。 \\
@@ -207,13 +221,20 @@ Wrapper 公开不透明 \code{npu_kernel_descriptor_t} 和版本化
 \code{NPU_KERNEL_LAUNCH_ASYNC} 让 launch 返回未完成 Event，否则 wrapper 等待并销毁
 内部 Event。Host 与 Device 共同使用 \code{dayan_kernel_resource_desc_t}、
 \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION}、\code{DAYAN_HART_MAX_PROCS}、
-\code{DAYAN_KERNEL_MAX_CHILD_PROCS} 和 \code{DAYAN_URAM_ALLOCATION_GRANULE} 保持资源
-描述一致。
+\code{DAYAN_KERNEL_MAX_CHILD_PROCS}、\code{DAYAN_URAM_ALLOCATION_GRANULE}、
+\code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} 和 \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} 保持
+资源描述一致。
 
-每个 \code{__kernel__} 必须使用 \code{DAYAN_KERNEL_DESC} 宏（参数为 kernel、
-child\_procs、atomic\_bytes、uram\_bytes）声明静态资源。dycc 识别 \code{__host__}、
+每个 \code{__kernel__} 必须使用 \code{DAYAN_KERNEL_DESC}、
+\code{DAYAN_KERNEL_TASK_DESC} 或 \code{DAYAN_KERNEL_LOCKED_TASK_DESC} 声明静态资源。
+最后一个宏仅支持 single-Core mode，用于依赖未保存/恢复 Hart 配置寄存器的算子；
+该属性不改变真实 child Proc 资源计数。dycc 识别 \code{__host__}、
 \code{__device__}、\code{__kernel__} 源码标注并生成 Host wrapper；这些标注只影响编译
 切分，不增加 Runtime 二进制 ABI 字段。
+
+\code{DAYAN_KERNEL_RESOURCE_DESC} 是上述三个声明宏共用的底层组合宏；通常不由算子
+直接调用。\code{DAYAN_KERNEL_DESC_ASSERT} 使同一声明在 C 与 C++ Device 编译中执行
+等价的静态约束检查。
 
 \begin{dayantable}{dycc Host wrapper API}{tab:api-runtime-wrapper}{X[43,l] X[57,l]}
   API & 行为 \\

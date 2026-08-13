@@ -136,7 +136,13 @@ int npu_package_view_init(struct npu_package_view *view,
     for (index = 0; index < header->kernel_count; ++index) {
         const npu_package_kernel_t *kernel = &kernels[index];
 
-        if (kernel->version != NPU_PACKAGE_KERNEL_VERSION || kernel->flags ||
+        if (kernel->version != NPU_PACKAGE_KERNEL_VERSION ||
+            (kernel->flags & ~NPU_PACKAGE_KERNEL_FLAGS_ALL) ||
+            ((kernel->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
+             kernel->supported_task_modes !=
+                 NPU_PACKAGE_TASK_MODE_SINGLE_CORE) ||
+            ((kernel->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
+             kernel->max_tasks_per_core != 1U) ||
             kernel->reserved0 || kernel->reserved[0] ||
             !npu_package_string(view, kernel->name_offset) ||
             !npu_package_string(view, kernel->entry_offset) ||

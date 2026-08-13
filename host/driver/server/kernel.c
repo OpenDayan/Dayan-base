@@ -1007,17 +1007,14 @@ static int flush_icache(npu_service_device_t *runtime, uint32_t cluster,
     for (core_index = 0;
          core_index < runtime->hal_info.cores_per_cluster; ++core_index) {
         npu_hal_core_t core = { cluster, core_index };
-        uint64_t response;
         int status;
 
         if (!(core_mask & (UINT32_C(1) << core_index)))
             continue;
         status = npu_service_rpc_call(runtime, core, RPC_ICACHE_FLUSH,
-                                      token, &response, timeout);
+                                      token, timeout, 0);
         if (status < 0)
             return status;
-        if (response != rpc_command_pack(RPC_ICACHE_FLUSH_RESPONSE, token))
-            return -EPROTO;
     }
     return 0;
 }
@@ -1029,13 +1026,11 @@ static int flush_dcache_core(npu_service_device_t *runtime,
     struct rpc_dcache_flush_request request;
     npu_hal_allocation_t *allocation = 0;
     uint64_t request_address;
-    uint64_t response;
+    int descriptor_may_be_live = 0;
     int status;
 
-    status = npu_service_alloc_visible(
-        runtime, core, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
-        (uint32_t)npu_service_core_index(runtime, core),
-        sizeof(request), 64, &allocation);
+    status = npu_service_alloc_rpc_descriptor(
+        runtime, core, sizeof(request), &allocation);
     if (status < 0)
         return status;
     status = npu_hal_memory_address(runtime->hal, allocation, core,
@@ -1056,14 +1051,10 @@ static int flush_dcache_core(npu_service_device_t *runtime,
     if (status < 0)
         goto out;
     status = npu_service_rpc_call(runtime, core, RPC_DCACHE_FLUSH,
-                                  request_address, &response, timeout);
+                                  request_address, timeout,
+                                  &descriptor_may_be_live);
     if (status < 0)
         goto out;
-    if (response != rpc_command_pack(RPC_DCACHE_FLUSH_RESPONSE,
-                                     request_address)) {
-        status = -EPROTO;
-        goto out;
-    }
     status = npu_hal_memory_read(runtime->hal, allocation, core, &request, 0,
                                  sizeof(request));
     if (status < 0)
@@ -1082,7 +1073,7 @@ static int flush_dcache_core(npu_service_device_t *runtime,
     status = request.status == 0 ? 0 : -EPROTO;
 
 out:
-    if (allocation) {
+    if (allocation && !descriptor_may_be_live) {
         int free_status = npu_hal_memory_free(runtime->hal, allocation);
 
         if (status == 0 && free_status < 0)

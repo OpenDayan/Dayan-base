@@ -44,22 +44,17 @@ struct npu_kernel_module {
 
 struct npu_pending_call {
     uint16_t expected_opcode;
-    uint16_t reserved;
     /* pending tracks the mailbox response; active protects result pickup. */
     uint32_t pending;
     uint32_t active;
     uint64_t expected_argument;
-    uint64_t response;
     int status;
 };
 
 struct npu_rpc_queue_entry {
     struct npu_rpc_queue_entry *next;
     size_t core_index;
-    uint16_t opcode;
-    uint16_t reserved;
     uint32_t queued;
-    uint64_t argument;
 };
 
 struct npu_service_cluster {
@@ -133,9 +128,7 @@ struct npu_service_launch {
     npu_service_device_t *device;
     npu_hal_core_t target;
     npu_hal_allocation_t *request_allocation;
-    uint64_t request_address;
     char name[NPU_SERVICE_PROC_NAME_SIZE];
-    uint32_t released;
 };
 
 uint64_t npu_now_ms(void);
@@ -149,13 +142,17 @@ int npu_service_alloc_visible(npu_service_device_t *device,
                               uint32_t owner, uint64_t size,
                               uint64_t alignment,
                               npu_hal_allocation_t **allocation_out);
+int npu_service_alloc_rpc_descriptor(
+    npu_service_device_t *device, npu_hal_core_t viewer,
+    size_t descriptor_size, npu_hal_allocation_t **allocation_out);
 
 int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
                              const void *image, size_t size,
                              uint32_t core_mask);
 int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
-                         uint64_t *response_out, uint32_t timeout_ms);
+                         uint32_t timeout_ms,
+                         int *argument_may_be_live_out);
 void npu_service_kernel_state_destroy(npu_service_device_t *device);
 void *npu_rpc_worker(void *arg);
 int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,

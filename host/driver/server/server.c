@@ -1499,6 +1499,8 @@ static int kernel_launch_locked(dayan_server_t *server,
     view = &kernel->module->package->view;
     if (!(metadata->supported_task_modes &
           package_mode_bit(request->task_mode)) ||
+        ((metadata->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
+         request->task_mode != 1U) ||
         request->argument_count != metadata->argument_count)
         return -EINVAL;
     if (request->task_mode == 4U &&
@@ -1991,6 +1993,7 @@ static int dispatch_control(dayan_server_t *server,
             info->max_child_procs = kernel->metadata->max_child_procs;
             info->argument_count = kernel->metadata->argument_count;
             info->sync_resource_count = kernel->metadata->sync_count;
+            info->flags = kernel->metadata->flags;
             info->stack_size = kernel->metadata->stack_size;
             info->atomic_cache_size = kernel->metadata->atomic_cache_size;
             info->resident_memory = kernel->metadata->resident_memory;

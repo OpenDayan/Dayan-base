@@ -90,6 +90,16 @@ Host Package。三个资源值分别表示一个实例允许同时存活的子 p
 必须是 1 KiB 的整数倍。子 proc 上限为 15；root 也占一个 proc slot，Runtime 保证
 同一 Hart 上所有 resident invocation 的 \code{1 + child\_procs} 总和不超过 16。
 
+允许最多 1--4 个 Task 共驻同一 Hart 时使用
+\code{DAYAN_KERNEL_TASK_DESC(kernel, tasks\_per\_core, child\_procs,
+atomic\_bytes, uram\_bytes)}。如果 single-Core kernel 会修改并依赖当前没有上下文
+保存/恢复机制的 Hart 配置寄存器，则必须使用
+\code{DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child\_procs, atomic\_bytes,
+uram\_bytes)}。一个带锁 logical Task 只能进入空 Hart；在其整个 Proc family 结束前，
+其它 logical Task（包括同一 grid 的下一 Task）不能进入该 Hart，而该 Task 自己的 child
+Proc 仍可在声明的 slot 内运行。锁定属性独立于 Proc 数量，不应通过虚报
+\code{child\_procs=15} 代替。
+
 \subsection{启动 kernel}\label{sec:kernel-023}
 
 BL1 与 API ELF 由独立的 \code{dayan_server} 初始化。应用只连接 Service 并创建逻辑

@@ -187,6 +187,11 @@ static uint32_t launch_reserved_procs(const npu_package_kernel_t *metadata)
     return metadata->max_child_procs + 1U;
 }
 
+static int launch_locks_task(const npu_package_kernel_t *metadata)
+{
+    return !!(metadata->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK);
+}
+
 static int slot_accepts(const dayan_server_t *server,
                         const struct server_command *command,
                         size_t slot_index)
@@ -201,7 +206,8 @@ static int slot_accepts(const dayan_server_t *server,
 
     if (calculate_shared_size(command, &atomic_cache) < 0)
         return 0;
-    if (!slot->enabled || resident == UINT64_MAX ||
+    if (!slot->enabled || resident == UINT64_MAX || slot->locked_task ||
+        (launch_locks_task(metadata) && slot->active_tasks) ||
         kernel->active_per_core[slot_index] >=
             metadata->max_tasks_per_core)
         return 0;
@@ -303,6 +309,8 @@ static void reserve_slots_locked(dayan_server_t *server,
     if (calculate_shared_size(command, &atomic_cache) < 0)
         return;
     for (index = 0; index < count; ++index) {
+        if (launch_locks_task(metadata))
+            server->slots[slots[index]].locked_task = 1;
         ++server->slots[slots[index]].active_tasks;
         server->slots[slots[index]].resident_memory += resident;
         server->slots[slots[index]].reserved_procs +=
@@ -327,6 +335,8 @@ static void release_slot_locked(dayan_server_t *server,
     (void)calculate_shared_size(command, &atomic_cache);
     if (slot->active_tasks)
         --slot->active_tasks;
+    if (!slot->active_tasks)
+        slot->locked_task = 0;
     if (slot->resident_memory >= resident)
         slot->resident_memory -= resident;
     else

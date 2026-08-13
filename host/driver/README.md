@@ -102,12 +102,19 @@ URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB。真实多 Cluster 
 `dayan_server_options_t.hal.memory_regions` 提供准确的物理布局。对同一 Cluster
 可见的 region 不得重叠；不同 Cluster 的局部地址空间可以使用相同数值地址。
 
-每个 kernel 的 Package 元信息声明 `max_child_procs`、`atomic_cache_size` 和
-`uram_size`。Server 选 Core 时累加检查三类资源：每个 invocation 按
+每个 kernel 的 Package 元信息声明 `max_child_procs`、`atomic_cache_size`、
+`uram_size` 和 kernel flags。Server 选 Core 时累加检查三类资源：每个 invocation 按
 `1 + max_child_procs` 预留 proc slot，同一 Hart 最多 16 个（root 计入，init/RPC
 proc 不计入）；atomic cache 与 URAM 分别受 HAL 对该 Core 可见的容量限制。URAM
 allocation 固定为 Core scope，以 1 KiB 为分配和释放粒度；物理 Cluster/Core 仍不会
 出现在 Runtime 启动接口中。
+
+`NPU_PACKAGE_KERNEL_LOCKED_TASK` 只允许 single-Core kernel。带该标记的一个 logical
+Task 只能派发到空 Hart；从 root Proc 建立到整个 family 终态期间，该 Hart 不接受任何
+其它 logical Task，包括同一 grid 的下一 Task，但该 Task 自己的 child Proc 可在其真实
+预留范围内运行。root 退出前会隐式 join-all，所以 invocation 终态就是安全解锁点；
+Device launch 失败则沿预留回滚路径立即解锁。该标记不虚增 Proc 计数，
+`max_child_procs=15` 仍表示真实预留 root 加 15 个 child 的旧式资源独占。
 
 ## socket 与零中转 memcpy
 
@@ -173,6 +180,14 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
 未定义符号。覆盖模块前，会对该 Cluster 所有已启动 Core 分别执行带地址和长度的
 `RPC_DCACHE_FLUSH`；全部完成后写入新的 text/rodata，再执行 `RPC_ICACHE_FLUSH` 并发布入口。
+
+Device 发起的标量 RPC 将 packet、request 和 response 分别放入独占的 64-byte 对齐
+slot，Host 只写 response/status，Device 确认后 invalidate 并复制回调用者。Host-owned
+标量控制 descriptor 统一按 64-byte 对齐地址和 64-byte allocation 粒度分配，
+wire `size` 仍是结构体实际长度。Device 在解析前 invalidate，请求字段在生命周期内只读；
+结果只在 RPC 响应或 Proc family 终态写入并 clean，Host 确认可见后再释放 allocation。
+提交前失败可立即释放；一旦尝试发布命令却未收到匹配响应，allocation 不重新分配，只在
+HAL 关闭时统一回收。
 
 ## proc profile trace
 

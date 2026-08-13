@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,23 @@
 #include "npu_package.h"
 #include "npu_runtime.h"
 #include "server_internal.h"
+
+#define LOCK_TEST_CHILD_PROCS 2U
+#define LOCK_TEST_STARTED_MASK ((UINT64_C(1) << LOCK_TEST_CHILD_PROCS) - 1U)
+
+struct lock_test_results {
+    uint64_t release;
+    uint64_t release_padding[7];
+    uint64_t root_begin;
+    uint64_t child_begin[LOCK_TEST_CHILD_PROCS];
+    uint64_t child_end[LOCK_TEST_CHILD_PROCS];
+    uint64_t started_mask;
+    uint64_t family_end;
+    uint64_t normal_begin;
+};
+
+_Static_assert(sizeof(struct lock_test_results) == 128,
+               "locked-task cmodel result ABI");
 
 struct run_state {
     dayan_server_t *server;
@@ -259,6 +277,181 @@ static int run_grid(npu_stream_t *stream, npu_kernel_t *kernel,
     return 0;
 }
 
+static int copy_lock_results(npu_stream_t *stream, npu_buffer_t *buffer,
+                             struct lock_test_results *results)
+{
+    npu_event_t *event = 0;
+    int status = npu_memcpy_d2h_async(stream, results, buffer, 0,
+                                      sizeof(*results), &event);
+
+    return status < 0 ? status : wait_and_destroy(event);
+}
+
+static int release_locked_children(npu_stream_t *stream,
+                                   npu_buffer_t *buffer)
+{
+    const uint64_t release = 1;
+    npu_event_t *event = 0;
+    int status = npu_memcpy_h2d_async(
+        stream, buffer, offsetof(struct lock_test_results, release),
+        &release, sizeof(release), &event);
+
+    return status < 0 ? status : wait_and_destroy(event);
+}
+
+static int run_locked_task_test(npu_stream_t *locked_stream,
+                                npu_stream_t *normal_stream,
+                                npu_stream_t *transfer_stream,
+                                npu_kernel_t *locked_kernel,
+                                npu_kernel_t *normal_kernel,
+                                npu_buffer_t *buffer)
+{
+    struct lock_test_results zeros = { 0 };
+    struct lock_test_results results = { 0 };
+    npu_launch_desc_t launch;
+    npu_event_info_t locked_info;
+    npu_event_info_t normal_info;
+    npu_event_t *upload = 0;
+    npu_event_t *locked_event = 0;
+    npu_event_t *normal_event = 0;
+    npu_event_t *unexpected = 0;
+    unsigned attempt;
+    int released = 0;
+    int status;
+
+    npu_launch_desc_init(&launch, "locked-invalid");
+    launch.config.task_dim = (NPUTaskDim3){ 4, 1, 1 };
+    launch.config.task_mode = (NPUTaskMode)4;
+    launch.arg_count = 1;
+    npu_kernel_arg_buffer(&launch.args[0], buffer, 0,
+                          NPU_KERNEL_ARG_READ | NPU_KERNEL_ARG_WRITE);
+    if (npu_kernel_launch(locked_stream, locked_kernel, &launch,
+                          &unexpected) != -EINVAL || unexpected)
+        return -EIO;
+
+    status = npu_memcpy_h2d_async(transfer_stream, buffer, 0, &zeros,
+                                  sizeof(zeros), &upload);
+    if (status == 0)
+        status = wait_and_destroy(upload);
+    if (status < 0)
+        return status;
+
+    npu_launch_desc_init(&launch, "locked-family");
+    launch.arg_count = 1;
+    npu_kernel_arg_buffer(&launch.args[0], buffer, 0,
+                          NPU_KERNEL_ARG_READ | NPU_KERNEL_ARG_WRITE);
+    status = npu_kernel_launch(locked_stream, locked_kernel, &launch,
+                               &locked_event);
+    if (status < 0)
+        return status;
+    for (attempt = 0; attempt < 5000U; ++attempt) {
+        status = npu_event_query(locked_event, &locked_info);
+        if (status < 0 || locked_info.state == NPU_EVENT_RUNNING)
+            break;
+        if (locked_info.state != NPU_EVENT_QUEUED) {
+            status = -EIO;
+            break;
+        }
+        {
+            const struct timespec delay = { 0, 1000000L };
+
+            (void)nanosleep(&delay, 0);
+        }
+    }
+    if (status == 0 && (attempt == 5000U ||
+                        locked_info.state != NPU_EVENT_RUNNING))
+        status = -ETIMEDOUT;
+    if (status < 0)
+        goto out;
+
+    npu_launch_desc_init(&launch, "normal-task");
+    launch.arg_count = 1;
+    npu_kernel_arg_buffer(&launch.args[0], buffer, 0,
+                          NPU_KERNEL_ARG_READ | NPU_KERNEL_ARG_WRITE);
+    status = npu_kernel_launch(normal_stream, normal_kernel, &launch,
+                               &normal_event);
+    if (status < 0)
+        goto out;
+
+    for (attempt = 0; attempt < 5000U; ++attempt) {
+        status = npu_event_query(locked_event, &locked_info);
+        if (status < 0)
+            break;
+        status = npu_event_query(normal_event, &normal_info);
+        if (status < 0)
+            break;
+        if (locked_info.state != NPU_EVENT_RUNNING ||
+            normal_info.state != NPU_EVENT_QUEUED ||
+            normal_info.status != -EINPROGRESS) {
+            status = -EIO;
+            break;
+        }
+        status = copy_lock_results(transfer_stream, buffer, &results);
+        if (status < 0 ||
+            results.started_mask == LOCK_TEST_STARTED_MASK)
+            break;
+        {
+            const struct timespec delay = { 0, 1000000L };
+
+            (void)nanosleep(&delay, 0);
+        }
+    }
+    if (status == 0 && (attempt == 5000U ||
+                        results.started_mask != LOCK_TEST_STARTED_MASK))
+        status = -ETIMEDOUT;
+    if (status < 0)
+        goto out;
+
+    status = release_locked_children(transfer_stream, buffer);
+    if (status < 0)
+        goto out;
+    released = 1;
+    status = wait_and_destroy(locked_event);
+    if (status < 0)
+        goto out;
+    locked_event = 0;
+    status = wait_and_destroy(normal_event);
+    if (status < 0)
+        goto out;
+    normal_event = 0;
+    status = copy_lock_results(transfer_stream, buffer, &results);
+    if (status < 0)
+        goto out;
+    if (!results.root_begin ||
+        results.started_mask != LOCK_TEST_STARTED_MASK ||
+        !results.family_end || !results.normal_begin ||
+        results.normal_begin < results.family_end)
+        status = -EIO;
+    for (attempt = 0; status == 0 && attempt < LOCK_TEST_CHILD_PROCS;
+         ++attempt) {
+        if (results.child_begin[attempt] < results.root_begin ||
+            results.child_end[attempt] < results.child_begin[attempt] ||
+            results.family_end < results.child_end[attempt])
+            status = -EIO;
+    }
+
+out:
+    if (locked_event && !released) {
+        int release_status = release_locked_children(transfer_stream, buffer);
+
+        if (status == 0 && release_status < 0)
+            status = release_status;
+    }
+    if (locked_event) {
+        int wait_status = wait_and_destroy(locked_event);
+
+        if (status == 0 && wait_status < 0)
+            status = wait_status;
+    }
+    if (normal_event) {
+        int wait_status = wait_and_destroy(normal_event);
+
+        if (status == 0 && wait_status < 0)
+            status = wait_status;
+    }
+    return status;
+}
+
 static int finish_profile(npu_profile_t *profile, unsigned core_count)
 {
     unsigned char data[NPU_PROFILE_MAX_BATCH_BYTES];
@@ -373,16 +566,20 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
 
 int main(int argc, char **argv)
 {
-    npu_package_argument_t arguments[2];
-    npu_package_kernel_desc_t kernel_desc[2];
+    npu_package_argument_t arguments[3];
+    npu_package_kernel_desc_t kernel_desc[4];
     dayan_server_options_t server_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
     npu_buffer_t *buffer = 0;
     npu_stream_t *stream = 0;
+    npu_stream_t *normal_stream = 0;
+    npu_stream_t *transfer_stream = 0;
     npu_module_t *module = 0;
     npu_kernel_t *kernel = 0;
     npu_kernel_t *killable_kernel = 0;
+    npu_kernel_t *locked_kernel = 0;
+    npu_kernel_t *normal_kernel = 0;
     npu_runtime_t *runtime = 0;
     npu_profile_t *profile = 0;
     dayan_server_t *server = 0;
@@ -421,6 +618,8 @@ int main(int argc, char **argv)
     arguments[0].access = NPU_PACKAGE_ARG_WRITE;
     arguments[1].kind = NPU_PACKAGE_ARG_VALUE;
     arguments[1].size = 8;
+    arguments[2] = arguments[0];
+    arguments[2].access = NPU_PACKAGE_ARG_READ | NPU_PACKAGE_ARG_WRITE;
     memset(kernel_desc, 0, sizeof(kernel_desc));
     kernel_desc[0].name = "grid_kernel";
     kernel_desc[0].entry_symbol = "grid_kernel";
@@ -435,7 +634,22 @@ int main(int argc, char **argv)
     kernel_desc[1].name = "kill_kernel";
     kernel_desc[1].entry_symbol = "kill_kernel";
     kernel_desc[1].max_child_procs = 0;
-    status = npu_package_build(object, object_size, kernel_desc, 2, 0,
+    kernel_desc[2].name = "locked_kernel";
+    kernel_desc[2].entry_symbol = "locked_kernel";
+    kernel_desc[2].supported_task_modes =
+        NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
+    kernel_desc[2].max_tasks_per_core = 1;
+    kernel_desc[2].max_child_procs = LOCK_TEST_CHILD_PROCS;
+    kernel_desc[2].flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
+    kernel_desc[2].arguments = &arguments[2];
+    kernel_desc[2].argument_count = 1;
+    kernel_desc[3] = kernel_desc[2];
+    kernel_desc[3].name = "normal_kernel";
+    kernel_desc[3].entry_symbol = "normal_kernel";
+    kernel_desc[3].max_tasks_per_core = 4;
+    kernel_desc[3].max_child_procs = 0;
+    kernel_desc[3].flags = 0;
+    status = npu_package_build(object, object_size, kernel_desc, 4, 0,
                                &package, &package_size);
     free(object);
     if (status < 0)
@@ -505,12 +719,20 @@ int main(int argc, char **argv)
         npu_buffer_desc_t desc;
 
         stage = "buffer create";
-        npu_buffer_desc_init(&desc, sizeof(output));
+        npu_buffer_desc_init(&desc, sizeof(struct lock_test_results));
         status = npu_buffer_create(context, &desc, &buffer);
     }
     if (status == 0) {
         stage = "stream create";
         status = npu_stream_create(context, 0, &stream);
+    }
+    if (status == 0) {
+        stage = "normal stream create";
+        status = npu_stream_create(context, 0, &normal_stream);
+    }
+    if (status == 0) {
+        stage = "transfer stream create";
+        status = npu_stream_create(context, 0, &transfer_stream);
     }
     if (status == 0) {
         stage = "module load";
@@ -524,6 +746,16 @@ int main(int argc, char **argv)
         stage = "kill kernel lookup";
         status = npu_module_get_kernel(module, "kill_kernel",
                                        &killable_kernel);
+    }
+    if (status == 0) {
+        stage = "locked kernel lookup";
+        status = npu_module_get_kernel(module, "locked_kernel",
+                                       &locked_kernel);
+    }
+    if (status == 0) {
+        stage = "normal kernel lookup";
+        status = npu_module_get_kernel(module, "normal_kernel",
+                                       &normal_kernel);
     }
     if (status == 0) {
         npu_launch_desc_t invalid;
@@ -542,6 +774,11 @@ int main(int argc, char **argv)
         status = run_grid(stream, kernel, buffer,
                           (NPUTaskDim3){ 2, 2, 2 }, 1,
                           UINT64_C(0x1234567800001000), output, 8);
+    }
+    if (status == 0 && core_count == 1) {
+        stage = "locked-task Hart exclusion";
+        status = run_locked_task_test(stream, normal_stream, transfer_stream,
+                                      locked_kernel, normal_kernel, buffer);
     }
     if (status == 0 && core_count == 4) {
         stage = "four-core grid";
@@ -562,9 +799,9 @@ int main(int argc, char **argv)
     if (status == 0 &&
         (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.count, __ATOMIC_RELAXED) !=
-                 (core_count == 4 ? 17U : 9U) ||
+                 (core_count == 4 ? 17U : 11U) ||
          __atomic_load_n(&exits.returned, __ATOMIC_RELAXED) !=
-                 (core_count == 4 ? 16U : 8U) ||
+                 (core_count == 4 ? 16U : 10U) ||
          __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) != 1U)) {
         stage = "root-only proc exit notification";
         status = -EIO;
@@ -576,10 +813,18 @@ int main(int argc, char **argv)
         (void)npu_kernel_release(kernel);
     if (killable_kernel)
         (void)npu_kernel_release(killable_kernel);
+    if (locked_kernel)
+        (void)npu_kernel_release(locked_kernel);
+    if (normal_kernel)
+        (void)npu_kernel_release(normal_kernel);
     if (module)
         (void)npu_module_unload(module);
     if (stream)
         (void)npu_stream_destroy(stream);
+    if (normal_stream)
+        (void)npu_stream_destroy(normal_stream);
+    if (transfer_stream)
+        (void)npu_stream_destroy(transfer_stream);
     if (buffer)
         (void)npu_buffer_destroy(buffer);
     if (context)
@@ -592,6 +837,7 @@ int main(int argc, char **argv)
     dayan_server_destroy(server);
     if (status < 0 || run.status < 0)
         return 1;
-    puts("cmodel smoke: BL1, socket/token memcpy and logical grid passed");
+    puts("cmodel smoke: BL1, socket/token memcpy, logical grid and "
+         "locked-task scheduling passed");
     return 0;
 }

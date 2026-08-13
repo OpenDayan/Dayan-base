@@ -61,6 +61,11 @@ LSU/MAT/VEC/MACRO，不刷新 I-cache，也不能替代跨 Hart 同步原语。
 算子 proc slot，root 计入、init/RPC/profile proc 不计入，所以描述符最多声明 15 个子 proc。
 URAM 基址和分配/释放均按 1 KiB 对齐。
 
+\code{DAYAN_KERNEL_LOCKED_TASK_DESC} 的 Hart 锁从 root 成功建立时开始，在上述 family
+终态后释放；Device launch 创建失败时 Host 回滚预留并立即释放。该锁不阻止同一
+family 的 child proc，因为它们由 Device scheduler 在已预留 slot 中创建，不经过 Host
+再次派发。
+
 cluster barrier 的参与者参数当前只能为 4，且 launch 必须为 mode 4。对象为零初始化的
 \code{dayan_cluster_barrier_t}，可以跨多轮复用；最后到达者以 release 语义推进
 generation，其它 lane 以 acquire 语义恢复。

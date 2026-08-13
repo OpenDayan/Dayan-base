@@ -21,7 +21,9 @@ rg -q 'npu_kernel_arg_buffer' "$work_dir/basic.host.cpp"
 rg -q 'npu_buffer_t \*output' "$work_dir/basic.host.cpp"
 rg -q '__atomic_test_and_set' "$work_dir/basic.host.cpp"
 rg -q '_ZN6sample10vector_addEPmmf' "$work_dir/basic.host.cpp"
-rg -Fq '3U, 0U, UINT64_C(4096), UINT64_C(2048)' \
+rg -Fq '3U, 0U, 0U, UINT64_C(4096), UINT64_C(2048)' \
+    "$work_dir/basic.host.cpp"
+rg -Fq '0U, 1U, 1U, UINT64_C(0), UINT64_C(0)' \
     "$work_dir/basic.host.cpp"
 rg -Fq 'return sample::vector_add(output, value, scale, attrs);' \
     "$work_dir/basic.host.cpp"
@@ -44,6 +46,8 @@ llvm-nm --defined-only "$work_dir/basic.cpp.dycc.device.o" | \
     rg -q '_ZN6sample10vector_addEPmmf'
 llvm-nm --defined-only "$work_dir/basic.cpp.dycc.device.o" | \
     rg -q ' vector_add__desc$'
+llvm-nm --defined-only "$work_dir/basic.cpp.dycc.device.o" | \
+    rg -q ' locked_kernel__desc$'
 
 "$DYCC_BIN" --save-temps="$work_dir/edge" \
     --emit-host "$work_dir/edge.host.cpp" \
@@ -102,7 +106,7 @@ if "$DYCC_BIN" --split-only --emit-host "$work_dir/missing.host.cpp" \
     echo "kernel without resource descriptor was accepted" >&2
     exit 1
 fi
-rg -q '__kernel__ requires DAYAN_KERNEL_DESC' "$work_dir/missing.log"
+rg -q '__kernel__ requires a resource descriptor' "$work_dir/missing.log"
 
 if "$DYCC_BIN" --split-only --emit-host "$work_dir/resource.host.cpp" \
     "$test_dir/invalid_desc.cpp" >"$work_dir/resource.log" 2>&1; then
@@ -118,3 +122,10 @@ if "$DYCC_BIN" --split-only --emit-host "$work_dir/children.host.cpp" \
     exit 1
 fi
 rg -q 'child_procs<=15' "$work_dir/children.log"
+
+if "$DYCC_BIN" --split-only --emit-host "$work_dir/flags.host.cpp" \
+    "$test_dir/invalid_flags_desc.cpp" >"$work_dir/flags.log" 2>&1; then
+    echo "descriptor with an unknown resource flag was accepted" >&2
+    exit 1
+fi
+rg -q 'known flags' "$work_dir/flags.log"

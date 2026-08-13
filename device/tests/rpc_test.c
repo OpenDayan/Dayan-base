@@ -11,6 +11,7 @@ int main(void)
 
     assert(rpc_command_opcode(command) == 0x1234);
     assert(rpc_command_arg(command) == 0xabcdef012345ULL);
+    assert(RPC_DESCRIPTOR_GRANULE == 64U);
     assert(sizeof(struct rpc_packet) == 40);
     assert(sizeof(struct rpc_dcache_flush_request) == 48);
     assert(sizeof(struct rpc_print_request) == 24);

@@ -407,6 +407,25 @@ int npu_service_alloc_visible(npu_service_device_t *device,
     return status;
 }
 
+int npu_service_alloc_rpc_descriptor(
+    npu_service_device_t *device, npu_hal_core_t viewer,
+    size_t descriptor_size, npu_hal_allocation_t **allocation_out)
+{
+    const uint64_t granule_mask = RPC_DESCRIPTOR_GRANULE - 1U;
+    uint64_t allocation_size;
+
+    if (!device || !allocation_out || !descriptor_size ||
+        !npu_hal_core_valid(device->hal, viewer) ||
+        descriptor_size > UINT64_MAX - granule_mask)
+        return -EINVAL;
+    allocation_size = ((uint64_t)descriptor_size + granule_mask) &
+                      ~granule_mask;
+    return npu_service_alloc_visible(
+        device, viewer, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
+        (uint32_t)npu_service_core_index(device, viewer), allocation_size,
+        RPC_DESCRIPTOR_GRANULE, allocation_out);
+}
+
 static int read_file(const char *path, unsigned char **image_out,
                      size_t *size_out)
 {
@@ -669,7 +688,8 @@ static void rpc_queue_remove_locked(npu_service_device_t *device,
 
 int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
-                         uint64_t *response_out, uint32_t timeout_ms)
+                         uint32_t timeout_ms,
+                         int *argument_may_be_live_out)
 {
     struct npu_rpc_queue_entry entry;
     struct npu_pending_call *call;
@@ -680,9 +700,11 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
     int queue_space_waiter = 0;
     int status;
 
-    if (!device || !response_out || !npu_hal_core_valid(device->hal, core) ||
+    if (!device || !npu_hal_core_valid(device->hal, core) ||
         argument > RPC_COMMAND_ARG_MASK)
         return -EINVAL;
+    if (argument_may_be_live_out)
+        *argument_may_be_live_out = 0;
     if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
         return -EIO;
     monotonic_deadline = UINT64_MAX;
@@ -700,8 +722,6 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
     call = &device->calls[core_index];
     memset(&entry, 0, sizeof(entry));
     entry.core_index = core_index;
-    entry.opcode = opcode;
-    entry.argument = argument;
     pthread_mutex_lock(&device->mutex);
     if (device->rpc_queue_count >= device->rpc_queue_capacity) {
         ++device->rpc_queue_waiters;
@@ -743,9 +763,12 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
     status = wait_command_consumed(device, core, monotonic_deadline);
     if (status == 0)
         status = npu_service_status(device);
-    if (status == 0)
+    if (status == 0) {
+        if (argument_may_be_live_out)
+            *argument_may_be_live_out = 1;
         status = npu_hal_command_submit(device->hal, core,
                                         rpc_command_pack(opcode, argument));
+    }
     if (status < 0) {
         pthread_mutex_lock(&device->mutex);
         call->pending = 0;
@@ -769,10 +792,11 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
         }
     }
     status = call->status;
-    *response_out = call->response;
     call->active = 0;
     pthread_cond_broadcast(&device->condition);
     pthread_mutex_unlock(&device->mutex);
+    if (status == 0 && argument_may_be_live_out)
+        *argument_may_be_live_out = 0;
     return status;
 
 space_wait_done:
@@ -795,9 +819,9 @@ int npu_service_launch(npu_service_device_t *device,
     uint64_t shared_base;
     uint64_t uram_base;
     uint64_t request_address;
-    uint64_t response;
     uint32_t booted;
     size_t axis;
+    int descriptor_may_be_live = 0;
     int status;
 
     if (!device || !desc || !launch_out ||
@@ -829,10 +853,8 @@ int npu_service_launch(npu_service_device_t *device,
     launch = calloc(1, sizeof(*launch));
     if (!launch)
         return -ENOMEM;
-    status = npu_service_alloc_visible(
-        device, desc->target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
-        (uint32_t)npu_service_core_index(device, desc->target),
-        sizeof(request), 64, &allocation);
+    status = npu_service_alloc_rpc_descriptor(
+        device, desc->target, sizeof(request), &allocation);
     if (status < 0)
         goto fail;
     status = npu_hal_memory_address(device->hal, allocation, desc->target,
@@ -867,21 +889,12 @@ int npu_service_launch(npu_service_device_t *device,
     if (status < 0)
         goto fail;
     status = npu_service_rpc_call(device, desc->target, RPC_PROC_CREATE,
-                                  request_address, &response,
-                                  device->options.default_timeout_ms);
+                                  request_address,
+                                  device->options.default_timeout_ms,
+                                  &descriptor_may_be_live);
     if (status < 0)
         goto fail;
-    if (rpc_command_opcode(response) != RPC_PROC_CREATE_RESPONSE ||
-        rpc_command_arg(response) != request_address) {
-        fprintf(stderr,
-                "dayan_server: PROC_CREATE response mismatch: hart=%u "
-                "request=0x%llx response=0x%llx opcode=0x%x arg=0x%llx\n",
-                desc->target.core, (unsigned long long)request_address,
-                (unsigned long long)response, rpc_command_opcode(response),
-                (unsigned long long)rpc_command_arg(response));
-        status = -EPROTO;
-        goto fail;
-    }
+    descriptor_may_be_live = 1;
     status = npu_hal_memory_read(device->hal, allocation, desc->target,
                                  &request, 0, sizeof(request));
     if (status < 0)
@@ -910,12 +923,12 @@ int npu_service_launch(npu_service_device_t *device,
     if (request.state == RPC_PROC_FAILED) {
         status = request.status < 0 && request.status >= INT32_MIN ?
             (int)request.status : -EIO;
+        descriptor_may_be_live = 0;
         goto fail;
     }
     launch->device = device;
     launch->target = desc->target;
     launch->request_allocation = allocation;
-    launch->request_address = request_address;
     memcpy(launch->name, request.name, sizeof(launch->name));
     pthread_mutex_lock(&device->mutex);
     ++device->active_launches;
@@ -924,7 +937,7 @@ int npu_service_launch(npu_service_device_t *device,
     return 0;
 
 fail:
-    if (allocation)
+    if (allocation && !descriptor_may_be_live)
         (void)npu_hal_memory_free(device->hal, allocation);
     free(launch);
     return status;
@@ -936,7 +949,7 @@ int npu_service_launch_query(npu_service_launch_t *launch,
     struct rpc_proc_create_request request;
     int status;
 
-    if (!launch || !info || launch->released)
+    if (!launch || !info)
         return -EINVAL;
     status = npu_service_status(launch->device);
     if (status < 0)
@@ -994,7 +1007,7 @@ int npu_service_launch_release(npu_service_launch_t *launch)
     npu_service_device_t *device;
     int status;
 
-    if (!launch || launch->released)
+    if (!launch)
         return -EINVAL;
     status = npu_service_launch_query(launch, &info);
     if (status < 0)
@@ -1006,7 +1019,6 @@ int npu_service_launch_release(npu_service_launch_t *launch)
     status = npu_hal_memory_free(device->hal, launch->request_allocation);
     if (status < 0)
         return status;
-    launch->released = 1;
     pthread_mutex_lock(&device->mutex);
     if (device->active_launches)
         --device->active_launches;
@@ -1018,19 +1030,17 @@ int npu_service_launch_release(npu_service_launch_t *launch)
 int npu_service_launch_abandon(npu_service_launch_t *launch)
 {
     npu_service_device_t *device;
-    int status;
 
-    if (!launch || launch->released)
+    if (!launch)
         return -EINVAL;
     device = launch->device;
-    status = npu_hal_memory_free(device->hal, launch->request_allocation);
-    launch->released = 1;
+    /* Device completion is unknown; keep the descriptor reserved until HAL close. */
     pthread_mutex_lock(&device->mutex);
     if (device->active_launches)
         --device->active_launches;
     pthread_mutex_unlock(&device->mutex);
     free(launch);
-    return status;
+    return 0;
 }
 
 int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
@@ -1039,9 +1049,9 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
     struct rpc_proc_ps_snapshot snapshot;
     npu_hal_allocation_t *allocation = 0;
     uint64_t address;
-    uint64_t response;
     uint32_t booted;
     uint32_t record;
+    int descriptor_may_be_live = 0;
     int status;
 
     if (!device || !snapshot_out ||
@@ -1052,10 +1062,8 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
     pthread_mutex_unlock(&device->mutex);
     if (!(booted & (UINT32_C(1) << target.core)))
         return -ENODEV;
-    status = npu_service_alloc_visible(
-        device, target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
-        (uint32_t)npu_service_core_index(device, target),
-        sizeof(snapshot), 64, &allocation);
+    status = npu_service_alloc_rpc_descriptor(
+        device, target, sizeof(snapshot), &allocation);
     if (status < 0)
         return status;
     status = npu_hal_memory_address(device->hal, allocation, target,
@@ -1074,15 +1082,10 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
     if (status < 0)
         goto out;
     status = npu_service_rpc_call(device, target, RPC_PROC_PS, address,
-                                  &response,
-                                  device->options.default_timeout_ms);
+                                  device->options.default_timeout_ms,
+                                  &descriptor_may_be_live);
     if (status < 0)
         goto out;
-    if (rpc_command_opcode(response) != RPC_PROC_PS_RESPONSE ||
-        rpc_command_arg(response) != address) {
-        status = -EPROTO;
-        goto out;
-    }
     status = npu_hal_memory_read(device->hal, allocation, target, &snapshot,
                                  0, sizeof(snapshot));
     if (status < 0)
@@ -1115,7 +1118,7 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
     status = 0;
 
 out:
-    if (allocation) {
+    if (allocation && !descriptor_may_be_live) {
         int free_status = npu_hal_memory_free(device->hal, allocation);
 
         if (status == 0 && free_status < 0)
@@ -1132,8 +1135,8 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
     struct rpc_proc_kill_result result;
     npu_hal_allocation_t *allocation = 0;
     uint64_t address;
-    uint64_t response;
     uint32_t booted;
+    int descriptor_may_be_live = 0;
     int status;
 
     if (!device || !result_out || !timeout_ms ||
@@ -1144,10 +1147,8 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
     pthread_mutex_unlock(&device->mutex);
     if (!(booted & (UINT32_C(1) << target.core)))
         return -ENODEV;
-    status = npu_service_alloc_visible(
-        device, target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
-        (uint32_t)npu_service_core_index(device, target),
-        sizeof(result), 64, &allocation);
+    status = npu_service_alloc_rpc_descriptor(
+        device, target, sizeof(result), &allocation);
     if (status < 0)
         return status;
     status = npu_hal_memory_address(device->hal, allocation, target,
@@ -1165,14 +1166,10 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
     if (status < 0)
         goto out;
     status = npu_service_rpc_call(device, target, RPC_PROC_KILL_ALL,
-                                  address, &response, timeout_ms);
+                                  address, timeout_ms,
+                                  &descriptor_may_be_live);
     if (status < 0)
         goto out;
-    if (rpc_command_opcode(response) != RPC_PROC_KILL_ALL_RESPONSE ||
-        rpc_command_arg(response) != address) {
-        status = -EPROTO;
-        goto out;
-    }
     status = npu_hal_memory_read(device->hal, allocation, target, &result,
                                  0, sizeof(result));
     if (status < 0)
@@ -1197,7 +1194,7 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
     status = 0;
 
 out:
-    if (allocation) {
+    if (allocation && !descriptor_may_be_live) {
         int free_status = npu_hal_memory_free(device->hal, allocation);
 
         if (status == 0 && free_status < 0)

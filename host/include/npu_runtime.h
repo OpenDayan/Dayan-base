@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define NPU_RUNTIME_OPTIONS_VERSION 4U
+#define NPU_RUNTIME_OPTIONS_VERSION 5U
 #define NPU_CONTEXT_DESC_VERSION    1U
 #define NPU_BUFFER_DESC_VERSION     1U
 #define NPU_STREAM_DESC_VERSION     1U
@@ -174,12 +174,14 @@ typedef struct npu_kernel_info {
     uint32_t max_child_procs;
     uint32_t arg_count;
     uint32_t sync_resource_count;
-    uint32_t reserved;
+    uint32_t flags;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t resident_memory;
     uint64_t uram_size;
 } npu_kernel_info_t;
+
+#define NPU_KERNEL_LOCKED_TASK (1U << 0)
 
 typedef struct npu_profile_options {
     uint32_t version;

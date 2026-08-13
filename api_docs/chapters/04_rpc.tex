@@ -10,7 +10,7 @@ RPC 是 BL1 与 Host Service 之间的 mailbox 线协议，也是 Device 系统�
 
 每条 mailbox command 是 64 bit：高 16 bit 为 opcode，低 48 bit 为参数。Device
 发起的通用调用把低 48 bit 解释为 \code{rpc_packet} 地址；Host 发起的管理调用则按
-具体 opcode 解释为 Host-owned coherent descriptor 地址。全部 opcode 由
+具体 opcode 解释为 Host-owned normal-memory descriptor 地址。全部 opcode 由
 \code{rpc_service} 枚举定义。
 
 \subsection{Command 编码}
@@ -48,15 +48,27 @@ RPC 是 BL1 与 Host Service 之间的 mailbox 线协议，也是 Device 系统�
 
 \begin{dayantable}{RPC 基础 wire 类型}{tab:api-rpc-basic-wire}{X[38,l] X[62,l]}
   类型 & ABI / 用途 \\
-  \code{rpc_packet} & 40 B；request/response 地址和大小，以及由 Host 写回的 64-bit status。 \\
+  \code{rpc_packet} & 40 B；request/response 地址和大小，以及由 Host 写回的 64-bit status；存放在独占的 64-B slot。 \\
+  \code{RPC_DESCRIPTOR_GRANULE} & 双向标量 RPC descriptor 的地址、slot 和 Host allocation 粒度均为 64 B。 \\
+  \code{RPC_DCACHE_FLUSH_VERSION} / \code{rpc_dcache_flush_request} & 版本 1 的 48-B Host-owned descriptor；指定 Hart 与待失效地址区间，并接收 status。 \\
   \code{rpc_print_request} & 24 B；Hart ID、Proc ID、Device 数据地址和字节数。 \\
   \code{rpc_heap_request} & 8 B；申请字节数。 \\
   \code{rpc_heap_response} & 16 B；Host 返回的 Device 地址和实际大小。 \\
   \code{rpc_heap_release} & 16 B；待释放的 Device 地址与大小。 \\
 \end{dayantable}
 
-Host 读取 request 前，Device 必须 clean 对应 cache line；Host 写完 response/status 后，
-Device 必须 invalidate 后再读。\code{rpc_call} 负责 Device 侧这套所有权转换。
+\code{rpc_call} 把 packet、request 和 response 分别放入独占的 64-B 对齐 slot；wire
+结构大小不变，较大的输出数据仍由 request 中的地址和长度引用。Device 提交前 clean
+三个相关 slot，Host 只读 packet/request，并只写 response 与 packet status；Host 清除
+doorbell 后 Device invalidate 写回 slot，再把 response 复制到调用者缓冲。这样 cache
+维护不会失效同一栈上无关的局部变量。当前标量 request/response 最大为 64 B。
+
+Host-to-Device 的 proc create、PS、kill、profile config 与 D-cache flush descriptor 从
+64-B 对齐地址开始，allocation 大小向上取整到 64-B 粒度；各结构的 wire
+\code{size} 仍保持实际 ABI 长度。Device 在解析前 invalidate，对请求字段只读，只在 RPC
+响应或 proc family 终态写入结果字段并 clean；Host 确认响应或终态可见后才释放 allocation。
+提交前失败可以立即释放；一旦尝试发布命令却未收到匹配响应，Host 不复用该 allocation，
+并在 HAL 关闭时统一回收。
 
 \subsection{Proc 管理线协议}
 
@@ -117,11 +129,26 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
   \code{rpc_profile_flush_response} & 32 B；Host 返回是否继续采样、状态和 generation。 \\
 \end{dayantable}
 
+\begin{dayantable}{Profile 编码常量}{tab:api-rpc-profile-encoding}{X[49,l] X[51,l]}
+  常量 & 含义 \\
+  \code{RPC_PROFILE_RECORD_SIZE} / \code{RPC_PROFILE_SLOT_DEFINE_SIZE} & 状态记录为 8 B，slot 定义为 24 B。 \\
+  \code{RPC_PROFILE_COUNTER_BITS} / \code{RPC_PROFILE_COUNTER_MASK} & counter 占低 48 bit 及其掩码。 \\
+  \code{RPC_PROFILE_SLOT_SHIFT} / \code{RPC_PROFILE_STATE_SHIFT} & slot 与 state/tag 的起始 bit 为 48 和 56。 \\
+  \code{RPC_PROFILE_SLOT_SCHEDULER} / \code{RPC_PROFILE_SLOT_USER_BASE} & Host scheduler slot 为 0，用户 Proc slot 从 1 开始。 \\
+  \code{RPC_PROFILE_SLOT_RPC_RECEIVE} / \code{RPC_PROFILE_SLOT_RPC_SEND} / \code{RPC_PROFILE_SLOT_FLUSH} & 三个系统 Proc slot。 \\
+  \code{RPC_PROFILE_SLOT_COUNT} & scheduler、16 个用户 Proc 和三个系统 Proc共 20 个 slot。 \\
+  \code{RPC_PROFILE_SNAPSHOT_MAX_BYTES} & START snapshot 最坏情况下所有 Proc 的定义与初始状态所需字节上限。 \\
+\end{dayantable}
+
 状态值 0--7 的记录长度为 8 B；tag \code{RPC_PROFILE_RECORD_SLOT_DEFINE}（0x80）的记录
 长度为 24 B。记录在 Device buffer 内紧密排列，不含 padding。slot 1--16 对应用户 Proc
 slot，17--19 对应三个系统 Proc，slot 0 保留给 Host 合成 scheduler。一个 slot 分配给新
 Thread 时先写定义再写状态；普通状态切换不重复名称。config 与 flush descriptor 的
 \code{count}/\code{capacity} 均为字节数。
+
+\code{rpc_profile_record_tag} 当前只定义 SLOT\_DEFINE。Device 用
+\code{rpc_profile_record_pack} 编码 header；\code{rpc_profile_record_counter}、
+\code{rpc_profile_record_slot} 与 \code{rpc_profile_record_state} 分别解码三个字段。
 
 \begin{dayantable}{Profile Proc 状态值}{tab:api-rpc-profile-state}{X[51,l] X[49,l]}
   API & 含义 \\
@@ -138,7 +165,7 @@ Thread 时先写定义再写状态；普通状态切换不重复名称。config 
   API & 行为 \\
   \code{rpc_init} & 初始化当前 Hart 的 mailbox，并创建 \code{rpc-receive} 与 \code{rpc-send} 系统 Proc。 \\
   \code{rpc_receive} & 分发一个 Host-to-Device opcode；返回 1 表示要发送 response command，0 表示无响应，负值表示请求已消费但失败。 \\
-  \code{rpc_call} & 发起同步 Device-to-Host 通用服务调用，并管理 request/response cache 可见性。 \\
+  \code{rpc_call} & 发起同步 Device-to-Host 通用服务调用，并用独占 64-B slot 管理 packet/request/response cache 可见性。 \\
   \code{rpc_proc_wait_cancel} & kill Proc 时取消尚在发送队列中的 RPC；返回 1 表示 send Proc 已取得 transaction，必须等待其完成。 \\
 \end{dayantable}
 

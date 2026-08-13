@@ -10,11 +10,13 @@
 /* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
 register void *shared __asm__("gp");
 
-#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 1U
+#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 2U
 #define DAYAN_HART_MAX_PROCS                16U
 #define DAYAN_KERNEL_MAX_CHILD_PROCS        (DAYAN_HART_MAX_PROCS - 1U)
 #define DAYAN_PROC_NAME_SIZE                16U
 #define DAYAN_URAM_ALLOCATION_GRANULE       1024U
+#define DAYAN_KERNEL_RESOURCE_LOCKED_TASK   (1U << 0)
+#define DAYAN_KERNEL_RESOURCE_FLAGS_ALL DAYAN_KERNEL_RESOURCE_LOCKED_TASK
 
 #ifndef DAYAN_KERNEL_RESOURCE_DESC_DEFINED
 #define DAYAN_KERNEL_RESOURCE_DESC_DEFINED
@@ -22,8 +24,9 @@ register void *shared __asm__("gp");
 typedef struct dayan_kernel_resource_desc {
     uint32_t version;
     uint32_t size;
-    uint32_t max_child_procs;
-    uint32_t max_tasks_per_core;
+    uint16_t max_child_procs;
+    uint16_t max_tasks_per_core;
+    uint32_t flags;
     uint64_t atomic_cache_size;
     uint64_t uram_size;
 } dayan_kernel_resource_desc_t;

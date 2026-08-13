@@ -211,7 +211,7 @@ int npu_kernel_get_info(npu_kernel_t *kernel, npu_kernel_info_t *info)
     info->max_child_procs = response.max_child_procs;
     info->arg_count = response.argument_count;
     info->sync_resource_count = response.sync_resource_count;
-    info->reserved = 0;
+    info->flags = response.flags;
     info->stack_size = response.stack_size;
     info->atomic_cache_size = response.atomic_cache_size;
     info->resident_memory = response.resident_memory;

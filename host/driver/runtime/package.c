@@ -92,6 +92,12 @@ int npu_package_build(const void *riscv_object, size_t object_size,
             !*kernel->entry_symbol ||
             !kernel->supported_task_modes ||
             (kernel->supported_task_modes & ~NPU_PACKAGE_TASK_MODE_ALL) ||
+            (kernel->flags & ~NPU_PACKAGE_KERNEL_FLAGS_ALL) ||
+            ((kernel->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
+             kernel->supported_task_modes !=
+                 NPU_PACKAGE_TASK_MODE_SINGLE_CORE) ||
+            ((kernel->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
+             kernel->max_tasks_per_core > 1U) ||
             kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
             (kernel->stack_size &&
              kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
@@ -214,6 +220,7 @@ int npu_package_build(const void *riscv_object, size_t object_size,
         destination->max_tasks_per_core = source->max_tasks_per_core ?
             source->max_tasks_per_core : 1U;
         destination->max_child_procs = source->max_child_procs;
+        destination->flags = source->flags;
         destination->stack_size = source->stack_size;
         destination->atomic_cache_size = source->atomic_cache_size;
         destination->printf_buffer_size = source->printf_buffer_size;

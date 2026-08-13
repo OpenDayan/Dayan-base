@@ -19,6 +19,14 @@ _Static_assert(sizeof(dayan_cluster_barrier_t) == 16,
                "dayan cluster barrier ABI must stay fixed");
 _Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
                "dayan kernel resource descriptor ABI must stay fixed");
+_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_child_procs) == 8 &&
+                   offsetof(dayan_kernel_resource_desc_t,
+                            max_tasks_per_core) == 10 &&
+                   offsetof(dayan_kernel_resource_desc_t, flags) == 12 &&
+                   offsetof(dayan_kernel_resource_desc_t,
+                            atomic_cache_size) == 16 &&
+                   offsetof(dayan_kernel_resource_desc_t, uram_size) == 24,
+               "dayan kernel resource descriptor layout changed");
 
 /*
  * BASE Produce/Bar uses unit 0.  Produce reads tp (x4) directly;

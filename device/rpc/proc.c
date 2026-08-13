@@ -10,6 +10,9 @@
 #include "stdlib.h"
 #include "string.h"
 
+_Static_assert(RPC_DESCRIPTOR_GRANULE == CONFIG_CACHE_LINE_SIZE,
+               "RPC descriptors must occupy whole cache lines");
+
 static int range_inside(uint64_t address, uint64_t size,
                         uint64_t base, uint64_t capacity)
 {
@@ -23,39 +26,10 @@ static int host_normal_range_valid(uint64_t address, uint64_t size)
            size <= UINT64_MAX - address;
 }
 
-static int proc_request_address_valid(uint64_t address)
+static int rpc_descriptor_address_valid(uint64_t address, size_t size)
 {
-    return !(address & 7U) &&
-           host_normal_range_valid(
-               address, sizeof(struct rpc_proc_create_request));
-}
-
-static int proc_ps_address_valid(uint64_t address)
-{
-    return !(address & 7U) &&
-           host_normal_range_valid(
-               address, sizeof(struct rpc_proc_ps_snapshot));
-}
-
-static int proc_kill_address_valid(uint64_t address)
-{
-    return !(address & 7U) &&
-           host_normal_range_valid(
-               address, sizeof(struct rpc_proc_kill_result));
-}
-
-static int profile_config_address_valid(uint64_t address)
-{
-    return !(address & 7U) &&
-           host_normal_range_valid(address,
-                                   sizeof(struct rpc_profile_config));
-}
-
-static int dcache_flush_address_valid(uint64_t address)
-{
-    return !(address & 7U) &&
-           host_normal_range_valid(
-               address, sizeof(struct rpc_dcache_flush_request));
+    return !(address & (RPC_DESCRIPTOR_GRANULE - 1U)) &&
+           host_normal_range_valid(address, size);
 }
 
 static int dcache_flush_request_valid(
@@ -132,7 +106,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     int status = -EINVAL;
 
     *response_command = rpc_command_pack(RPC_PROC_CREATE_RESPONSE, arg);
-    if (!proc_request_address_valid(arg))
+    if (!rpc_descriptor_address_valid(arg, sizeof(*request)))
         return 1;
 
     request = (struct rpc_proc_create_request *)(uintptr_t)arg;
@@ -208,7 +182,7 @@ static int rpc_dcache_flush(uint64_t arg, uint64_t *response_command)
     int status = -EINVAL;
 
     *response_command = rpc_command_pack(RPC_DCACHE_FLUSH_RESPONSE, arg);
-    if (!dcache_flush_address_valid(arg))
+    if (!rpc_descriptor_address_valid(arg, sizeof(*request)))
         return 1;
     request = (struct rpc_dcache_flush_request *)(uintptr_t)arg;
     platform_cache_invalidate(request, sizeof(*request));
@@ -231,7 +205,7 @@ static int rpc_proc_ps(uint64_t arg, uint64_t *response_command)
     int status;
 
     *response_command = rpc_command_pack(RPC_PROC_PS_RESPONSE, arg);
-    if (!proc_ps_address_valid(arg))
+    if (!rpc_descriptor_address_valid(arg, sizeof(*snapshot)))
         return 1;
     snapshot = (struct rpc_proc_ps_snapshot *)(uintptr_t)arg;
     platform_cache_invalidate(snapshot, sizeof(*snapshot));
@@ -251,7 +225,7 @@ static int rpc_proc_kill_all(uint64_t arg, uint64_t *response_command)
     int status;
 
     *response_command = rpc_command_pack(RPC_PROC_KILL_ALL_RESPONSE, arg);
-    if (!proc_kill_address_valid(arg))
+    if (!rpc_descriptor_address_valid(arg, sizeof(*result)))
         return 1;
     result = (struct rpc_proc_kill_result *)(uintptr_t)arg;
     platform_cache_invalidate(result, sizeof(*result));
@@ -274,7 +248,7 @@ static int rpc_profile_config(uint64_t arg, uint64_t *response_command)
     int status;
 
     *response_command = rpc_command_pack(RPC_PROFILE_CONFIG_RESPONSE, arg);
-    if (!profile_config_address_valid(arg))
+    if (!rpc_descriptor_address_valid(arg, sizeof(*config)))
         return 1;
     config = (struct rpc_profile_config *)(uintptr_t)arg;
     platform_cache_invalidate(config, sizeof(*config));

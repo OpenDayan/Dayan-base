@@ -16,17 +16,15 @@ static int profile_config_call(npu_service_device_t *device,
     struct rpc_profile_config config;
     npu_hal_allocation_t *allocation = 0;
     uint64_t descriptor_address;
-    uint64_t response;
+    int descriptor_may_be_live = 0;
     int status;
 
     if (count_out)
         *count_out = 0;
     if (enabled_out)
         *enabled_out = -1;
-    status = npu_service_alloc_visible(
-        device, core->target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_LAUNCH,
-        (uint32_t)npu_service_core_index(device, core->target),
-        sizeof(config), 64, &allocation);
+    status = npu_service_alloc_rpc_descriptor(
+        device, core->target, sizeof(config), &allocation);
     if (status < 0)
         return status;
     status = npu_hal_memory_address(device->hal, allocation, core->target,
@@ -49,15 +47,11 @@ static int profile_config_call(npu_service_device_t *device,
     if (status < 0)
         goto out;
     status = npu_service_rpc_call(device, core->target, RPC_PROFILE_CONFIG,
-                                  descriptor_address, &response,
-                                  device->options.default_timeout_ms);
+                                  descriptor_address,
+                                  device->options.default_timeout_ms,
+                                  &descriptor_may_be_live);
     if (status < 0)
         goto out;
-    if (rpc_command_opcode(response) != RPC_PROFILE_CONFIG_RESPONSE ||
-        rpc_command_arg(response) != descriptor_address) {
-        status = -EPROTO;
-        goto out;
-    }
     status = npu_hal_memory_read(device->hal, allocation, core->target,
                                  &config, 0, sizeof(config));
     if (status < 0)
@@ -90,7 +84,7 @@ static int profile_config_call(npu_service_device_t *device,
     status = 0;
 
 out:
-    if (allocation) {
+    if (allocation && !descriptor_may_be_live) {
         int free_status = npu_hal_memory_free(device->hal, allocation);
 
         if (status == 0 && free_status < 0)

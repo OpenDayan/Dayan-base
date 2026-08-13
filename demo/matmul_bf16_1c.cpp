@@ -792,8 +792,8 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
     perf->pipeline_cycles = pipeline_end - pipeline_begin;
 }
 
-DAYAN_KERNEL_DESC(matmul_bf16_1c, MATMUL_BF16_1C_SLICES, 0,
-                  MATMUL_BF16_1C_URAM_BYTES);
+DAYAN_KERNEL_LOCKED_TASK_DESC(matmul_bf16_1c, MATMUL_BF16_1C_SLICES, 0,
+                              MATMUL_BF16_1C_URAM_BYTES);
 
 #if !defined(__DAYAN_DEVICE__)
 

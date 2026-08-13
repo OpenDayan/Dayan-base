@@ -68,11 +68,45 @@ int main(void)
            NPU_PACKAGE_TASK_MODE_ALL);
     assert(view.kernels[0].max_tasks_per_core == 2);
     assert(view.kernels[0].max_child_procs == 3);
+    assert(view.kernels[0].flags == 0);
     assert(view.kernels[0].atomic_cache_size == 4096);
     assert(view.kernels[0].uram_size == 2048);
     assert(strcmp(npu_package_string(&view, view.kernels[0].name_offset),
                   "grid_kernel") == 0);
     npu_package_free(package);
+
+    package = 0;
+    package_size = 0;
+    kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
+    kernel.max_tasks_per_core = 1;
+    kernel.flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) == 0);
+    assert(npu_package_view_init(&view, package, package_size) == 0);
+    assert(view.kernels[0].flags == NPU_PACKAGE_KERNEL_LOCKED_TASK);
+    ((npu_package_kernel_t *)view.kernels)[0].flags = UINT32_C(1) << 31;
+    assert(npu_package_view_init(&view, package, package_size) < 0);
+    npu_package_free(package);
+
+    package = 0;
+    package_size = 0;
+    kernel.flags = UINT32_C(1) << 31;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) < 0);
+    assert(!package && !package_size);
+    kernel.flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
+    kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) < 0);
+    assert(!package && !package_size);
+    kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
+    kernel.max_tasks_per_core = 2;
+    assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
+                             &package, &package_size) < 0);
+    assert(!package && !package_size);
+    kernel.flags = 0;
+    kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+    kernel.max_tasks_per_core = 2;
 
     package = 0;
     package_size = 0;

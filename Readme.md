@@ -299,8 +299,17 @@ Host 覆盖动态模块前，先通过 `RPC_DCACHE_FLUSH` (`0x0105`) 让所有�
 失效目标模块的 D-cache 范围；全部返回 `0x8105` 后才写入新的 text/rodata。写入完成后
 再使用 `RPC_ICACHE_FLUSH` (`0x0101`) 发布代码，并等待 `0x8101` 响应。`fence.i` 只作用于
 当前 hart，因此两阶段发布都逐个处理所有已启动 hart；创建 proc 不再重复刷新 cache。
-create 描述符的请求字段在终态
-前保持不变，Device invalidate 后直接使用 `request->...`，只回写 state 和结果字段。
+
+双向标量 RPC descriptor 都隔离 cache line。Device 发起的 packet、request、response
+各占一个独立的 64-byte 对齐 slot；Host 只写 response/status，Device 在收到确认后
+invalidate 并复制回调用者。Host-owned 控制描述符（proc create、PS、kill、profile
+config 和 D-cache flush）
+从 64-byte 对齐地址开始，allocation 大小也向上取整到 64-byte 粒度，避免与其它对象共享
+cache line；描述符的 wire `size` 仍是结构体实际字节数。Device 在解析前 invalidate，
+请求字段在生命周期内保持只读，只在 RPC 响应或 proc family 终态写入结果和 state，并在
+通知 Host 前 clean。Host 读取到响应或终态后才能释放对应 allocation；提交前失败可立即
+释放，一旦尝试发布命令却未收到匹配响应，allocation 不再进入分配池，只在 HAL 关闭时
+统一回收。
 
 同步异常从 `mtvec` 进入独立的每核 trap 栈，保存 x0–x31（其中 x2 为异常前的 sp）、
 `mstatus`、`mepc`、`mcause`、`mtval` 和 `fcsr`。C handler 再附加版本、记录大小、

@@ -6,7 +6,7 @@
 
 dapi 是 kernel 和 Device 子 Proc 可直接调用的稳定接口。公开面由
 \code{device/include/api} 下的头文件定义，动态链接允许的函数集合由
-\code{device/dayan-api.symbols} 固定。本章逐项记录这 61 个可链接符号，并列出公开
+\code{device/dayan-api.symbols} 固定。本章逐项记录这 63 个可链接符号，并列出公开
 类型、常量与编译属性；BL1 scheduler、Proc 和资源实现细节不属于 dapi。
 
 \subsection{头文件与编译属性}
@@ -32,12 +32,14 @@ dapi 是 kernel 和 Device 子 Proc 可直接调用的稳定接口。公开面�
 \begin{dayantable}{Kernel 环境 API}{tab:api-dapi-environment}{X[43,l] X[57,l]}
   API & 含义 \\
   \code{shared} & 绑定 \code{gp} 的 Host-owned coherent allocation 基址；kernel 只能读取该指针本身，可在所指区间放跨 Hart 状态。 \\
-  \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION} & 当前静态 kernel 资源描述版本 1。 \\
+  \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION} & 当前静态 kernel 资源描述版本 2。 \\
   \code{DAYAN_HART_MAX_PROCS} & 每个 Hart 最多 16 个用户 Proc slot。 \\
   \code{DAYAN_KERNEL_MAX_CHILD_PROCS} & root Proc 最多声明 15 个子 Proc。 \\
   \code{DAYAN_PROC_NAME_SIZE} & Proc 名称存储为 16 B。 \\
   \code{DAYAN_URAM_ALLOCATION_GRANULE} & URAM 资源以 1024 B 对齐和分配。 \\
-  \code{dayan_kernel_resource_desc_t} & dycc/Runtime 消费的版本化常量描述：最大子 Proc 数、Atomic Cache 字节数及 URAM 字节数。 \\
+  \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} & single-Core Task 需要独占一个 Hart 的资源 flag。 \\
+  \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} & 当前允许的 kernel resource flags 掩码。 \\
+  \code{dayan_kernel_resource_desc_t} & dycc/Runtime 消费的 32-B 版本化常量描述：最大子 Proc 数、Core 共驻数、flags、Atomic Cache 字节数及 URAM 字节数。 \\
   \code{dayan_proc_entry_t} & 子 Proc 入口类型 \code{void (*)(void *)}。 \\
   \code{dayan_cluster_barrier_t} & 四 Core barrier 的 16-B、零初始化 shared storage。 \\
   \code{dayan_resource_state} & \code{DAYAN_RESOURCE_FREE}、\code{DAYAN_RESOURCE_BUSY}、\code{DAYAN_RESOURCE_READY} 三态资源状态机。 \\
@@ -49,7 +51,9 @@ dapi 是 kernel 和 Device 子 Proc 可直接调用的稳定接口。公开面�
 
 Kernel 使用 \code{DAYAN_KERNEL_DESC}（见 Runtime 章节）生成一个
 \code{dayan_kernel_resource_desc_t} 常量。Atomic Cache/URAM 数量在 Host launch 前一次性
-分配，子 Proc slot 在 root Proc 建立时一次性预留。
+分配，子 Proc slot 在 root Proc 建立时一次性预留。会修改未做上下文保存/恢复的 Hart
+配置寄存器的 single-Core kernel 必须使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}；这不会
+把真实的 child Proc 上限改成 15。
 
 \subsection{Proc 生命周期}
 
@@ -93,6 +97,17 @@ logical task API 不暴露物理 Cluster/Core 编号。四 Core mode 下 Runtime
 
 这些函数替代 kernel 内手写 barrier 宏。它们只保证当前执行单元此前工作的完成顺序；
 Core 间发布/消费关系应使用 shared resource 或 Cluster barrier 表达。
+
+\subsection{Cache 维护}
+
+\begin{dayantable}{Cache 维护 dapi}{tab:api-dapi-cache}{X[39,l] X[61,l]}
+  API & 行为 \\
+  \code{dayan_cache_invalidate} & 失效与给定地址区间相交的每条 D-cache line；size 为零时不执行操作。 \\
+  \code{dayan_cache_flush} & 将与给定地址区间相交的每条 D-cache line 写回；size 为零时不执行操作。 \\
+\end{dayantable}
+
+这两个接口不等待 LSU/MAT 等执行单元，也不提供 Hart 间同步。调用者仍需通过 resource、
+barrier 或其它协议建立数据所有权和发布/消费顺序。
 
 \subsection{单 Hart 资源}
 

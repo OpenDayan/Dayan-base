@@ -29,6 +29,10 @@ enum rpc_service {
 };
 
 #define RPC_COMMAND_ARG_MASK 0x0000ffffffffffffULL
+#define RPC_DESCRIPTOR_GRANULE 64U
+
+_Static_assert((RPC_DESCRIPTOR_GRANULE & (RPC_DESCRIPTOR_GRANULE - 1U)) == 0,
+               "RPC descriptor granule must be a power of two");
 
 static inline uint64_t rpc_command_pack(uint16_t opcode, uint64_t arg)
 {
@@ -45,7 +49,7 @@ static inline uint64_t rpc_command_arg(uint64_t command)
     return command & RPC_COMMAND_ARG_MASK;
 }
 
-/* Descriptor addressed by the 48-bit command argument for Device requests. */
+/* Stored in a private 64-byte slot addressed by a Device request command. */
 struct rpc_packet {
     uint64_t request_addr;
     uint64_t request_size;
@@ -296,7 +300,7 @@ static inline uint8_t rpc_profile_record_state(uint64_t value)
     return (uint8_t)(value >> RPC_PROFILE_STATE_SHIFT);
 }
 
-/* Host-owned descriptor used by RPC_PROFILE_CONFIG. */
+/* Host-owned descriptor used by RPC_PROFILE_CONFIG; BL1 cleans final fields. */
 struct rpc_profile_config {
     uint32_t version;
     uint32_t size;

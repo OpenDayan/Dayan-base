@@ -50,8 +50,10 @@ WRITE、CLEAR、HEAP ACQUIRE、HEAP RELEASE、PROC EXIT 和 PROFILE FLUSH 的 co
   32 & \code{status} & \code{int64_t} & Host 写回的结果，负值表示失败。 \\
 \end{dayantable}
 
-Host 先校验 packet 地址、对齐、固定长度和其中的 Device 地址范围。处理完成后先写响应，
-最后写 \code{status}；清除 outbound doorbell 后不得再修改这些区域。
+packet、request 与 response 分别从独占的 64-byte 对齐 slot 开始，结构的 wire 长度仍按
+表中定义。Host 校验三个地址的 64-byte 对齐、固定长度和 Device 地址范围。处理完成后
+先写 response，最后写 packet 的 \code{status}；清除 outbound doorbell 后不得再修改
+这些区域。Device 随后 invalidate Host 写过的 slot，再把 response 复制回调用者对象。
 
 \subsection{输出服务}
 
@@ -165,5 +167,10 @@ command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返�
 \code{RPC_PROC_CREATE} 本身不再执行 \code{fence.i}。create 描述符的请求字段由 Host
 保持不变，因此 Device invalidate 后直接通过 \code{request->field} 校验和初始化；只有
 result 字段与 state 由 Device 更新。
+
+所有 Host-owned 标量控制 descriptor 从 64-byte 对齐地址开始，allocation 大小也按
+64-byte 向上取整，但 wire \code{size} 仍为结构体实际长度。Device 在解析前 invalidate，
+请求字段保持只读；必须写入的结果和 state 在响应或 Proc family 终态完成，并在通知 Host
+前 clean。Host 确认响应或终态后才能释放 descriptor。
 
 \end{document}

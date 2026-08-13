@@ -518,6 +518,7 @@ private:
     struct KernelResources {
         uint32_t max_child_procs = 0;
         uint32_t max_tasks_per_core = 0;
+        uint32_t flags = 0;
         uint64_t atomic_cache_size = 0;
         uint64_t uram_size = 0;
     };
@@ -792,7 +793,7 @@ private:
         const auto *list = initializer ?
             llvm::dyn_cast<clang::InitListExpr>(
                 initializer->IgnoreParenImpCasts()) : nullptr;
-        uint64_t fields[6];
+        uint64_t fields[7];
         unsigned index;
 
         if (!decl->getType().isConstQualified() ||
@@ -805,29 +806,33 @@ private:
         }
         if (list && list->isSyntacticForm())
             list = list->getSemanticForm();
-        if (!list || list->getNumInits() != 6) {
-            diagnose(decl, "kernel resource descriptor requires six "
+        if (!list || list->getNumInits() != 7) {
+            diagnose(decl, "kernel resource descriptor requires seven "
                            "constant fields");
             return false;
         }
-        for (index = 0; index < 6; ++index) {
+        for (index = 0; index < 7; ++index) {
             if (!constant_uint64(list->getInit(index), fields[index])) {
                 diagnose(decl, "kernel resource descriptor fields must be "
                                "non-negative integer constants");
                 return false;
             }
         }
-        if (fields[0] != 1U || fields[1] != 32U || fields[2] > 15U ||
-            fields[3] > 4U || (fields[5] & 1023U)) {
-            diagnose(decl, "invalid kernel resources: expected version=1, "
-                           "size=32, child_procs<=15, tasks_per_core<=4 and "
+        if (fields[0] != 2U || fields[1] != 32U || fields[2] > 15U ||
+            fields[3] > 4U || (fields[4] & ~UINT64_C(1)) ||
+            ((fields[4] & UINT64_C(1)) && fields[3] > 1U) ||
+            (fields[6] & 1023U)) {
+            diagnose(decl, "invalid kernel resources: expected version=2, "
+                           "size=32, child_procs<=15, tasks_per_core<=4, "
+                           "known flags, locked_task tasks_per_core<=1 and "
                            "1 KiB-aligned URAM size");
             return false;
         }
         resources.max_child_procs = static_cast<uint32_t>(fields[2]);
         resources.max_tasks_per_core = static_cast<uint32_t>(fields[3]);
-        resources.atomic_cache_size = fields[4];
-        resources.uram_size = fields[5];
+        resources.flags = static_cast<uint32_t>(fields[4]);
+        resources.atomic_cache_size = fields[5];
+        resources.uram_size = fields[6];
         return true;
     }
 
@@ -867,8 +872,10 @@ private:
             }
             if (!found) {
                 diagnose(const_cast<FunctionDecl *>(kernel),
-                         "__kernel__ requires DAYAN_KERNEL_DESC(" + name +
-                             ", child_procs, atomic_bytes, uram_bytes)");
+                         "__kernel__ requires a resource descriptor for '" +
+                             name + "': DAYAN_KERNEL_DESC, "
+                             "DAYAN_KERNEL_TASK_DESC, or "
+                             "DAYAN_KERNEL_LOCKED_TASK_DESC");
                 continue;
             }
             if (annotation_side(found) != Side::Device) {
@@ -920,7 +927,8 @@ private:
             << "        DAYAN_KERNEL_RESOURCE_DESC_VERSION, "
                "sizeof(::dayan_kernel_resource_desc_t), "
             << resources.max_child_procs << "U, "
-            << resources.max_tasks_per_core << "U, UINT64_C("
+            << resources.max_tasks_per_core << "U, "
+            << resources.flags << "U, UINT64_C("
             << resources.atomic_cache_size << "), UINT64_C("
             << resources.uram_size << ")\n"
             << "    };\n";

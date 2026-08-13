@@ -44,6 +44,7 @@ struct server_core_slot {
     npu_hal_core_t target;
     uint32_t enabled;
     uint32_t active_tasks;
+    uint32_t locked_task;
     uint64_t resident_memory;
     uint32_t reserved_procs;
     uint64_t atomic_cache_memory;
