@@ -18,7 +18,24 @@
 #include <rvt_intrinsics.h>
 #endif
 
-namespace BaseNPUInstBuilder {
+/*
+ * Raw Dayan LSU, MAT, VEC, and MACRO instruction builders. Group and TCSR
+ * identifiers are template arguments because they are immediate fields.
+ */
+ namespace BaseNPUInstBuilder {
+
+constexpr long OPCODE_CUSTOM_32B = 0x0b;
+constexpr long OPCODE_CUSTOM_64B = 0x3f;
+constexpr long TCSR_LSU = 0x01;
+constexpr long TCSR_MAT = 0x02;
+constexpr long TCSR_VEC = 0x03;
+constexpr long TCSR_MACRO = 0x04;
+constexpr long MAT_FUNCT = 0x01;
+constexpr long LSU_FUNCT7 = 0x04;
+
+constexpr long TX_EXT_ELEMENTWISE = 0x00;
+constexpr long TX_EXT_SFU = 0x02;
+constexpr long TX_EXT_REDUCE = 0x03;
 
 constexpr long DT_FP32 = 0x00;
 constexpr long DT_BF16 = 0x02;
@@ -34,6 +51,149 @@ constexpr long DT_U16 = 0x23;
 constexpr long DT_S8 = 0x24;
 constexpr long DT_U8 = 0x25;
 
+constexpr long TX_ELEM_ADD = 0x00;
+constexpr long TX_ELEM_SUB = 0x01;
+constexpr long TX_ELEM_MUL = 0x02;
+constexpr long TX_ELEM_MAX = 0x04;
+constexpr long TX_ELEM_MIN = 0x05;
+
+constexpr long TX_SFU_LOG2 = 0;
+constexpr long TX_SFU_EXP2 = 1;
+constexpr long TX_SFU_SIN = 2;
+constexpr long TX_SFU_COS = 3;
+constexpr long TX_SFU_RSQRT = 4;
+constexpr long TX_SFU_RECIP = 5;
+
+namespace detail {
+
+#define DAYAN_DETAIL_MAP_REGISTER(operand, alias)                         \
+    ".set " alias ",0\n"                                                \
+    ".ifc " operand ",zero\n.set " alias ",0\n.endif\n"              \
+    ".ifc " operand ",ra\n.set " alias ",1\n.endif\n"                \
+    ".ifc " operand ",sp\n.set " alias ",2\n.endif\n"                \
+    ".ifc " operand ",gp\n.set " alias ",3\n.endif\n"                \
+    ".ifc " operand ",tp\n.set " alias ",4\n.endif\n"                \
+    ".ifc " operand ",t0\n.set " alias ",5\n.endif\n"                \
+    ".ifc " operand ",t1\n.set " alias ",6\n.endif\n"                \
+    ".ifc " operand ",t2\n.set " alias ",7\n.endif\n"                \
+    ".ifc " operand ",s0\n.set " alias ",8\n.endif\n"                \
+    ".ifc " operand ",s1\n.set " alias ",9\n.endif\n"                \
+    ".ifc " operand ",a0\n.set " alias ",10\n.endif\n"               \
+    ".ifc " operand ",a1\n.set " alias ",11\n.endif\n"               \
+    ".ifc " operand ",a2\n.set " alias ",12\n.endif\n"               \
+    ".ifc " operand ",a3\n.set " alias ",13\n.endif\n"               \
+    ".ifc " operand ",a4\n.set " alias ",14\n.endif\n"               \
+    ".ifc " operand ",a5\n.set " alias ",15\n.endif\n"               \
+    ".ifc " operand ",a6\n.set " alias ",16\n.endif\n"               \
+    ".ifc " operand ",a7\n.set " alias ",17\n.endif\n"               \
+    ".ifc " operand ",s2\n.set " alias ",18\n.endif\n"               \
+    ".ifc " operand ",s3\n.set " alias ",19\n.endif\n"               \
+    ".ifc " operand ",s4\n.set " alias ",20\n.endif\n"               \
+    ".ifc " operand ",s5\n.set " alias ",21\n.endif\n"               \
+    ".ifc " operand ",s6\n.set " alias ",22\n.endif\n"               \
+    ".ifc " operand ",s7\n.set " alias ",23\n.endif\n"               \
+    ".ifc " operand ",s8\n.set " alias ",24\n.endif\n"               \
+    ".ifc " operand ",s9\n.set " alias ",25\n.endif\n"               \
+    ".ifc " operand ",s10\n.set " alias ",26\n.endif\n"              \
+    ".ifc " operand ",s11\n.set " alias ",27\n.endif\n"              \
+    ".ifc " operand ",t3\n.set " alias ",28\n.endif\n"               \
+    ".ifc " operand ",t4\n.set " alias ",29\n.endif\n"               \
+    ".ifc " operand ",t5\n.set " alias ",30\n.endif\n"               \
+    ".ifc " operand ",t6\n.set " alias ",31\n.endif\n"
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_tcsr_write(long value)
+{
+    asm volatile(
+        DAYAN_DETAIL_MAP_REGISTER("%0", "_DAYAN_R0")
+        ".align 2\n"
+        ".insn 4, %1 | (_DAYAN_R0 << 7)\n"
+        :
+        : "r"(value), "i"(encoding));
+}
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_tcsr_read(long &value)
+{
+    asm volatile(
+        DAYAN_DETAIL_MAP_REGISTER("%0", "_DAYAN_R0")
+        ".align 2\n"
+        ".insn 4, %1 | (_DAYAN_R0 << 7)\n"
+        : "=r"(value)
+        : "i"(encoding));
+}
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_lsu(long destination,
+                                                            long source)
+{
+    asm volatile(
+        DAYAN_DETAIL_MAP_REGISTER("%0", "_DAYAN_R0")
+        DAYAN_DETAIL_MAP_REGISTER("%1", "_DAYAN_R1")
+        ".align 2\n"
+        ".insn 4, %2 | (_DAYAN_R0 << 7) | (_DAYAN_R1 << 15)\n"
+        :
+        : "r"(destination), "r"(source), "i"(encoding));
+}
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_mat(long destination,
+                                                            long left,
+                                                            long right)
+{
+    asm volatile(
+        DAYAN_DETAIL_MAP_REGISTER("%0", "_DAYAN_R0")
+        DAYAN_DETAIL_MAP_REGISTER("%1", "_DAYAN_R1")
+        DAYAN_DETAIL_MAP_REGISTER("%2", "_DAYAN_R2")
+        ".align 2\n"
+        ".insn 4, %3 | (_DAYAN_R0 << 7) | (_DAYAN_R1 << 15) | "
+        "(_DAYAN_R2 << 20)\n"
+        :
+        : "r"(destination), "r"(left), "r"(right), "i"(encoding));
+}
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_void_32()
+{
+    asm volatile(
+        ".align 2\n"
+        ".insn 4, %0\n"
+        :
+        : "i"(encoding));
+}
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_macro_2(long destination,
+                                                                long source)
+{
+    asm volatile(
+        DAYAN_DETAIL_MAP_REGISTER("%0", "_DAYAN_R0")
+        DAYAN_DETAIL_MAP_REGISTER("%1", "_DAYAN_R1")
+        ".align 3\n"
+        ".insn 8, %2 | (_DAYAN_R1 << 7) | (_DAYAN_R0 << 15)\n"
+        :
+        : "r"(source), "r"(destination), "i"(encoding));
+}
+
+template <long encoding>
+__attribute__((always_inline)) static inline void emit_macro_3(long destination,
+                                                                long left,
+                                                                long right)
+{
+    asm volatile(
+        DAYAN_DETAIL_MAP_REGISTER("%0", "_DAYAN_R0")
+        DAYAN_DETAIL_MAP_REGISTER("%1", "_DAYAN_R1")
+        DAYAN_DETAIL_MAP_REGISTER("%2", "_DAYAN_R2")
+        ".align 3\n"
+        ".insn 8, %3 | (_DAYAN_R2 << 7) | (_DAYAN_R0 << 15) | "
+        "(_DAYAN_R1 << 20)\n"
+        :
+        : "r"(left), "r"(right), "r"(destination), "i"(encoding));
+}
+
+#undef DAYAN_DETAIL_MAP_REGISTER
+
+} // namespace detail
 } // namespace BaseNPUInstBuilder
 
 enum LSU_TCSR {
