@@ -58,6 +58,14 @@ CPPFLAGS := -Iinclude/api -Iinclude -Ilib/include \
             -DCONFIG_URAM_BASE=$(URAM_BASE) \
             -DCONFIG_URAM_SIZE=$(URAM_SIZE) \
             -DCONFIG_URAM_STRIDE=$(URAM_STRIDE)
+# Clang RVT builtins require the TX extensions and the compiler resource dir.
+RVT_ISA_FLAGS := -Xclang -target-feature -Xclang +txlsu \
+                 -Xclang -target-feature -Xclang +txmat \
+                 -Xclang -target-feature -Xclang +txvec \
+                 -Xclang -target-feature -Xclang +txbase \
+                 -Xclang -target-feature -Xclang +txmacro \
+                 -Wno-ignored-attributes
+
 CFLAGS := --target=riscv64-unknown-elf -march=$(ARCH) -mabi=$(ABI) \
           -mcmodel=medany -mno-relax -msmall-data-limit=0 \
           -O2 -g -std=c11 \
@@ -139,7 +147,8 @@ $(API_CXX_COMPILE_TEST): tests/api_compile.c $(wildcard include/api/*.h) \
 		$(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
 	$(CLANGXX) -Iinclude/api $(filter-out -std=c11,$(CFLAGS)) \
-		-std=c++17 -fno-exceptions -fno-rtti -x c++ -c $< -o $@
+		$(RVT_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti \
+		-x c++ -c $< -o $@
 
 $(CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)

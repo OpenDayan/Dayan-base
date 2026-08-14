@@ -42,7 +42,9 @@ dycc operator.cpp main.o support.a -L/path/to/lib -lfoo -o app
 
 默认 Device ABI 固定为 `riscv64-unknown-elf`、
 `rv64imaf_zicsr_zifencei`、`lp64`、`medany`、`-mno-relax` 和
-`-msmall-data-limit=0`。源码树中的 Device 公开头文件目录为 `device/include/api`，
+`-msmall-data-limit=0`，并启用 `txlsu`/`txmat`/`txvec`/`txbase`/`txmacro`，
+以便使用 Clang `<rvt_intrinsics.h>` 中的 `__builtin_riscv_tx_*`。Device 编译会查询
+`clang++ -print-resource-dir` 以找到该头文件。源码树中的 Device 公开头文件目录为 `device/include/api`，
 安装后的 SDK 目录为 `include/api`；Host 公开头文件目录为 `host/include`。dycc 会把
 对应目录作为 system include path 加入。可用 `DYCC_DEVICE_CXX`、
 `DYCC_HOST_CXX` 或 `--device-cxx`、`--host-cxx` 选择 Clang；`-Xdevice` 和 `-Xhost`

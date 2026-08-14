@@ -1243,6 +1243,59 @@ private:
     std::string input_name_;
 };
 
+static std::optional<std::string> find_program(const fs::path &program);
+
+static std::vector<std::string> dayan_device_target_args()
+{
+    return {
+        "--target=riscv64-unknown-elf",
+        "-march=rv64imaf_zicsr_zifencei",
+        "-mabi=lp64",
+        "-Xclang", "-target-feature", "-Xclang", "+txlsu",
+        "-Xclang", "-target-feature", "-Xclang", "+txmat",
+        "-Xclang", "-target-feature", "-Xclang", "+txvec",
+        "-Xclang", "-target-feature", "-Xclang", "+txbase",
+        "-Xclang", "-target-feature", "-Xclang", "+txmacro",
+        "-Wno-ignored-attributes",
+    };
+}
+
+static std::optional<std::string>
+clang_resource_dir(const fs::path &clangxx)
+{
+    auto executable = find_program(clangxx);
+    if (!executable)
+        return std::nullopt;
+
+    llvm::SmallString<256> output_path;
+    if (llvm::sys::fs::createTemporaryFile("dycc-res", "txt", output_path))
+        return std::nullopt;
+
+    std::string output_file = std::string(output_path.str());
+    std::string error;
+    bool execution_failed = false;
+    const llvm::StringRef args[] = {*executable, "-print-resource-dir"};
+    const std::optional<llvm::StringRef> redirects[] = {
+        std::nullopt, llvm::StringRef(output_file), std::nullopt};
+    int status = llvm::sys::ExecuteAndWait(
+        *executable, args, std::nullopt, redirects, 0, 0, &error,
+        &execution_failed);
+    if (execution_failed || status != 0) {
+        llvm::sys::fs::remove(output_file);
+        return std::nullopt;
+    }
+
+    std::ifstream stream(output_file);
+    std::string line;
+    std::getline(stream, line);
+    llvm::sys::fs::remove(output_file);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+        line.pop_back();
+    if (line.empty())
+        return std::nullopt;
+    return line;
+}
+
 static bool split_source(const Options &options, SplitOutput &output)
 {
     std::error_code error;
@@ -1254,12 +1307,21 @@ static bool split_source(const Options &options, SplitOutput &output)
     }
     std::vector<std::string> arguments = {
         "-x", "c++", "-std=c++17", "-fsyntax-only",
-        "--target=riscv64-unknown-elf", "-march=rv64imaf_zicsr_zifencei",
-        "-mabi=lp64", "-D__DAYAN_DEVICE__=1", "-include",
+    };
+    {
+        auto target = dayan_device_target_args();
+        arguments.insert(arguments.end(), target.begin(), target.end());
+    }
+    arguments.insert(arguments.end(), {
+        "-D__DAYAN_DEVICE__=1", "-include",
         (options.root / "host/dycc/include/dayan_compiler.h").string(),
         "-isystem", device_api_include(options.root).string(),
         "-isystem", (options.root / "host/include").string(),
-    };
+    });
+    if (auto resource_dir = clang_resource_dir(options.device_cxx)) {
+        arguments.insert(arguments.end(),
+                         {"-resource-dir", *resource_dir});
+    }
     arguments.insert(arguments.end(), options.common_args.begin(),
                      options.common_args.end());
     arguments.insert(arguments.end(), options.device_args.begin(),
@@ -1432,8 +1494,14 @@ static std::vector<std::string> device_compile_args(
     const Options &options, const fs::path &source, const fs::path &object)
 {
     std::vector<std::string> args = {
-        "-x", "c++", "-std=c++17", "--target=riscv64-unknown-elf",
-        "-march=rv64imaf_zicsr_zifencei", "-mabi=lp64", "-mcmodel=medany",
+        "-x", "c++", "-std=c++17",
+    };
+    {
+        auto target = dayan_device_target_args();
+        args.insert(args.end(), target.begin(), target.end());
+    }
+    args.insert(args.end(), {
+        "-mcmodel=medany",
         "-mno-relax", "-msmall-data-limit=0", "-ffreestanding",
         "-fno-builtin", "-fno-common", "-fno-pic", "-fno-pie",
         "-fno-stack-protector", "-fno-unwind-tables",
@@ -1445,7 +1513,10 @@ static std::vector<std::string> device_compile_args(
         "-D__kernel__=__attribute__((used,visibility(\"default\")))",
         "-isystem", device_api_include(options.root).string(),
         "-isystem", (options.root / "host/include").string(),
-    };
+    });
+    if (auto resource_dir = clang_resource_dir(options.device_cxx)) {
+        args.insert(args.end(), {"-resource-dir", *resource_dir});
+    }
     args.insert(args.end(), options.common_args.begin(), options.common_args.end());
     args.insert(args.end(), options.device_args.begin(), options.device_args.end());
     args.insert(args.end(), {"-c", source.string(), "-o", object.string()});

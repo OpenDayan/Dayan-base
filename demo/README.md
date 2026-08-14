@@ -31,9 +31,10 @@ make -C demo
 产物为 `build/demo/print_demo`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
-`build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令、LSU TCSR 和 MAT TCSR
-定义由本仓库 `device/include/api/dayan_intrinsics.h` 提供；dycc 自动加入该公开 API
-目录，构建 demo 不需要额外的源码仓库或 include 参数。
+`build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
+`<rvt_intrinsics.h>`（`__builtin_riscv_tx_*`）提供；`dayan_intrinsics.h` 包含该头文件，
+并保留 LSU/MAT TCSR 编号和 `set_lsu_matrix` 等 Dayan 辅助接口。dycc 会启用 TX
+扩展并把 Clang resource dir 加入 Device 编译，构建 demo 不需要 npu-kernels。
 
 两个 Host 程序默认连接
 `/tmp/dayan-server.sock`，也可以通过环境变量覆盖：

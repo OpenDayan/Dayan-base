@@ -48,6 +48,8 @@ static void compile_intrinsics(long destination, long left, long right)
     __tx_vec_lsu_v2u<0, 0>(destination);
     __tx_vec_lsu_v2u_mask<1, 1, 0>(destination);
     __tx_vec_shuffle_xor<0, 0>(1);
+    __tx_vec_shuffle_ror<0, 0>(1);
+    __tx_vec_shuffle_broadcast<1, 1>(1);
     __tx_vec_shuffle_compress<1, 1>(1);
     __tx_vec_vv_fp32_add<0, 0, 0, 0>();
     __tx_vec_vv_fp32_sub<0, 0, 0, 0>();
@@ -57,32 +59,29 @@ static void compile_intrinsics(long destination, long left, long right)
     __tx_vec_vv_fp32_cmp<0, 0, 0, 0>();
     __tx_vec_v_fp32_sfu<0, 0, 0>();
     __tx_vec_cvt_fp32_int32<0, 0, 0>();
+    __tx_vec_cvt_s32_fp32<0, 0, 0>();
     __tx_vec_cvt_fp32_fp16<0, 0, 0>();
     __tx_vec_cvt_fp32_bf16<0, 0, 0>();
     __tx_vec_cvt_fp16_fp32<0, 0, 0>();
     __tx_vec_cvt_bf16_fp32<0, 0, 0>();
+    __tx_vec_cvt_mxfp8_bf16<0, 0, 0>();
+    __tx_vec_cvt_mxfp4_bf16<0, 0, 0>();
     __tx_vec_s_int32_add<0, 0, 0>();
-    __tx_vec_s_bitwise<0, 0, 0, 0, 0>();
+    __tx_vec_s_bitwise<0, 0, 0, 0>();
     __tx_macro_tcsr_write<0>(0);
-    __tx_macro_elemwise_add_fp32<0, 0>((void *)destination, (void *)left,
-                                             (void *)right);
-    __tx_macro_elemwise_sub_fp32<0, 0>((void *)destination, (void *)left,
-                                             (void *)right);
-    __tx_macro_elemwise_mul_fp32<0, 0>((void *)destination, (void *)left,
-                                             (void *)right);
-    __tx_macro_elemwise_max_fp32<0, 0>((void *)destination, (void *)left,
-                                             (void *)right);
-    __tx_macro_elemwise_min_fp32<0, 0>((void *)destination, (void *)left,
-                                             (void *)right);
-    __tx_macro_reduce_max_fp32<0, 0>((void *)destination, (void *)left,
-                                           (void *)right);
-    __tx_macro_reduce_add_fp32<0>((void *)destination, (void *)left);
-    __tx_macro_sfu_log2_fp32<0>((void *)destination, (void *)left);
-    __tx_macro_sfu_exp2_fp32<0>((void *)destination, (void *)left);
-    __tx_macro_sfu_sin_fp32<0>((void *)destination, (void *)left);
-    __tx_macro_sfu_cos_fp32<0>((void *)destination, (void *)left);
-    __tx_macro_sfu_rsqrt_fp32<0>((void *)destination, (void *)left);
-    __tx_macro_sfu_recip_fp32<0>((void *)destination, (void *)left);
+    __tx_macro_elemwise_add_fp32<0, 0>(destination, left, right);
+    __tx_macro_elemwise_sub_fp32<0, 0>(destination, left, right);
+    __tx_macro_elemwise_mul_fp32<0, 0>(destination, left, right);
+    __tx_macro_elemwise_max_fp32<0, 0>(destination, left, right);
+    __tx_macro_elemwise_min_fp32<0, 0>(destination, left, right);
+    __tx_macro_reduce_max_fp32<0, 0>(destination, left, right);
+    __tx_macro_reduce_add_fp32<0>(destination, left);
+    __tx_macro_sfu_log2_fp32<0>(destination, left);
+    __tx_macro_sfu_exp2_fp32<0>(destination, left);
+    __tx_macro_sfu_sin_fp32<0>(destination, left);
+    __tx_macro_sfu_cos_fp32<0>(destination, left);
+    __tx_macro_sfu_rsqrt_fp32<0>(destination, left);
+    __tx_macro_sfu_recip_fp32<0>(destination, left);
     (void)checksum;
     (void)value;
 }
