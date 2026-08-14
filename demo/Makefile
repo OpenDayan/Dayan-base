@@ -9,6 +9,8 @@ MATMUL_BROADCAST_SLICES ?= 4
 DEVICE_ISA_CHECK := ./check_device_isa.sh
 
 PRINT_TARGET := $(BUILD)/print_demo
+CACHE_SEMANTICS_TARGET := $(BUILD)/cache_semantics
+TASK_GRID_PROBE_TARGET := $(BUILD)/task_grid_probe
 LSU_BANDWIDTH_TARGET := $(BUILD)/lsu_bandwidth
 SCHEDULER_BENCH_TARGET := $(BUILD)/scheduler_yield_bench
 SHARED_NOTIFY_TARGET := $(BUILD)/shared_notify_latency
@@ -16,13 +18,16 @@ MATMUL_1C_TARGET := $(BUILD)/matmul_bf16_1c
 MATMUL_4C_TARGET := $(BUILD)/matmul_bf16_4c
 MATMUL_4C_BROADCAST_TARGET := $(BUILD)/matmul_bf16_broadcast_4c
 PRINT_TEMPS := $(BUILD)/print_demo-temps
+CACHE_SEMANTICS_TEMPS := $(BUILD)/cache_semantics-temps
+TASK_GRID_PROBE_TEMPS := $(BUILD)/task_grid_probe-temps
 LSU_BANDWIDTH_TEMPS := $(BUILD)/lsu_bandwidth-temps
 SCHEDULER_BENCH_TEMPS := $(BUILD)/scheduler_yield_bench-temps
 SHARED_NOTIFY_TEMPS := $(BUILD)/shared_notify_latency-temps
 MATMUL_1C_TEMPS := $(BUILD)/matmul_bf16_1c-temps
 MATMUL_4C_TEMPS := $(BUILD)/matmul_bf16_4c-temps
 MATMUL_4C_BROADCAST_TEMPS := $(BUILD)/matmul_bf16_broadcast_4c-temps
-TARGETS := $(PRINT_TARGET) $(LSU_BANDWIDTH_TARGET) \
+TARGETS := $(PRINT_TARGET) $(CACHE_SEMANTICS_TARGET) $(TASK_GRID_PROBE_TARGET) $(TENSOR_ADDRESS_PROBE_TARGET) \
+	$(LSU_BANDWIDTH_TARGET) \
 	$(SCHEDULER_BENCH_TARGET) $(SHARED_NOTIFY_TARGET) \
 	$(MATMUL_1C_TARGET) $(MATMUL_4C_TARGET) \
 	$(MATMUL_4C_BROADCAST_TARGET)
@@ -40,6 +45,22 @@ $(PRINT_TARGET): print_demo.cpp $(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 	@mkdir -p $(dir $@)
 	$(DYCC) --save-temps=$(PRINT_TEMPS) -O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) $(PRINT_TEMPS)/print_demo.cpp.dycc.device.o
+
+$(CACHE_SEMANTICS_TARGET): cache_semantics.cpp $(DAYAN_API_HEADERS) \
+		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(CACHE_SEMANTICS_TEMPS) \
+		-O2 -Wall -Wextra -Werror $< -o $@
+	bash $(DEVICE_ISA_CHECK) \
+		$(CACHE_SEMANTICS_TEMPS)/cache_semantics.cpp.dycc.device.o
+
+$(TASK_GRID_PROBE_TARGET): task_grid_probe.cpp $(DAYAN_API_HEADERS) \
+		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(TASK_GRID_PROBE_TEMPS) \
+		-O2 -Wall -Wextra -Werror $< -o $@
+	bash $(DEVICE_ISA_CHECK) \
+		$(TASK_GRID_PROBE_TEMPS)/task_grid_probe.cpp.dycc.device.o
 
 $(LSU_BANDWIDTH_TARGET): lsu_bandwidth.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
@@ -97,6 +118,9 @@ $(MATMUL_4C_BROADCAST_TARGET): matmul_bf16_broadcast_4c.cpp \
 
 check: all
 	$(PRINT_TARGET) --help >/dev/null
+	$(CACHE_SEMANTICS_TARGET) --help >/dev/null
+	$(TASK_GRID_PROBE_TARGET) --help >/dev/null
+	$(TENSOR_ADDRESS_PROBE_TARGET) --help >/dev/null
 	$(LSU_BANDWIDTH_TARGET) --help >/dev/null
 	$(SCHEDULER_BENCH_TARGET) --help >/dev/null
 	$(SHARED_NOTIFY_TARGET) --help >/dev/null

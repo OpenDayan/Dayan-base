@@ -88,14 +88,24 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
     return shared_valid && uram_valid;
 }
 
+static void proc_request_publish_state(
+    struct rpc_proc_create_request *request, uint32_t state)
+{
+    platform_cache_flush((unsigned char *)request +
+                         offsetof(struct rpc_proc_create_request, status),
+                         CONFIG_CACHE_LINE_SIZE);
+    request->state = state;
+    platform_cache_flush(request, CONFIG_CACHE_LINE_SIZE);
+}
+
 static void managed_proc_cleanup(struct proc *proc, void *arg)
 {
     struct rpc_proc_create_request *request = arg;
     int64_t status = proc->exit_status;
 
     request->status = status;
-    request->state = status < 0 ? RPC_PROC_FAILED : RPC_PROC_EXITED;
-    platform_cache_clean(request, sizeof(*request));
+    proc_request_publish_state(
+        request, status < 0 ? RPC_PROC_FAILED : RPC_PROC_EXITED);
 }
 
 static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
@@ -103,6 +113,8 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     struct rpc_proc_create_request *request;
     struct proc *proc = 0;
     struct proc_family *family = 0;
+    uintptr_t args[RPC_PROC_MAX_ARGS];
+    size_t index;
     int status = -EINVAL;
 
     *response_command = rpc_command_pack(RPC_PROC_CREATE_RESPONSE, arg);
@@ -113,6 +125,8 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     platform_cache_invalidate(request, sizeof(*request));
     if (!proc_request_valid(request))
         goto complete;
+    for (index = 0; index < request->argc; ++index)
+        args[index] = ((const volatile uint64_t *)request->args)[index];
 
     status = proc_slot_acquire((size_t)request->stack_size,
                                (size_t)request->printf_buffer_size, &proc);
@@ -128,7 +142,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     status = proc_slot_init_args(proc, request->name,
                                  (proc_fn)(uintptr_t)request->entry,
                                  (void *)(uintptr_t)request->shared_base,
-                                 request->argc, request->args);
+                                 request->argc, args);
     if (status < 0)
         goto complete;
     status = proc_set_resources(proc, family,
@@ -150,8 +164,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     request->status = 0;
     request->proc_id = proc->thread.id;
     request->hart_id = (uint32_t)platform_hart_id();
-    request->state = RPC_PROC_RUNNING;
-    platform_cache_clean(request, sizeof(*request));
+    proc_request_publish_state(request, RPC_PROC_RUNNING);
     return 1;
 
 complete:
@@ -162,8 +175,7 @@ complete:
     request->status = status;
     request->proc_id = 0;
     request->hart_id = (uint32_t)platform_hart_id();
-    request->state = RPC_PROC_FAILED;
-    platform_cache_clean(request, sizeof(*request));
+    proc_request_publish_state(request, RPC_PROC_FAILED);
     return 1;
 }
 
@@ -195,7 +207,7 @@ static int rpc_dcache_flush(uint64_t arg, uint64_t *response_command)
     }
     request->hart_id = (uint32_t)platform_hart_id();
     request->status = status;
-    platform_cache_clean(request, sizeof(*request));
+    platform_cache_flush(request, sizeof(*request));
     return 1;
 }
 
@@ -215,7 +227,7 @@ static int rpc_proc_ps(uint64_t arg, uint64_t *response_command)
         snapshot->count = 0;
         snapshot->status = status;
     }
-    platform_cache_clean(snapshot, sizeof(*snapshot));
+    platform_cache_flush(snapshot, sizeof(*snapshot));
     return 1;
 }
 
@@ -238,7 +250,7 @@ static int rpc_proc_kill_all(uint64_t arg, uint64_t *response_command)
         result->released_slots = 0;
         result->waiting_produce = 0;
     }
-    platform_cache_clean(result, sizeof(*result));
+    platform_cache_flush(result, sizeof(*result));
     return 1;
 }
 
@@ -257,7 +269,7 @@ static int rpc_profile_config(uint64_t arg, uint64_t *response_command)
         config->hart_id = (uint32_t)platform_hart_id();
         config->status = status;
     }
-    platform_cache_clean(config, sizeof(*config));
+    platform_cache_flush(config, sizeof(*config));
     return 1;
 }
 

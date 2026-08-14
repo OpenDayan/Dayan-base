@@ -1010,8 +1010,6 @@ static void kill_complete_root(struct proc_family *family)
     if (!root)
         platform_halt();
     kill_flush_output(root);
-    (void)rpc_proc_exit(root->thread.id, 0, -ECANCELED, root->cookie,
-                        RPC_PROC_EXIT_ROOT);
     cleanup = root->cleanup;
     cleanup_arg = root->cleanup_arg;
     root->cleanup = 0;
@@ -1019,6 +1017,8 @@ static void kill_complete_root(struct proc_family *family)
     if (!cleanup)
         platform_halt();
     cleanup(root, cleanup_arg);
+    (void)rpc_proc_exit(root->thread.id, 0, -ECANCELED, root->cookie,
+                        RPC_PROC_EXIT_ROOT);
 }
 
 static void kill_release_ready_slots(struct proc_family *family,
@@ -1262,6 +1262,17 @@ void proc_yield(void)
     switch_to_next_or_scheduler(proc);
 }
 
+static void proc_run_cleanup(struct proc *proc)
+{
+    proc_cleanup_fn cleanup = proc->cleanup;
+    void *cleanup_arg = proc->cleanup_arg;
+
+    proc->cleanup = 0;
+    proc->cleanup_arg = 0;
+    if (cleanup)
+        cleanup(proc, cleanup_arg);
+}
+
 _Noreturn void proc_exit_status(int64_t status)
 {
     struct proc *proc = proc_self();
@@ -1276,9 +1287,11 @@ _Noreturn void proc_exit_status(int64_t status)
             (void)rpc_write(proc->printf_buffer, proc->printf_size);
         proc->printf_size = 0;
         (void)rpc_clear();
-        if (!proc->parent && proc->family)
+        if (!proc->parent && proc->family) {
+            proc_run_cleanup(proc);
             (void)rpc_proc_exit(proc->thread.id, 0, proc->exit_status,
                                 proc->cookie, RPC_PROC_EXIT_ROOT);
+        }
         proc_state_set(proc, THREAD_WAIT_EXIT);
         proc->thread.cpu->sche.active_dirty = 1;
         switch_to_scheduler(&proc->thread);
@@ -1294,14 +1307,10 @@ _Noreturn void proc_exit(void)
 __attribute__((cold, noinline))
 static void scheduler_cleanup_proc(struct proc *proc)
 {
-    proc_cleanup_fn cleanup = proc->cleanup;
-    void *cleanup_arg = proc->cleanup_arg;
     struct proc_family *family = proc->family;
     int root = !proc->parent && family;
 
-    proc->cleanup = 0;
-    proc->cleanup_arg = 0;
-    cleanup(proc, cleanup_arg);
+    proc_run_cleanup(proc);
     if (root) {
         proc_family_destroy(family);
         proc_slot_release(proc);
@@ -1338,7 +1347,7 @@ static inline void scheduler_finish_active_batch(struct sche_state *sche)
             break;
         case THREAD_WAIT_EXIT:
             list_del_init(node);
-            if (proc->cleanup)
+            if (proc->cleanup || (!proc->parent && proc->family))
                 scheduler_cleanup_proc(proc);
             break;
         default:

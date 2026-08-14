@@ -250,15 +250,28 @@ int npu_kernel_launch(npu_stream_t *stream, npu_kernel_t *kernel,
 
     _Static_assert(NPU_PROC_NAME_SIZE == NPU_IPC_PROC_NAME_SIZE,
                    "Runtime and IPC proc name sizes");
+    fprintf(stderr, "DBG-nkl: desc=%p res=%d f=%u argc=%u task='%.16s' tdim=%u,%u,%u tmode=%u cookie=%llu\n",
+            (void *)desc, desc?desc->reserved: 0, desc?desc->flags: 0, desc?desc->arg_count: 0,
+            desc?desc->task_name: "?", desc?desc->config.task_dim.x: 0,
+            desc?desc->config.task_dim.y: 0, desc?desc->config.task_dim.z: 0, desc?desc->config.task_mode: 0,
+            (unsigned long long)(desc?desc->cookie: 0));
     if (!runtime_stream_valid(stream) || !kernel || !kernel->module ||
-        kernel->module->context != stream->context || !event_out)
+        kernel->module->context != stream->context || !event_out) {
+        fprintf(stderr, "DBG-nkl: FAIL head rsv=%d k=%p kmod=%p sctx=%p\n",
+                runtime_stream_valid(stream), (void*)kernel, kernel?(void*)kernel->module:0,
+                stream?(void*)stream->context:0);
         return -EINVAL;
+    }
     *event_out = 0;
     if (!desc || desc->version != NPU_LAUNCH_DESC_VERSION || desc->flags ||
         desc->reserved || desc->arg_count > NPU_KERNEL_MAX_ARGS ||
         !task_name_valid(desc->task_name) ||
-        !launch_config_valid(&desc->config))
+        !launch_config_valid(&desc->config)) {
+        fprintf(stderr, "DBG-nkl: FAIL cfg flags=%u res=%u argc=%u name='%.16s' lcv=%d\n",
+                desc?desc->flags: 0, desc?desc->reserved: 0,
+                desc?desc->arg_count: 0, desc?desc->task_name: "?", desc?launch_config_valid(&desc->config): -1);
         return -EINVAL;
+    }
     event = calloc(1, sizeof(*event));
     if (!event)
         return -ENOMEM;

@@ -178,7 +178,7 @@ static void profile_main(void)
             continue;
         }
         state->flushing = 1;
-        platform_cache_clean(state->buffer, state->count);
+        platform_cache_flush(state->buffer, state->count);
         memset(&request, 0, sizeof(request));
         request.version = RPC_PROFILE_VERSION;
         request.size = sizeof(request);
@@ -247,7 +247,7 @@ static int profile_stop(struct profile_state *state,
         proc_wait_event(&state->flush_done);
     }
     if (state->count)
-        platform_cache_clean(state->buffer, state->count);
+        platform_cache_flush(state->buffer, state->count);
     config->count = state->count;
     state->buffer = 0;
     state->capacity = 0;

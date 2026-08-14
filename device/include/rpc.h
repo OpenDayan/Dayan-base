@@ -153,8 +153,8 @@ enum rpc_proc_state {
 /*
  * Host-owned create descriptor. Host keeps this storage valid and leaves all
  * request fields unchanged until state is EXITED or FAILED. BL1 updates only
- * result fields and state, then cleans the corresponding cache lines before
- * replying or completing the proc.
+ * result fields, flushes their cache line, then publishes state by flushing
+ * its cache line last.
  */
 struct rpc_proc_create_request {
     uint32_t version;

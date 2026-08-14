@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -185,8 +186,10 @@ int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
     pthread_mutex_lock(&descriptor->mutex);
     binding = binding_get(descriptor, attrs->context, &status);
     pthread_mutex_unlock(&descriptor->mutex);
-    if (!binding)
+    if (!binding) {
+        fprintf(stderr, "DBG-dl: binding_get failed status=%d\n", status);
         return status;
+    }
     npu_launch_desc_init(&launch, attrs->task_name);
     launch.config = attrs->config;
     launch.cookie = attrs->cookie;
@@ -195,8 +198,10 @@ int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
         memcpy(launch.args, args, argc * sizeof(*args));
     status = npu_kernel_launch(attrs->stream, binding->kernel, &launch,
                                &event);
-    if (status < 0)
+    if (status < 0) {
+        fprintf(stderr, "DBG-dl: npu_kernel_launch status=%d\n", status);
         return status;
+    }
     if (attrs->flags & NPU_KERNEL_LAUNCH_ASYNC) {
         *attrs->event_out = event;
         return 0;
@@ -204,13 +209,16 @@ int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
     timeout = attrs->timeout_ms ? attrs->timeout_ms :
               attrs->context->runtime->default_timeout_ms;
     status = npu_event_wait(event, timeout, &info);
-    if (status < 0)
+    if (status < 0) {
+        fprintf(stderr, "DBG-dl: npu_event_wait status=%d\n", status);
         return status;
+    }
     status = npu_event_destroy(event);
     if (status < 0)
         return status;
     if (info.status < INT_MIN || info.status > INT_MAX)
         return -EIO;
+    fprintf(stderr, "DBG-dl: device returned status=%ld event_status=%d\n", (long)info.status, (int)status);
     return (int)info.status;
 }
 

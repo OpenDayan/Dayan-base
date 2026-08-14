@@ -225,7 +225,7 @@ static int release_region(struct mem_state *mem,
     prev = region->node.prev;
     next = region->node.next;
     size = block_size(block);
-    platform_cache_clean((void *)region->raw, region->raw_size);
+    platform_data_fence();
     status = rpc_heap_release(region->raw, region->raw_size);
     if (status < 0)
         return 0;

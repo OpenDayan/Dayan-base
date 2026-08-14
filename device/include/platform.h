@@ -8,8 +8,9 @@ void platform_init(void);
 uintptr_t platform_hart_id(void);
 
 void platform_cache_init(void);
-void platform_cache_clean(const void *addr, size_t size);
+void platform_cache_flush(const void *addr, size_t size);
 void platform_cache_invalidate(void *addr, size_t size);
+void platform_data_fence(void);
 void platform_instruction_fence(void);
 
 void platform_rpc_init(void);

@@ -109,6 +109,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--socket", type=Path)
     result.add_argument("--log-dir", type=Path)
     result.add_argument("--startup-timeout", type=float, default=30.0)
+    result.add_argument("--server-timeout-ms", type=int, default=60000)
     result.add_argument(
         "--fuse-settle",
         type=float,
@@ -307,6 +308,8 @@ def main() -> int:
         raise RunnerError("--core-mask must be between 1 and 0xf")
     if arguments.startup_timeout <= 0:
         raise RunnerError("--startup-timeout must be positive")
+    if arguments.server_timeout_ms <= 0:
+        raise RunnerError("--server-timeout-ms must be positive")
     if arguments.fuse_settle < 0:
         raise RunnerError("--fuse-settle cannot be negative")
 
@@ -420,6 +423,8 @@ def main() -> int:
                 str(arguments.cluster_count),
                 "--core-mask",
                 hex(arguments.core_mask),
+                "--timeout-ms",
+                str(arguments.server_timeout_ms),
             ],
             cwd=repo,
             stdout=server_log,

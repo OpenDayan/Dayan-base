@@ -10,5 +10,5 @@ void dayan_cache_invalidate(const void *address, size_t size)
 
 void dayan_cache_flush(const void *address, size_t size)
 {
-    platform_cache_clean(address, size);
+    platform_cache_flush(address, size);
 }

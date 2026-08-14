@@ -272,10 +272,10 @@ long rpc_call(uint32_t service,
         return -EOVERFLOW;
 
     if (request_size)
-        platform_cache_clean(call.request_slot.bytes, request_size);
+        platform_cache_flush(call.request_slot.bytes, request_size);
     if (response_size)
-        platform_cache_clean(call.response_slot.bytes, response_size);
-    platform_cache_clean(packet, sizeof(*packet));
+        platform_cache_flush(call.response_slot.bytes, response_size);
+    platform_cache_flush(packet, sizeof(*packet));
 
     rpc_transaction_init(&call.transaction,
                          rpc_command_pack((uint16_t)service, packet_addr),
@@ -299,7 +299,7 @@ long rpc_write_proc(uint32_t proc_id, const void *data, size_t size)
     request.proc_id = proc_id;
     request.data_addr = (uintptr_t)data;
     request.data_size = size;
-    platform_cache_clean(data, size);
+    platform_cache_flush(data, size);
     return rpc_call(RPC_WRITE, &request, sizeof(request), 0, 0);
 }
 
@@ -412,7 +412,7 @@ int rpc_report_trap(const void *record, size_t size)
     if ((uint64_t)addr & ~RPC_COMMAND_ARG_MASK)
         return -EOVERFLOW;
 
-    platform_cache_clean(&rpc->trap_record, size);
+    platform_cache_flush(&rpc->trap_record, size);
     rpc_transaction_init(&rpc->trap,
                          rpc_command_pack(RPC_TRAP_REPORT, addr),
                          rpc_trap_cleanup, rpc);

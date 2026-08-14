@@ -21,13 +21,12 @@ static int released;
 static int invalid_next;
 static int invalid_outstanding;
 static int rollback_released;
-static int host_cleaned;
 static int host_invalidated;
+static int data_fenced;
 
-void platform_cache_clean(const void *addr, size_t size)
+void platform_data_fence(void)
 {
-    assert(addr == host_region && size == sizeof(host_region));
-    ++host_cleaned;
+    ++data_fenced;
 }
 
 void platform_cache_invalidate(void *addr, size_t size)
@@ -130,8 +129,8 @@ static void growth_test(size_t initial_capacity)
     }
 
     assert(released == 1);
-    assert(host_cleaned == 1);
     assert(host_invalidated == 2);
+    assert(data_fenced == 1);
     assert(mem_capacity() == initial_capacity);
     assert(mem_available() == initial_capacity);
 }
@@ -142,7 +141,8 @@ static void invalid_growth_test(size_t initial_capacity)
     assert(!mem_alloc(REGION_BYTES * 2));
     assert(!invalid_outstanding);
     assert(rollback_released == 1);
-    assert(!host_cleaned && !host_invalidated);
+    assert(!host_invalidated);
+    assert(!data_fenced);
     assert(mem_capacity() == initial_capacity);
     assert(mem_available() == initial_capacity);
 }

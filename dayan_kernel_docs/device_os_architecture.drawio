@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2026-08-13T12:45:00.000Z" agent="Codex" version="30.3.6" type="device" compressed="false">
+  <diagram id="dayan-device-os" name="Dayan Device OS Architecture">
+    <mxGraphModel dx="1920" dy="1080" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1080" math="0" shadow="0" background="#F6F8FB">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="&lt;b&gt;Dayan 设备端协作式操作系统架构&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=30;fontColor=#172033;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="64" y="20" width="940" height="46" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="每个 Hart（硬件线程）独立运行一份小型内核，通过主动让出和事件唤醒完成多 Proc 协作" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#667085;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="66" y="68" width="1020" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="meta" value="设备固件  ·  RV64  ·  4 个 Hart" style="text;html=1;strokeColor=none;fillColor=none;align=right;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=15;fontStyle=1;fontColor=#475467;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="1430" y="34" width="420" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Device OS -->
+        <mxCell id="device-bg" value="" style="rounded=1;arcSize=3;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#AAB8CA;strokeWidth=1.5;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="64" y="112" width="1792" height="620" as="geometry"/>
+        </mxCell>
+        <mxCell id="device-accent" value="" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#0F766E;strokeColor=none;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="64" y="112" width="6" height="620" as="geometry"/>
+        </mxCell>
+        <mxCell id="device-title" value="&lt;b&gt;设备端操作系统 · 每个 Hart 独立内核实例&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=19;fontColor=#134E4A;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="88" y="124" width="500" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="device-scope" value="同构 × 4　·　可变状态、栈、Proc 槽位与私有堆均按 Hart 隔离" style="text;html=1;strokeColor=none;fillColor=none;align=right;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=14;fontColor=#667085;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="126" width="710" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="principle" value="&lt;b&gt;协作式执行&lt;/b&gt;　无时间片 · 无抢占　　&lt;b&gt;切换时机&lt;/b&gt;　主动让出 · 等待 · 汇合 · 退出　　&lt;b&gt;当前 Proc&lt;/b&gt;　tp 始终指向正在运行的 Proc" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#ECFDF3;strokeColor=#ABEFC6;align=center;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#05603A;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="88" y="166" width="1744" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Execution contexts -->
+        <mxCell id="contexts-label" value="&lt;b&gt;Kernel Procs&lt;/b&gt; · 算子 Proc" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#05603A;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="88" y="226" width="424" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="contexts-note" value="&lt;b&gt;System Procs&lt;/b&gt; · 系统 Proc　　&lt;font color=&quot;#667085&quot;&gt;每个 Proc 都有独立栈与保存上下文，统一由协作式调度器管理&lt;/font&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#7A2E0E;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="528" y="226" width="1304" height="28" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="kernel-procs" value="&lt;b&gt;算子 Proc 族&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#344054&quot;&gt;主机创建根 Proc；根 Proc 在同一 Hart 创建、等待并回收子 Proc&lt;br&gt;&lt;br&gt;&lt;b&gt;每个 Proc&lt;/b&gt;　独立栈和打印缓冲区&lt;br&gt;保存线程元数据与 sp / pc / gp / fcsr&lt;br&gt;&lt;font color=&quot;#667085&quot;&gt;同族共享任务坐标、共享内存和 URAM&lt;/font&gt;&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#ECFDF3;strokeColor=#75B798;strokeWidth=1.4;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#05603A;spacingLeft=16;spacingRight=12;" vertex="1" parent="1">
+          <mxGeometry x="88" y="262" width="424" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="rpc-receive" value="&lt;b&gt;rpc-receive&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#B54708&quot;&gt;主机 → 设备端控制入口&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#344054&quot;&gt;轮询邮箱和软件中断状态&lt;br&gt;处理创建、查询、终止、性能采集与缓存管理命令，并向主机回复&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFCF5;strokeColor=#E8B960;strokeWidth=1.3;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#7A2E0E;spacingLeft=16;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="528" y="262" width="424" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="rpc-send" value="&lt;b&gt;rpc-send&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#B54708&quot;&gt;设备端 → 主机发送通道&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#344054&quot;&gt;串行处理发送队列&lt;br&gt;等待门铃可用后写入邮箱并通知主机；完成事务后唤醒等待方&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFCF5;strokeColor=#E8B960;strokeWidth=1.3;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#7A2E0E;spacingLeft=16;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="968" y="262" width="424" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="profile-flush" value="&lt;b&gt;profile-flush&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#B54708&quot;&gt;性能数据异步回传&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#344054&quot;&gt;等待性能记录缓冲区写满&lt;br&gt;清理缓存后回传主机，并根据主机回复继续或停止记录&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFFCF5;strokeColor=#E8B960;strokeWidth=1.3;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#7A2E0E;spacingLeft=16;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="1408" y="262" width="424" height="180" as="geometry"/>
+        </mxCell>
+
+        <!-- Four cooperative states -->
+        <mxCell id="scheduler-label" value="&lt;b&gt;协作式调度状态&lt;/b&gt;　&lt;font color=&quot;#667085&quot;&gt;Proc 主动让出后，调度器检查唤醒条件并选择下一个就绪 Proc&lt;/font&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#134E4A;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="88" y="456" width="1200" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="state-running" value="&lt;b&gt;运行中&lt;/b&gt;　&lt;font color=&quot;#CCFBF1&quot;&gt;当前执行&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#0F766E;strokeColor=#0F766E;align=center;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="88" y="492" width="420" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="state-ready" value="&lt;b&gt;就绪&lt;/b&gt;　&lt;font color=&quot;#475467&quot;&gt;等待调度&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#DCFCE7;strokeColor=#72C992;align=center;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#166534;" vertex="1" parent="1">
+          <mxGeometry x="526" y="492" width="420" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="state-waiting" value="&lt;b&gt;等待&lt;/b&gt;　&lt;font color=&quot;#7A2E0E&quot;&gt;轮询 · 事件 · 执行完成&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FFF4E5;strokeColor=#F6B95F;align=center;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#92400E;" vertex="1" parent="1">
+          <mxGeometry x="964" y="492" width="420" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="state-exit" value="&lt;b&gt;退出&lt;/b&gt;　&lt;font color=&quot;#7F1D1D&quot;&gt;清理并回收&lt;/font&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#FEE2E2;strokeColor=#F2A4A4;align=center;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#991B1B;" vertex="1" parent="1">
+          <mxGeometry x="1402" y="492" width="430" height="58" as="geometry"/>
+        </mxCell>
+
+        <!-- Peer API and internal service layer -->
+        <mxCell id="services-label" value="&lt;b&gt;操作系统接口与内核服务&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#344054;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="88" y="566" width="280" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="services-legend" value="&lt;font color=&quot;#1849A9&quot;&gt;&lt;b&gt;蓝色：公开 API，Kernel Procs 可调用&lt;/b&gt;&lt;/font&gt;　　&lt;font color=&quot;#667085&quot;&gt;&lt;b&gt;灰色：仅供操作系统内部使用，不对 Kernel Procs 开放&lt;/b&gt;&lt;/font&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=right;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#667085;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="730" y="566" width="1102" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="dapi" value="&lt;b&gt;DAPI 与基础库&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#344054&quot;&gt;Proc 管理 · 任务信息&lt;br&gt;执行单元等待 · 资源同步 · 打印 · 动态内存&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#EEF4FF;strokeColor=#6E9EFF;strokeWidth=1.5;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#1849A9;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="88" y="602" width="320" height="94" as="geometry"/>
+        </mxCell>
+        <mxCell id="scheduler-core" value="&lt;b&gt;调度与 Proc 管理&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475467&quot;&gt;就绪 / 等待队列 · 上下文切换&lt;br&gt;Proc 族与槽位生命周期&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#F2F4F7;strokeColor=#B6C2D1;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#344054;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="424" y="602" width="320" height="94" as="geometry"/>
+        </mxCell>
+        <mxCell id="memory-sync" value="&lt;b&gt;内存与同步&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475467&quot;&gt;Hart 私有堆 · 动态扩容&lt;br&gt;事件队列 · 轮询等待 · 子 Proc 汇合&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#F2F4F7;strokeColor=#B6C2D1;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#344054;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="760" y="602" width="320" height="94" as="geometry"/>
+        </mxCell>
+        <mxCell id="rpc-core" value="&lt;b&gt;RPC 内核&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475467&quot;&gt;事务队列 · 等待与唤醒&lt;br&gt;邮箱传输 · 主机服务调用&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#F2F4F7;strokeColor=#B6C2D1;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#344054;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="1096" y="602" width="320" height="94" as="geometry"/>
+        </mxCell>
+        <mxCell id="profile-trap" value="&lt;b&gt;性能采集与异常处理&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475467&quot;&gt;状态记录缓冲区 · 异步回传&lt;br&gt;异常栈 · 上报 · Proc 失败 / 系统停机&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#F2F4F7;strokeColor=#B6C2D1;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#344054;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="1432" y="602" width="400" height="94" as="geometry"/>
+        </mxCell>
+
+        <!-- RPC boundary -->
+        <mxCell id="rpc-band" value="&lt;b&gt;主机 ↔ 设备端 RPC&lt;/b&gt;　　邮箱 + 门铃 / MSIP + 共享描述符　　&lt;font color=&quot;#475467&quot;&gt;双向控制命令与主机服务调用&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#EEF4FF;strokeColor=#84ADFF;strokeWidth=1.4;align=center;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=16;fontColor=#1849A9;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="64" y="754" width="1792" height="56" as="geometry"/>
+        </mxCell>
+
+        <!-- Supporting systems -->
+        <mxCell id="host-bg" value="" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#B8C2CF;strokeWidth=1.3;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="64" y="832" width="872" height="216" as="geometry"/>
+        </mxCell>
+        <mxCell id="host-accent" value="" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#344054;strokeColor=none;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="64" y="832" width="6" height="216" as="geometry"/>
+        </mxCell>
+        <mxCell id="host-title" value="&lt;b&gt;主机支持系统&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=17;fontColor=#344054;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="88" y="844" width="320" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="service" value="&lt;b&gt;dayan_server / 服务层&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475467&quot;&gt;装载 BL1 与设备端操作系统 · 重定位算子&lt;br&gt;逻辑任务放置 · Proc 生命周期与资源分配&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B8C2CF;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#1D2939;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="88" y="886" width="398" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="host-rpc" value="&lt;b&gt;RPC 端点与主机服务&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475467&quot;&gt;&lt;b&gt;下行&lt;/b&gt;　创建 · 查询 · 终止 · 性能采集 · 缓存管理&lt;br&gt;&lt;b&gt;上行&lt;/b&gt;　打印 · 堆扩容 · Proc 退出 · 异常上报&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B8C2CF;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#1D2939;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="502" y="886" width="410" height="128" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hardware-bg" value="" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#FFFCF7;strokeColor=#D8C7AE;strokeWidth=1.3;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="956" y="832" width="900" height="216" as="geometry"/>
+        </mxCell>
+        <mxCell id="hardware-accent" value="" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#C26718;strokeColor=none;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="956" y="832" width="6" height="216" as="geometry"/>
+        </mxCell>
+        <mxCell id="hardware-title" value="&lt;b&gt;硬件支持系统&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Noto Sans CJK SC;fontSize=17;fontColor=#7A2E0E;spacing=0;" vertex="1" parent="1">
+          <mxGeometry x="980" y="844" width="360" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="control-memory" value="&lt;b&gt;控制与存储&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#667085&quot;&gt;邮箱 · 门铃 / MSIP · 中断状态&lt;br&gt;设备内存 · 一致性共享区 · 核内 URAM&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CDBA9E;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#533315;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="980" y="886" width="398" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="execution-units" value="&lt;b&gt;NPU 执行单元&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#9A3412&quot;&gt;LSU / DMA · 矩阵（MAT）· 向量（VEC）· 宏指令（MACRO）&lt;/font&gt;&lt;br&gt;&lt;font color=&quot;#667085&quot;&gt;完成队列返回 Proc 标识&lt;br&gt;调度器扫描后唤醒等待 Proc&lt;/font&gt;" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#FFF7ED;strokeColor=#E6A15B;align=left;verticalAlign=middle;fontFamily=Noto Sans CJK SC;fontSize=15;fontColor=#7A2E0E;spacingLeft=14;spacingRight=8;" vertex="1" parent="1">
+          <mxGeometry x="1394" y="886" width="438" height="128" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
