@@ -98,9 +98,12 @@ CONFIG_STAMP := $(BUILD)/.config
 API_COMPILE_TEST := $(BUILD)/tests/api_compile.o
 API_CXX_COMPILE_TEST := $(BUILD)/tests/api_compile.cxx.o
 
-.PHONY: all clean check FORCE
+.PHONY: all clean check FORCE bl0
 
-all: $(ELF) $(API_ELF) $(BIN) $(DUMP)
+all: $(ELF) $(API_ELF) $(BIN) $(DUMP) bl0
+
+bl0:
+	$(MAKE) -C bl0 all
 
 $(ELF): $(OBJECTS) linker.ld $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
@@ -160,5 +163,6 @@ FORCE:
 
 clean:
 	rm -rf $(BUILD)
+	$(MAKE) -C bl0 clean
 
 -include $(DEPS)

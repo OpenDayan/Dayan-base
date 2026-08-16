@@ -9,14 +9,17 @@ DATADIR     ?= $(PREFIX)/share
 DAYAN_SDKDIR ?= $(LIBDIR)/dayan
 DAYAN_FIRMWAREDIR ?= $(DAYAN_SDKDIR)/firmware
 
-.PHONY: all clean check install device device-check docs docs-check \
+.PHONY: all clean check install device device-check device-bl0 docs docs-check \
 	host-driver host-driver-check dycc dycc-check dyperf dyperf-check \
 	demo demo-check
 
-all: device host-driver dycc dyperf
+all: device host-driver dycc dyperf demo
 
 device:
 	$(MAKE) -C device all
+
+device-bl0:
+	$(MAKE) -C device/bl0 all
 
 device-check:
 	$(MAKE) -C device check
@@ -39,10 +42,10 @@ dyperf: host-driver
 dyperf-check: host-driver-check
 	$(MAKE) -C host/dyperf check
 
-demo:
+demo: host-driver dycc
 	$(MAKE) -C demo all
 
-demo-check:
+demo-check: demo
 	$(MAKE) -C demo check
 
 docs:
@@ -51,7 +54,7 @@ docs:
 docs-check:
 	$(MAKE) -C dayan_kernel_docs check
 
-check: device-check host-driver-check dycc-check dyperf-check
+check: device-check host-driver-check dycc-check dyperf-check demo-check
 
 install: all
 	PREFIX="$(PREFIX)" DESTDIR="$(DESTDIR)" BINDIR="$(BINDIR)" \
@@ -62,3 +65,4 @@ install: all
 
 clean:
 	rm -rf build
+	$(MAKE) -C device/bl0 clean
