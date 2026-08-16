@@ -3,7 +3,6 @@
 *.objdump
 .vscode
 *.bin
-*.map
 build/
 core
 core.*
