@@ -57,6 +57,14 @@ struct npu_rpc_queue_entry {
     uint32_t queued;
 };
 
+struct npu_service_launch_agent {
+    npu_service_device_t *device;
+    pthread_t thread;
+    struct npu_service_launch *head;
+    struct npu_service_launch *tail;
+    uint32_t started;
+};
+
 struct npu_service_cluster {
     uint32_t firmware_loaded;
     uint32_t booted_cores;
@@ -99,6 +107,8 @@ struct npu_service_device {
     pthread_cond_t condition;
     pthread_t worker;
     struct npu_pending_call *calls;
+    struct npu_service_launch_agent *launch_agents;
+    size_t launch_agent_count;
     struct npu_rpc_queue_entry *rpc_queue_head;
     struct npu_rpc_queue_entry *rpc_queue_tail;
     size_t rpc_queue_count;
@@ -128,6 +138,17 @@ struct npu_service_launch {
     npu_service_device_t *device;
     npu_hal_core_t target;
     npu_hal_allocation_t *request_allocation;
+    struct npu_service_launch *queue_next;
+    uint64_t request_address;
+    uint64_t cookie;
+    uint32_t task_id[3];
+    uint32_t task_mode;
+    uint32_t submit_started;
+    uint32_t submit_done;
+    uint32_t accepted;
+    uint32_t descriptor_may_be_live;
+    uint32_t abandoned;
+    int submit_status;
     char name[NPU_SERVICE_PROC_NAME_SIZE];
 };
 

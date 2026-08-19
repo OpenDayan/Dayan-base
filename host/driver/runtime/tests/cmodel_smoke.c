@@ -17,6 +17,8 @@
 
 #define LOCK_TEST_CHILD_PROCS 2U
 #define LOCK_TEST_STARTED_MASK ((UINT64_C(1) << LOCK_TEST_CHILD_PROCS) - 1U)
+#define CONSECUTIVE_LAUNCHES_PER_CORE 4U
+#define MAX_CONSECUTIVE_LAUNCHES 16U
 
 struct lock_test_results {
     uint64_t release;
@@ -275,6 +277,92 @@ static int run_grid(npu_stream_t *stream, npu_kernel_t *kernel,
         }
     }
     return 0;
+}
+
+static int run_consecutive_launches(npu_context_t *context,
+                                    npu_kernel_t *kernel,
+                                    unsigned launch_count)
+{
+    npu_stream_t *streams[MAX_CONSECUTIVE_LAUNCHES] = { 0 };
+    npu_buffer_t *buffers[MAX_CONSECUTIVE_LAUNCHES] = { 0 };
+    npu_event_t *executions[MAX_CONSECUTIVE_LAUNCHES] = { 0 };
+    npu_event_t *downloads[MAX_CONSECUTIVE_LAUNCHES] = { 0 };
+    uint64_t outputs[MAX_CONSECUTIVE_LAUNCHES] = { 0 };
+    const uint64_t base = UINT64_C(0x3456789000005000);
+    unsigned index;
+    int status = 0;
+
+    if (!launch_count || launch_count > MAX_CONSECUTIVE_LAUNCHES)
+        return -EINVAL;
+    for (index = 0; index < launch_count; ++index) {
+        npu_buffer_desc_t buffer_desc;
+
+        status = npu_stream_create(context, 0, &streams[index]);
+        if (status < 0)
+            goto out;
+        npu_buffer_desc_init(&buffer_desc, sizeof(outputs[index]));
+        status = npu_buffer_create(context, &buffer_desc, &buffers[index]);
+        if (status < 0)
+            goto out;
+    }
+    for (index = 0; index < launch_count; ++index) {
+        npu_launch_desc_t launch;
+        uint64_t value = base + index;
+
+        npu_launch_desc_init(&launch, "sequence-kernel");
+        launch.arg_count = 2;
+        npu_kernel_arg_buffer(&launch.args[0], buffers[index], 0,
+                              NPU_KERNEL_ARG_WRITE);
+        npu_kernel_arg_value(&launch.args[1], value, sizeof(value));
+        status = npu_kernel_launch(streams[index], kernel, &launch,
+                                   &executions[index]);
+        if (status < 0) {
+            fprintf(stderr, "sequence launch %u submit failed: %d\n",
+                    index, status);
+            goto out;
+        }
+    }
+    for (index = 0; index < launch_count; ++index) {
+        status = npu_memcpy_d2h_async(streams[index], &outputs[index],
+                                      buffers[index], 0,
+                                      sizeof(outputs[index]),
+                                      &downloads[index]);
+        if (status < 0)
+            goto out;
+    }
+    for (index = 0; index < launch_count; ++index) {
+        status = wait_and_destroy(executions[index]);
+        if (status < 0)
+            goto out;
+        executions[index] = 0;
+        status = wait_and_destroy(downloads[index]);
+        if (status < 0)
+            goto out;
+        downloads[index] = 0;
+
+        if (outputs[index] != base + index) {
+            fprintf(stderr,
+                    "sequence launch %u output mismatch: expected=0x%llx "
+                    "actual=0x%llx\n",
+                    index, (unsigned long long)(base + index),
+                    (unsigned long long)outputs[index]);
+            status = -EIO;
+            goto out;
+        }
+    }
+
+out:
+    for (index = 0; index < launch_count; ++index) {
+        if (executions[index])
+            (void)wait_and_destroy(executions[index]);
+        if (downloads[index])
+            (void)wait_and_destroy(downloads[index]);
+        if (streams[index])
+            (void)npu_stream_destroy(streams[index]);
+        if (buffers[index])
+            (void)npu_buffer_destroy(buffers[index]);
+    }
+    return status;
 }
 
 static int copy_lock_results(npu_stream_t *stream, npu_buffer_t *buffer,
@@ -567,7 +655,7 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
 int main(int argc, char **argv)
 {
     npu_package_argument_t arguments[3];
-    npu_package_kernel_desc_t kernel_desc[4];
+    npu_package_kernel_desc_t kernel_desc[5];
     dayan_server_options_t server_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
@@ -580,6 +668,7 @@ int main(int argc, char **argv)
     npu_kernel_t *killable_kernel = 0;
     npu_kernel_t *locked_kernel = 0;
     npu_kernel_t *normal_kernel = 0;
+    npu_kernel_t *sequence_kernel = 0;
     npu_runtime_t *runtime = 0;
     npu_profile_t *profile = 0;
     dayan_server_t *server = 0;
@@ -592,6 +681,7 @@ int main(int argc, char **argv)
     size_t package_size = 0;
     uint64_t output[8];
     unsigned core_count;
+    unsigned consecutive_launches;
     char socket_path[128];
     const char *device_prefix;
     const char *stage = "runtime open";
@@ -605,6 +695,7 @@ int main(int argc, char **argv)
     core_count = (unsigned)strtoul(argv[4], 0, 0);
     if (!core_count || core_count > 4)
         return 2;
+    consecutive_launches = core_count * CONSECUTIVE_LAUNCHES_PER_CORE;
     device_prefix = getenv("NPU_DEVICE_PREFIX");
     if (!device_prefix || !*device_prefix)
         device_prefix = "/tmp/virtual_npu";
@@ -649,7 +740,14 @@ int main(int argc, char **argv)
     kernel_desc[3].max_tasks_per_core = 4;
     kernel_desc[3].max_child_procs = 0;
     kernel_desc[3].flags = 0;
-    status = npu_package_build(object, object_size, kernel_desc, 4, 0,
+    kernel_desc[4].name = "sequence_kernel";
+    kernel_desc[4].entry_symbol = "sequence_kernel";
+    kernel_desc[4].supported_task_modes =
+        NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
+    kernel_desc[4].max_tasks_per_core = 4;
+    kernel_desc[4].arguments = arguments;
+    kernel_desc[4].argument_count = 2;
+    status = npu_package_build(object, object_size, kernel_desc, 5, 0,
                                &package, &package_size);
     free(object);
     if (status < 0)
@@ -758,6 +856,11 @@ int main(int argc, char **argv)
                                        &normal_kernel);
     }
     if (status == 0) {
+        stage = "sequence kernel lookup";
+        status = npu_module_get_kernel(module, "sequence_kernel",
+                                       &sequence_kernel);
+    }
+    if (status == 0) {
         npu_launch_desc_t invalid;
         npu_event_t *unexpected = 0;
 
@@ -787,6 +890,11 @@ int main(int argc, char **argv)
                           UINT64_C(0x2345678900002000), output, 8);
     }
     if (status == 0) {
+        stage = "consecutive asynchronous launches";
+        status = run_consecutive_launches(context, sequence_kernel,
+                                          consecutive_launches);
+    }
+    if (status == 0) {
         stage = "rpc kill all";
         status = run_kill_test(server, stream, killable_kernel, buffer);
     }
@@ -799,9 +907,11 @@ int main(int argc, char **argv)
     if (status == 0 &&
         (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.count, __ATOMIC_RELAXED) !=
-                 (core_count == 4 ? 17U : 11U) ||
+                 9U + (core_count == 1 ? 2U : 0U) +
+                     (core_count == 4 ? 8U : 0U) + consecutive_launches ||
          __atomic_load_n(&exits.returned, __ATOMIC_RELAXED) !=
-                 (core_count == 4 ? 16U : 10U) ||
+                 8U + (core_count == 1 ? 2U : 0U) +
+                     (core_count == 4 ? 8U : 0U) + consecutive_launches ||
          __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) != 1U)) {
         stage = "root-only proc exit notification";
         status = -EIO;
@@ -817,6 +927,8 @@ int main(int argc, char **argv)
         (void)npu_kernel_release(locked_kernel);
     if (normal_kernel)
         (void)npu_kernel_release(normal_kernel);
+    if (sequence_kernel)
+        (void)npu_kernel_release(sequence_kernel);
     if (module)
         (void)npu_module_unload(module);
     if (stream)
@@ -837,7 +949,7 @@ int main(int argc, char **argv)
     dayan_server_destroy(server);
     if (status < 0 || run.status < 0)
         return 1;
-    puts("cmodel smoke: BL1, socket/token memcpy, logical grid and "
-         "locked-task scheduling passed");
+    puts("cmodel smoke: BL1, logical grid, locked tasks and consecutive "
+         "asynchronous launches passed");
     return 0;
 }

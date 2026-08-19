@@ -19,18 +19,20 @@ __kernel__ void printf_grid_kernel(uint64_t arg0, uint64_t arg1,
     const uint32_t y = dayan_task_id(DAYAN_TASK_Y);
     const uint32_t z = dayan_task_id(DAYAN_TASK_Z);
 
-    printf("[device] grid_id=(%u,%u,%u) grid_dim=(%u,%u,%u) mode=%u "
-           "args=[%llu,%llu,%llu,%llu,%llu,%llu,%llu]\n",
-           (unsigned)x, (unsigned)y, (unsigned)z,
-           (unsigned)dayan_task_dim(DAYAN_TASK_X),
-           (unsigned)dayan_task_dim(DAYAN_TASK_Y),
-           (unsigned)dayan_task_dim(DAYAN_TASK_Z),
-           (unsigned)dayan_task_mode(),
-           (unsigned long long)arg0, (unsigned long long)arg1,
-           (unsigned long long)arg2, (unsigned long long)arg3,
-           (unsigned long long)arg4, (unsigned long long)arg5,
-           (unsigned long long)arg6);
-    fflush(stdout);
+    // for(int i = 0 ; i < 1000 ; i ++) {
+        printf("[device] grid_id=(%u,%u,%u) grid_dim=(%u,%u,%u) mode=%u "
+            "args=[%llu,%llu,%llu,%llu,%llu,%llu,%llu]\n",
+            (unsigned)x, (unsigned)y, (unsigned)z,
+            (unsigned)dayan_task_dim(DAYAN_TASK_X),
+            (unsigned)dayan_task_dim(DAYAN_TASK_Y),
+            (unsigned)dayan_task_dim(DAYAN_TASK_Z),
+            (unsigned)dayan_task_mode(),
+            (unsigned long long)arg0, (unsigned long long)arg1,
+            (unsigned long long)arg2, (unsigned long long)arg3,
+            (unsigned long long)arg4, (unsigned long long)arg5,
+            (unsigned long long)arg6);
+        fflush(stdout);
+    // }
 }
 
 DAYAN_KERNEL_DESC(printf_grid_kernel, 0, 0, 0);
@@ -122,9 +124,9 @@ __host__ int main(int argc, char **argv)
     if (status == 0) {
         npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
                                      "print-demo");
-        launch_attrs.config.task_dim = NPUTaskDim3{2, 2, 1};
+        launch_attrs.config.task_dim = NPUTaskDim3{4, 4, 4};
         launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
-        printf("[host] launch grid=(2,2,1), "
+        printf("[host] launch grid=(4, 4, 4), "
                "args=[%llu,%llu,%llu,%llu,%llu,%llu,%llu]\n",
                (unsigned long long)args[0], (unsigned long long)args[1],
                (unsigned long long)args[2], (unsigned long long)args[3],

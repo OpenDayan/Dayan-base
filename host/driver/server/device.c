@@ -32,6 +32,8 @@ _Static_assert(sizeof(npu_service_proc_info_t) ==
                sizeof(struct rpc_proc_info),
                "Host and Device proc record ABI");
 
+static void *npu_launch_agent(void *arg);
+
 uint64_t npu_now_ms(void)
 {
     struct timespec now;
@@ -154,6 +156,7 @@ int npu_service_open(npu_service_device_t **device_out,
     npu_service_options_t defaults;
     npu_service_device_t *device;
     size_t core_count;
+    size_t index;
     int mutex_initialized = 0;
     int kernel_mutex_initialized = 0;
     int condition_initialized = 0;
@@ -180,12 +183,15 @@ int npu_service_open(npu_service_device_t **device_out,
     core_count = (size_t)device->hal_info.cluster_count *
                  device->hal_info.cores_per_cluster;
     device->calls = calloc(core_count, sizeof(*device->calls));
+    device->launch_agents = calloc(core_count,
+                                   sizeof(*device->launch_agents));
     device->clusters = calloc(device->hal_info.cluster_count,
                               sizeof(*device->clusters));
-    if (!device->calls || !device->clusters) {
+    if (!device->calls || !device->launch_agents || !device->clusters) {
         status = -ENOMEM;
         goto fail;
     }
+    device->launch_agent_count = core_count;
     status = pthread_mutex_init(&device->mutex, 0);
     if (status) {
         status = -status;
@@ -210,10 +216,36 @@ int npu_service_open(npu_service_device_t **device_out,
         goto fail;
     }
     device->worker_started = 1;
+    for (index = 0; index < core_count; ++index) {
+        struct npu_service_launch_agent *agent =
+            &device->launch_agents[index];
+
+        agent->device = device;
+        status = pthread_create(&agent->thread, 0, npu_launch_agent, agent);
+        if (status) {
+            status = -status;
+            goto fail;
+        }
+        agent->started = 1;
+    }
     *device_out = device;
     return 0;
 
 fail:
+    if (mutex_initialized && condition_initialized) {
+        pthread_mutex_lock(&device->mutex);
+        device->worker_stop = 1;
+        pthread_cond_broadcast(&device->condition);
+        pthread_mutex_unlock(&device->mutex);
+    }
+    if (device->launch_agents) {
+        for (index = 0; index < device->launch_agent_count; ++index) {
+            if (device->launch_agents[index].started)
+                (void)pthread_join(device->launch_agents[index].thread, 0);
+        }
+    }
+    if (device->worker_started)
+        (void)pthread_join(device->worker, 0);
     if (condition_initialized)
         pthread_cond_destroy(&device->condition);
     if (kernel_mutex_initialized)
@@ -221,6 +253,7 @@ fail:
     if (mutex_initialized)
         pthread_mutex_destroy(&device->mutex);
     free(device->clusters);
+    free(device->launch_agents);
     free(device->calls);
     free(device);
     return status;
@@ -267,6 +300,21 @@ static void free_atomic_cache_backing(npu_service_device_t *device)
                                       state->atomic_cache_backing);
         state->atomic_cache_backing = 0;
         state->atomic_cache_backing_address = 0;
+    }
+}
+
+static void join_launch_agents(npu_service_device_t *device)
+{
+    size_t index;
+
+    for (index = 0; index < device->launch_agent_count; ++index) {
+        struct npu_service_launch_agent *agent =
+            &device->launch_agents[index];
+
+        if (!agent->started)
+            continue;
+        (void)pthread_join(agent->thread, 0);
+        agent->started = 0;
     }
 }
 
@@ -321,6 +369,7 @@ int npu_service_close(npu_service_device_t *device)
     aborted = npu_service_status(device) < 0;
     if (aborted) {
         npu_service_abort(device, -ESHUTDOWN);
+        join_launch_agents(device);
         if (device->worker_started) {
             (void)pthread_join(device->worker, 0);
             device->worker_started = 0;
@@ -346,6 +395,7 @@ int npu_service_close(npu_service_device_t *device)
     device->worker_stop = 1;
     pthread_cond_broadcast(&device->condition);
     pthread_mutex_unlock(&device->mutex);
+    join_launch_agents(device);
     if (device->worker_started)
         (void)pthread_join(device->worker, 0);
     npu_service_kernel_state_destroy(device);
@@ -356,6 +406,7 @@ int npu_service_close(npu_service_device_t *device)
     pthread_mutex_destroy(&device->kernel_mutex);
     pthread_mutex_destroy(&device->mutex);
     free(device->clusters);
+    free(device->launch_agents);
     free(device->calls);
     free(device);
     return profile_status;
@@ -809,11 +860,113 @@ queue_fail:
     return status;
 }
 
+static int launch_request_valid(const npu_service_launch_t *launch,
+                                const struct rpc_proc_create_request *request)
+{
+    return request->version == RPC_PROC_CREATE_VERSION &&
+           request->size == sizeof(*request) &&
+           request->hart_id == launch->target.core &&
+           request->cookie == launch->cookie &&
+           request->task_mode == launch->task_mode &&
+           !memcmp(request->task_id, launch->task_id,
+                   sizeof(request->task_id)) &&
+           proc_name_valid(request->name) &&
+           !memcmp(request->name, launch->name, sizeof(request->name)) &&
+           (request->state == RPC_PROC_RUNNING ||
+            request->state == RPC_PROC_EXITED ||
+            request->state == RPC_PROC_FAILED);
+}
+
+static void launch_submission_complete(npu_service_launch_t *launch,
+                                       int status, uint32_t accepted,
+                                       uint32_t descriptor_may_be_live)
+{
+    npu_service_device_t *device = launch->device;
+    uint32_t abandoned;
+
+    pthread_mutex_lock(&device->mutex);
+    launch->submit_status = status;
+    launch->accepted = accepted;
+    launch->descriptor_may_be_live = descriptor_may_be_live;
+    launch->submit_done = 1;
+    abandoned = launch->abandoned;
+    pthread_cond_broadcast(&device->condition);
+    pthread_mutex_unlock(&device->mutex);
+    if (abandoned)
+        free(launch);
+}
+
+static void submit_launch(npu_service_launch_t *launch)
+{
+    struct rpc_proc_create_request request;
+    int descriptor_may_be_live = 0;
+    int status = npu_service_rpc_call(
+        launch->device, launch->target, RPC_PROC_CREATE,
+        launch->request_address, launch->device->options.default_timeout_ms,
+        &descriptor_may_be_live);
+
+    if (status < 0) {
+        launch_submission_complete(launch, status, 0,
+                                   (uint32_t)descriptor_may_be_live);
+        return;
+    }
+    status = npu_hal_memory_read(launch->device->hal,
+                                 launch->request_allocation, launch->target,
+                                 &request, 0, sizeof(request));
+    if (status == 0 && !launch_request_valid(launch, &request)) {
+        fprintf(stderr,
+                "dayan_server: PROC_CREATE request mismatch: hart=%u "
+                "address=0x%llx version=%u size=%u request_hart=%u "
+                "cookie=%llu expected_cookie=%llu state=%u name='%.*s' "
+                "expected_name='%s'\n",
+                launch->target.core,
+                (unsigned long long)launch->request_address,
+                request.version, request.size, request.hart_id,
+                (unsigned long long)request.cookie,
+                (unsigned long long)launch->cookie, request.state,
+                (int)sizeof(request.name), request.name, launch->name);
+        status = -EPROTO;
+    }
+    launch_submission_complete(launch, status, status == 0, 1);
+}
+
+static void *npu_launch_agent(void *arg)
+{
+    struct npu_service_launch_agent *agent = arg;
+    npu_service_device_t *device = agent->device;
+
+    for (;;) {
+        npu_service_launch_t *launch;
+        int status;
+
+        pthread_mutex_lock(&device->mutex);
+        while (!agent->head && !device->worker_stop)
+            (void)pthread_cond_wait(&device->condition, &device->mutex);
+        if (!agent->head) {
+            pthread_mutex_unlock(&device->mutex);
+            return 0;
+        }
+        launch = agent->head;
+        agent->head = launch->queue_next;
+        if (!agent->head)
+            agent->tail = 0;
+        launch->queue_next = 0;
+        launch->submit_started = 1;
+        status = rpc_shutdown_status_locked(device);
+        pthread_mutex_unlock(&device->mutex);
+        if (status < 0)
+            launch_submission_complete(launch, status, 0, 0);
+        else
+            submit_launch(launch);
+    }
+}
+
 int npu_service_launch(npu_service_device_t *device,
                        const npu_service_launch_desc_t *desc,
                        npu_service_launch_t **launch_out)
 {
     struct rpc_proc_create_request request;
+    struct npu_service_launch_agent *agent;
     npu_service_launch_t *launch;
     npu_hal_allocation_t *allocation = 0;
     uint64_t shared_base;
@@ -821,7 +974,6 @@ int npu_service_launch(npu_service_device_t *device,
     uint64_t request_address;
     uint32_t booted;
     size_t axis;
-    int descriptor_may_be_live = 0;
     int status;
 
     if (!device || !desc || !launch_out ||
@@ -841,7 +993,10 @@ int npu_service_launch(npu_service_device_t *device,
     *launch_out = 0;
     pthread_mutex_lock(&device->mutex);
     booted = device->clusters[desc->target.cluster].booted_cores;
+    status = rpc_shutdown_status_locked(device);
     pthread_mutex_unlock(&device->mutex);
+    if (status < 0)
+        return status;
     if (!(booted & (UINT32_C(1) << desc->target.core)))
         return -ENODEV;
     status = shared_address(device, desc, &shared_base);
@@ -888,92 +1043,126 @@ int npu_service_launch(npu_service_device_t *device,
                                   &request, sizeof(request));
     if (status < 0)
         goto fail;
-    status = npu_service_rpc_call(device, desc->target, RPC_PROC_CREATE,
-                                  request_address,
-                                  device->options.default_timeout_ms,
-                                  &descriptor_may_be_live);
-    if (status < 0)
-        goto fail;
-    descriptor_may_be_live = 1;
-    status = npu_hal_memory_read(device->hal, allocation, desc->target,
-                                 &request, 0, sizeof(request));
-    if (status < 0)
-        goto fail;
-    if (request.version != RPC_PROC_CREATE_VERSION ||
-        request.size != sizeof(request) || request.hart_id != desc->target.core ||
-        request.cookie != desc->cookie ||
-        !proc_name_valid(request.name) ||
-        strcmp(request.name, desc->name) != 0 ||
-        (request.state != RPC_PROC_RUNNING &&
-         request.state != RPC_PROC_EXITED &&
-         request.state != RPC_PROC_FAILED)) {
-        fprintf(stderr,
-                "dayan_server: PROC_CREATE request mismatch: hart=%u "
-                "address=0x%llx version=%u size=%u request_hart=%u "
-                "cookie=%llu expected_cookie=%llu state=%u name='%.*s' "
-                "expected_name='%s'\n",
-                desc->target.core, (unsigned long long)request_address,
-                request.version, request.size, request.hart_id,
-                (unsigned long long)request.cookie,
-                (unsigned long long)desc->cookie, request.state,
-                (int)sizeof(request.name), request.name, desc->name);
-        status = -EPROTO;
-        goto fail;
-    }
-    if (request.state == RPC_PROC_FAILED) {
-        status = request.status < 0 && request.status >= INT32_MIN ?
-            (int)request.status : -EIO;
-        descriptor_may_be_live = 0;
-        goto fail;
-    }
     launch->device = device;
     launch->target = desc->target;
     launch->request_allocation = allocation;
+    launch->request_address = request_address;
+    launch->cookie = desc->cookie;
+    memcpy(launch->task_id, desc->task_id, sizeof(launch->task_id));
+    launch->task_mode = desc->task_mode;
+    launch->submit_status = -EINPROGRESS;
     memcpy(launch->name, request.name, sizeof(launch->name));
+    agent = &device->launch_agents[npu_service_core_index(device,
+                                                           desc->target)];
     pthread_mutex_lock(&device->mutex);
-    ++device->active_launches;
+    status = rpc_shutdown_status_locked(device);
+    if (status == 0) {
+        if (agent->tail)
+            agent->tail->queue_next = launch;
+        else
+            agent->head = launch;
+        agent->tail = launch;
+        ++device->active_launches;
+        pthread_cond_broadcast(&device->condition);
+    }
     pthread_mutex_unlock(&device->mutex);
+    if (status < 0)
+        goto fail;
     *launch_out = launch;
     return 0;
 
 fail:
-    if (allocation && !descriptor_may_be_live)
+    if (allocation)
         (void)npu_hal_memory_free(device->hal, allocation);
     free(launch);
     return status;
+}
+
+static void launch_info_init(const npu_service_launch_t *launch,
+                             npu_service_launch_info_t *info,
+                             uint32_t state, int64_t status)
+{
+    memset(info, 0, sizeof(*info));
+    info->state = state;
+    info->target = launch->target;
+    info->status = status;
+    memcpy(info->task_id, launch->task_id, sizeof(info->task_id));
+    info->task_mode = launch->task_mode;
+    info->cookie = launch->cookie;
+    memcpy(info->name, launch->name, sizeof(info->name));
+}
+
+static int launch_proc_present(npu_service_launch_t *launch,
+                               uint32_t proc_id, int *present_out)
+{
+    npu_service_proc_snapshot_t snapshot;
+    uint32_t index;
+    int status;
+
+    *present_out = 0;
+    status = npu_service_rpc_ps(launch->device, launch->target, &snapshot);
+    if (status < 0)
+        return status;
+    for (index = 0; index < snapshot.count; ++index) {
+        const npu_service_proc_info_t *proc = &snapshot.records[index];
+
+        if (proc->proc_id == proc_id &&
+            proc->host_proc_id == proc_id &&
+            proc->cookie == launch->cookie) {
+            *present_out = 1;
+            break;
+        }
+    }
+    return 0;
 }
 
 int npu_service_launch_query(npu_service_launch_t *launch,
                              npu_service_launch_info_t *info)
 {
     struct rpc_proc_create_request request;
+    int present;
     int status;
 
     if (!launch || !info)
         return -EINVAL;
-    status = npu_service_status(launch->device);
-    if (status < 0)
+    pthread_mutex_lock(&launch->device->mutex);
+    status = launch->device->abort_status;
+    if (status < 0) {
+        pthread_mutex_unlock(&launch->device->mutex);
         return status;
+    }
+    if (!launch->submit_done) {
+        launch_info_init(launch, info, NPU_SERVICE_LAUNCH_SUBMITTED, 0);
+        pthread_mutex_unlock(&launch->device->mutex);
+        return 0;
+    }
+    if (!launch->accepted) {
+        launch_info_init(launch, info, NPU_SERVICE_LAUNCH_FAILED,
+                         launch->submit_status);
+        pthread_mutex_unlock(&launch->device->mutex);
+        return 0;
+    }
+    pthread_mutex_unlock(&launch->device->mutex);
     status = npu_hal_memory_read(launch->device->hal,
                                  launch->request_allocation, launch->target,
                                  &request, 0, sizeof(request));
     if (status < 0)
         return status;
-    if (request.version != RPC_PROC_CREATE_VERSION ||
-        request.size != sizeof(request) ||
-        request.hart_id != launch->target.core ||
-        request.state > RPC_PROC_FAILED || !proc_name_valid(request.name) ||
-        memcmp(request.name, launch->name, sizeof(request.name)))
+    if (!launch_request_valid(launch, &request))
         return -EPROTO;
-    memset(info, 0, sizeof(*info));
-    info->state = request.state;
-    info->target = launch->target;
+    if ((request.state == RPC_PROC_EXITED ||
+         request.state == RPC_PROC_FAILED) && request.proc_id) {
+        status = launch_proc_present(launch, request.proc_id, &present);
+        if (status < 0)
+            return status;
+        if (present) {
+            launch_info_init(launch, info, NPU_SERVICE_LAUNCH_RUNNING, 0);
+            info->proc_id = request.proc_id;
+            return 0;
+        }
+    }
+    launch_info_init(launch, info, request.state, request.status);
     info->proc_id = request.proc_id;
-    info->status = request.status;
-    memcpy(info->task_id, request.task_id, sizeof(info->task_id));
-    info->task_mode = request.task_mode;
-    info->cookie = request.cookie;
-    memcpy(info->name, request.name, sizeof(info->name));
     return 0;
 }
 
@@ -1005,6 +1194,7 @@ int npu_service_launch_release(npu_service_launch_t *launch)
 {
     npu_service_launch_info_t info;
     npu_service_device_t *device;
+    int reclaim_descriptor;
     int status;
 
     if (!launch)
@@ -1016,9 +1206,16 @@ int npu_service_launch_release(npu_service_launch_t *launch)
         info.state != NPU_SERVICE_LAUNCH_FAILED)
         return -EBUSY;
     device = launch->device;
-    status = npu_hal_memory_free(device->hal, launch->request_allocation);
-    if (status < 0)
-        return status;
+    pthread_mutex_lock(&device->mutex);
+    reclaim_descriptor = launch->accepted ||
+                         !launch->descriptor_may_be_live;
+    pthread_mutex_unlock(&device->mutex);
+    if (reclaim_descriptor) {
+        status = npu_hal_memory_free(device->hal,
+                                     launch->request_allocation);
+        if (status < 0)
+            return status;
+    }
     pthread_mutex_lock(&device->mutex);
     if (device->active_launches)
         --device->active_launches;
@@ -1029,17 +1226,46 @@ int npu_service_launch_release(npu_service_launch_t *launch)
 
 int npu_service_launch_abandon(npu_service_launch_t *launch)
 {
+    struct npu_service_launch_agent *agent;
+    npu_service_launch_t *item;
+    npu_service_launch_t *previous = 0;
     npu_service_device_t *device;
+    int free_launch = 0;
 
     if (!launch)
         return -EINVAL;
     device = launch->device;
     /* Device completion is unknown; keep the descriptor reserved until HAL close. */
     pthread_mutex_lock(&device->mutex);
+    agent = &device->launch_agents[npu_service_core_index(device,
+                                                           launch->target)];
+    if (!launch->submit_started) {
+        for (item = agent->head; item && item != launch;
+             item = item->queue_next)
+            previous = item;
+        if (item) {
+            if (previous)
+                previous->queue_next = item->queue_next;
+            else
+                agent->head = item->queue_next;
+            if (agent->tail == item)
+                agent->tail = previous;
+            item->queue_next = 0;
+            free_launch = 1;
+        }
+    }
+    if (!free_launch) {
+        if (launch->submit_done)
+            free_launch = 1;
+        else
+            launch->abandoned = 1;
+    }
     if (device->active_launches)
         --device->active_launches;
+    pthread_cond_broadcast(&device->condition);
     pthread_mutex_unlock(&device->mutex);
-    free(launch);
+    if (free_launch)
+        free(launch);
     return 0;
 }
 

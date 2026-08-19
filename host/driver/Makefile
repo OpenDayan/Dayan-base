@@ -40,8 +40,8 @@ RUNTIME_EXPORT_MAP := runtime/exports.map
 COMPAT_LIB := $(BUILD)/libnpu_runtime.a
 SERVER_BIN := $(BUILD)/dayan_server
 
-.PHONY: all check clean cmodel-smoke cmodel-smoke-bin layer-check \
-	runtime-export-check
+.PHONY: all check clean cmodel-smoke cmodel-smoke-bin \
+	consecutive-launch-test-bin layer-check runtime-export-check
 
 all: $(HAL_LIB) $(SERVICE_LIB) $(RUNTIME_STATIC) $(RUNTIME_SHARED) \
 	$(COMPAT_LIB) $(SERVER_BIN)
@@ -136,8 +136,16 @@ $(BUILD)/tests/cmodel_smoke: runtime/tests/cmodel_smoke.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+$(BUILD)/tests/consecutive_launches: runtime/tests/consecutive_launches.c \
+		$(PROTOCOL_OBJECT) $(HAL_CLIENT_OBJECTS) $(RUNTIME_OBJECTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
 cmodel-smoke-bin: all $(BUILD)/tests/cmodel_kernel.o \
-	$(BUILD)/tests/cmodel_smoke
+	$(BUILD)/tests/cmodel_smoke $(BUILD)/tests/consecutive_launches
+
+consecutive-launch-test-bin: all $(BUILD)/tests/cmodel_kernel.o \
+	$(BUILD)/tests/consecutive_launches
 
 cmodel-smoke: cmodel-smoke-bin
 	sh ./run_cmodel_smoke.sh

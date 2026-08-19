@@ -757,13 +757,6 @@ static struct dispatch_result dispatch_group(
             result.status = status;
             break;
         }
-        {
-            npu_service_launch_info_t info;
-
-            memset(&info, 0, sizeof(info));
-            if (npu_service_launch_query(invocation->launch, &info) == 0)
-                invocation->proc_id = info.proc_id;
-        }
         invocation->slot_index = slots[lane];
         invocation->uram_allocation = uram_allocation;
         invocation->resident = launch_resident_size(metadata);

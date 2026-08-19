@@ -194,3 +194,9 @@ void normal_kernel(struct lock_test_results *results)
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
     dayan_proc_exit((int64_t)NORMAL_TEST_RESULT);
 }
+
+void sequence_kernel(uint64_t *output, uint64_t value)
+{
+    *output = value;
+    dayan_proc_exit((int64_t)value);
+}
