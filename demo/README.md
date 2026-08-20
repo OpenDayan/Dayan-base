@@ -1,13 +1,15 @@
 # Dayan kernel demos
 
 该目录放置最小、可独立构建的 Dayan kernel 示例。目前包含 Device `printf`、
-单 Core BF16 矩阵乘和四 Core 协作 BF16 矩阵乘。
+FP32 Add、单 Core BF16 矩阵乘和四 Core 协作 BF16 矩阵乘。
 
 ## 目录
 
 ```text
 demo/
 ├── Makefile
+├── add_fp32_macro.cpp          # 最小 FP32 Add：LSU + MACRO
+├── add_fp32_vec.cpp            # 最小 FP32 Add：LSU + VEC
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
@@ -28,13 +30,31 @@ Core。
 make -C demo
 ```
 
-产物为 `build/demo/print_demo`、`build/demo/lsu_bandwidth`、
+产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
+`build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
 `build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
 `<rvt_intrinsics.h>`（`__builtin_riscv_tx_*`）提供；`dayan_intrinsics.h` 包含该头文件，
 并保留 LSU/MAT TCSR 编号和 `set_lsu_matrix` 等 Dayan 辅助接口。dycc 会启用 TX
 扩展并把 Clang resource dir 加入 Device 编译，构建 demo 不需要 npu-kernels。
+
+## 最小 FP32 Add
+
+两个示例都计算固定的 `A[64] + B[64] -> C[64]`，输入输出均为 FP32。
+Device 部分只有一个 kernel，不定义或调用自定义 Device 子函数，也不创建
+child proc。LSU 配置、计算单元配置以及 `load -> calc -> store` 全部在
+kernel 体内直接展开：
+
+- `add_fp32_macro.cpp` 使用 `__tx_macro_elemwise_add_fp32`。
+- `add_fp32_vec.cpp` 使用 4 条 Vec 队列指令：读 A、读 B、FP32 Add、写回 URAM。
+
+可以分别构建：
+
+```sh
+make -C demo ../build/demo/add_fp32_macro
+make -C demo ../build/demo/add_fp32_vec
+```
 
 两个 Host 程序默认连接
 `/tmp/dayan-server.sock`，也可以通过环境变量覆盖：
