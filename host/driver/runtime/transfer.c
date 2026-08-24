@@ -56,10 +56,10 @@ void *runtime_data_worker(void *argument)
                                    job->event->id, 0, 0, &grant,
                                    sizeof(grant));
         if (status == 0) {
-            status = npu_hal_data_client_transfer(runtime->data_client,
-                                                  &grant.token,
-                                                  job->host_buffer,
-                                                  job->size);
+            status = npu_hal_data_plane_transfer(runtime->data_plane,
+                                                 &grant.token,
+                                                 job->host_buffer,
+                                                 job->size);
             memset(&complete, 0, sizeof(complete));
             complete.event_id = grant.event_id;
             complete.transfer_id = grant.transfer_id;

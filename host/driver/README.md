@@ -1,43 +1,46 @@
 # Dayan Host 用户态驱动
 
-`host/driver/` 是与当前 BL0/BL1 配套的 Linux 用户态驱动，分为 `hal`、`server`、
-`runtime` 三层。应用只使用 Runtime 的逻辑对象接口；Cluster/Core、物理地址、固件
-mailbox 和 IRQ 都留在 Server 与 HAL 内部。
+`host/driver/` 是与当前 BL0/BL1 配套的 Linux 用户态驱动，分为 HAL、Server 和
+Runtime 三层。应用只使用 Runtime 的逻辑对象接口；物理拓扑、设备地址、固件邮箱和
+中断均由 Server 与 HAL 管理。
 
 ## 分层
 
 ```text
-Application / dycc wrapper
+用户程序 / dycc 包装层
         |
-        | libDayanRuntime: Context / Buffer / Stream / Kernel / Event
-        | control socket                         data socket: token
+        | libDayanRuntime：Context / Buffer / Stream / Kernel / Event
+        | 控制连接                         传输授权连接：短消息、令牌
         v                                             |
-dayan_server: session、对象校验、grid scheduler       |
+dayan_server：会话、对象校验、网格调度                 |  不传输用户数据
         |                                             |
-        | Service: BL1、RPC、ET_REL loader            |
+        | Service：BL1、RPC、ET_REL 装载              |
         v                                             v
-HAL control plane                              HAL data-plane provider ABI
-register / IRQ / memory allocator              opaque export / token / handles
+HAL 配置与控制面                               用户进程中的 HAL 数据提供器
+拓扑 / 寄存器 / 中断 / 内存                    导入设备句柄，解释传输令牌
         |                                             |
-        +------------- FD_OFFSET / cmodel FUSE -------+
-                         (future: ioctl provider)
+        +------------------- XDMA ---------------------+
+                         直接 pread/pwrite
+                  /dev 或 /tmp/virtual_npu
 ```
 
-- `hal/`：对 Service 暴露设备无关的 topology、register、IRQ、boot、allocation 和
-  transfer 接口；FUSE/XDMA 只是当前 control backend。独立的 `dataplane.h` 使用
-  provider ID、opaque export/token 和通用 handle 数组，不含 Cluster/Core 语义。
-- `server/`：`service.[ch]` 以下负责 BL1 装载、Host↔BL1 RPC、Device heap 和动态
-  kernel 重定位；`server.[ch]` 与 `scheduler.c` 提供 Unix socket daemon、会话隔离、
-  Runtime 对象和 logical task 调度。
+- `hal/include/`：公开的通用配置、控制面和数据面 ABI。`npu_hal_config.h` 只描述设备
+  拓扑、内存和抽象后端配置。
+- `hal/`：通用 HAL 生命周期、内存管理和数据提供器分派；`hal/backend/xdma/` 包含
+  XDMA 私有配置、设备端点、低地址翻译、中断和直传实现。每个后端提供一张完整的能力
+  表，`npu_hal_open()` 通过注册表选择能力表，不使用后端选择 `switch`。
+- `server/`：`service.[ch]` 负责 BL1 装载、Host 与 BL1 之间的 RPC、Device 堆和动态
+  算子重定位；`server.[ch]` 与 `scheduler.c` 提供 Unix 域 Socket 服务、会话隔离、
+  Runtime 对象和逻辑任务调度。
 - `runtime/`：实现 `host/include/npu_runtime.h`。它只看到逻辑 Context、Buffer、
-  Stream、Module、Kernel、Event 和设备级 profile 会话，不向 launch 接口暴露
+  Stream、Module、Kernel、Event 和设备级性能采样会话，不向启动接口暴露
   Cluster/Core 或 Device 地址；
   对外动态符号均为 `npu_` 前缀。
 
-`dayan_server` 先打开具体 HAL backend，再把 opaque `npu_hal_t` 注入 Service；Service
-配置中没有 FUSE 路径等 backend 字段。`libDayanRuntime` 只链接通用 data-plane
-dispatcher 与已支持的 provider，不链接 HAL 控制面或 Service。加入 ioctl 实现时无需
-改变 Runtime 公共头文件或 socket 对象协议。
+`dayan_server` 先打开具体 HAL 后端，再把不透明的 `npu_hal_t` 交给 Service。Service
+配置不包含 XDMA 路径等后端私有字段。`libDayanRuntime` 只链接通用数据面分派器和已
+支持的数据提供器，不链接 HAL 控制面或 Service。以后加入基于 `ioctl` 或 `mmap` 的
+实现时，不需要改变 Runtime 公共头文件或会话协议。
 
 所有 C 接口成功返回 0，失败返回负 Linux errno。
 
@@ -77,14 +80,27 @@ Runtime、Server 和 BL1 都会校验 mode 只能为 1 或 4，并在 mode 4 时
 `npu_kernel_launch_attrs_init(&attrs, context, stream, task_name)` 提供。名称非空且最多
 15 bytes，Runtime 会把它复制进每个 logical task 对应的 root Proc。
 
-### HAL topology 与内存
+### HAL 拓扑与内存
 
-`npu_hal_options_t` 配置 `cluster_count`、`cores_per_cluster` 和
-`cluster_device_stride`。FUSE/XDMA backend 将 Cluster `c` 映射到：
+`npu_hal_options_t` 只配置设备拓扑、内存区域和抽象的 `backend_options` 指针。XDMA
+后端的私有配置包含运行环境、设备目录、设备编号、Cluster 步长和 MMIO 地址偏移。
+`backend_options` 为空时，HAL 注册表选择默认后端；当前默认项是 XDMA 模拟器配置。
+XDMA 后端将 Cluster `c` 映射到：
 
 ```text
 xdma[device_index + c * cluster_device_stride]
 ```
+
+两个内置运行环境是：
+
+- `simulator`：设备目录 `/tmp/virtual_npu`，MMIO 偏移 `0x0`；
+- `fpga`：设备目录 `/dev`，MMIO 偏移 `0x4000000000`，与当前 AXVU13P DUT 地址图一致。
+
+这些默认值可以通过 `--xdma-device-dir` 和 `--xdma-mmio-offset` 分别覆盖。XDMA
+H2C/C2H 地址翻译为：设备地址低于 `0x80000000` 时加 `mmio_address_offset`，从
+`0x80000000` 开始的 DRAM 地址保持不变。后端把翻译后的地址写入传输令牌，Runtime
+本身不知道偏移或 Cluster。`_user` 设备是独立的相对寄存器窗口，不重复
+应用该物理地址偏移。
 
 内存 region 同时描述 memory class 与 visibility scope：
 
@@ -116,31 +132,40 @@ Task 只能派发到空 Hart；从 root Proc 建立到整个 family 终态期间
 Device launch 失败则沿预留回滚路径立即解锁。该标记不虚增 Proc 计数，
 `max_child_procs=15` 仍表示真实预留 root 加 15 个 child 的旧式资源独占。
 
-## socket 与零中转 memcpy
+## 用户进程直接搬运数据
 
-Runtime 为一个 session 建立 control 和 data 两条 Unix `SOCK_STREAM` 连接。control
-连接负责对象、队列和算子请求；data 连接只负责 memcpy token 的授权与完成。
+Runtime 为一个会话建立两条 Unix `SOCK_STREAM` 连接。控制连接负责对象、队列和算子
+请求；传输授权连接只传递设备文件描述符、传输令牌和完成状态。两条连接都不传输 H2D
+或 D2H 的用户数据。
+
+XDMA 数据提供器本身不使用 Socket。Server 在建立会话时打开 `/dev` 或
+`/tmp/virtual_npu` 下的 XDMA 设备文件，并通过 `SCM_RIGHTS` 把文件描述符交给用户
+进程。`SCM_RIGHTS` 只传递一个已打开文件的引用，不复制设备数据。Runtime 随后直接
+对这些文件描述符执行 `pread/pwrite`。
 
 H2D/D2H 流程如下：
 
-1. Runtime 通过 control socket 把传输排入 Stream，只发送 Buffer handle、offset 和
-   size，不发送 payload。
-2. 该命令到达 Stream 队首后，Runtime 的 data worker 请求 token。Server 校验
-   allocation、方向、范围和可见 Cluster，再由 HAL 生成 opaque token。
-3. Runtime 使用 HELLO 阶段经 `SCM_RIGHTS` 获得的 data-plane handle，把 Host buffer
-   直接交给匹配的 provider；当前 `FD_OFFSET` provider 执行 `pread/pwrite`，数据不
-   经过 socket 或 Server buffer。
-4. Runtime 原样回传 token、transfer ID 和状态。Server 校验后才完成 Event 并允许
-   allocation 被回收。
+1. Runtime 通过控制连接把传输排入 Stream，只发送逻辑 Buffer、偏移和长度。
+2. 命令到达 Stream 队首后，Runtime 的传输线程申请令牌。Server 校验内存归属、方向、
+   范围和可见 Cluster，再由 HAL 生成仅用于该次传输的令牌。
+3. Runtime 把 Host 缓冲区和令牌交给 XDMA 数据提供器。提供器根据方向选择 H2C 或
+   C2H 文件，并直接执行 `pread/pwrite`。数据不经过 Socket 或 Server 缓冲区。
+4. Runtime 原样交还令牌和传输结果。Server 核对后完成 Event，并允许相关设备内存
+   被释放或复用。
 
-已授权传输被取消时，Server 会等待 `TRANSFER_COMPLETE` 或 data socket 断开，不会
-提前复用对应物理地址。D2D 没有 Host payload，由 Server 直接调用控制侧 HAL 搬运。
+已授权传输被取消时，Server 会等待完成通知或传输授权连接断开，不会提前复用对应物理
+地址。D2D 不涉及 Host 缓冲区，由 Server 直接调用 HAL 控制面搬运。
+
+这条路径避免了“用户进程到 Server、Server 再到设备”的中转拷贝，但不表示内核和
+XDMA 驱动内部一定是零拷贝。令牌用于可信 Runtime 与 Server 之间的范围校验和生命周期
+管理；设备文件权限仍是防止恶意进程越权访问的系统安全边界。其它 HAL 后端也应采用
+相同模式：Server 签发令牌，用户进程中的数据提供器直接使用设备资源完成传输。
 
 ## BL1 生命周期与 RPC
 
 Service 为每个 Cluster 分别加载 BL1 `ET_EXEC` 的 `PT_LOAD` 段，向选定 Core 的 BL0
 mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 RPC worker 调用
-`npu_hal_irq_wait()`，由 HAL 在超时前返回发生中断的 Cluster 和 IRQ status。FUSE/XDMA
+`npu_hal_irq_wait()`，由 HAL 在超时前返回发生中断的 Cluster 和 IRQ status。XDMA
 后端优先等待 `_events_0`；事件接口缺失或不支持阻塞等待时，兼容轮询也只存在于 HAL
 内部。
 
@@ -211,12 +236,12 @@ profile 系统 Proc clean cache 并发送 `RPC_PROFILE_FLUSH`；Host response �
 `continue_profile` 决定该 Hart 是否继续记录。STOP 会关闭记录、等待正在进行的 flush，
 并把未满尾批次交给 Host。
 
-Server 可同时服务多个 Runtime Session；每个 Session 使用独立的 control/data socket，
-每条连接由独立线程处理。profile read 的条件变量等待会释放 Server mutex，因此
-`dyperf` 长轮询不会阻塞其它 Session 的算子提交和数据搬运。设备级 profile 资源本身
-只允许一个 Runtime 占用，第二个 profiler 会得到 `-EBUSY`。同一个 Runtime 句柄的
-control API 仍按单 socket 串行化；NPU Stream 命令提交到 Server 后，设备调度不受该
-socket 串行化限制。Runtime API 为：
+Server 可同时服务多个 Runtime 会话；每个会话使用独立的控制连接和传输授权连接，每条
+连接由独立线程处理。性能采样读取在等待条件变量时会释放 Server 互斥锁，因此
+`dyperf` 长轮询不会阻塞其它会话提交算子或搬运数据。设备级性能采样资源只允许一个
+Runtime 占用，第二个采样程序会得到 `-EBUSY`。同一个 Runtime 句柄的控制 API 仍按单条
+连接串行化；NPU Stream 命令提交到 Server 后，设备调度不受该连接串行化限制。Runtime
+API 为：
 
 ```c
 npu_profile_options_t options;
@@ -267,6 +292,7 @@ make -C host/driver
 build/host/driver/dayan_server \
   --firmware build/device/npu-os.elf \
   --api-elf build/device/npu-os-api.elf \
+  --xdma-profile simulator \
   --cluster-count 1 --core-mask 0xf
 ```
 
@@ -287,7 +313,7 @@ build/host/driver/dayan_server \
 ## 验证
 
 不依赖模拟器的 Host 测试覆盖双 Cluster 内存可见性、完整 64-bit RPC mailbox、包格式、
-跨 Context 的 immutable Module 共享与 private Module 隔离、socket 对象、token 直传和
+跨 Context 的不可变 Module 共享与私有 Module 隔离、Socket 对象、令牌直传和
 取消回收：
 
 ```sh
@@ -314,7 +340,7 @@ Core、等待 BL1 ready，以及 Unix socket 就绪状态。若启动被阻塞�
 Server 还会记录 Runtime control/data 连接的建立与断开，以及停止过程。
 收到 SIGINT/SIGTERM 后，Server 会停止接收请求，并行向各已启用 Hart 发送短超时的
 `RPC_PROC_KILL_ALL`，随后取消仍在等待的 Host RPC 并回收 scheduler 资源。HAL 会保存
-首个不可恢复的设备 I/O 错误；XDMA/FUSE endpoint 返回 `EIO`、`ENODEV`、`EBADF` 等
+首个不可恢复的设备 I/O 错误；XDMA endpoint 返回 `EIO`、`ENODEV`、`EBADF` 等
 错误时，Server 无需额外信号便会自动退出，并跳过已经不可能完成的 Device 侧清理。
 
 需要由脚本同时启动 cmodel 与 `dayan_server` 时运行：
@@ -324,5 +350,5 @@ Server 还会记录 Runtime control/data 连接的建立与断开，以及停止
 ```
 
 默认 QEMU DRAM 和 HAL Normal memory 均为 4096 MiB。可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者；BL1 的 `RAM_SIZE` 仍只描述固件链接区域。还可用 `RVTNG_CMODEL_DIR`、`RVTNG_QEMU`、`NPU_DEVICE_PREFIX` 和 `NPU_CMODEL_HARTS=1..4` 覆盖其余配置。4-core smoke 同时验证 BL0/BL1 启动、API ELF 动态
-重定位、socket/token H2D/D2H、`kSingleCore` grid、`kFourCore` Cluster grid，以及
-`kFourCore` 对 `task_dim.x == 4` 的约束，以及 profile 满缓冲/尾批次的端到端传输。
+重定位、令牌化 H2D/D2H 直传、`kSingleCore` 网格、`kFourCore` Cluster 网格，以及
+`kFourCore` 对 `task_dim.x == 4` 的约束和性能采样满缓冲区、尾批次的端到端传输。

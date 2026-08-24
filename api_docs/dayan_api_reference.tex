@@ -25,6 +25,34 @@
 \clearpage
 \pagenumbering{arabic}
 
+\section*{阅读约定}
+\addcontentsline{toc}{section}{阅读约定}
+
+本文保留代码中的组件名和硬件名，并对反复使用的术语作如下约定。表中没有列出的普通
+概念尽量使用中文表达，避免用连续的英文词代替说明。
+
+\begin{dayantable}{通用术语}{tab:api-common-terms}{X[28,l] X[72,l]}
+  术语 & 含义 \\
+  Host / Device & Host 是运行 Linux、Runtime 和 Server 的主机；Device 是执行 BL0、BL1 和算子的 NPU。 \\
+  Runtime & 链接到用户程序中的运行库，提供 Buffer、Stream、Kernel 和 Event 等对象。 \\
+  Server / Service & Server 管理用户会话和调度；Service 位于 Server 内部，负责固件、RPC 和算子装载。 \\
+  HAL & Host 侧硬件抽象层。控制面管理设备和物理内存，数据面负责用户缓冲区与设备之间的直接搬运。 \\
+  后端 & HAL 中面向一种驱动或平台的完整控制实现，例如 XDMA 后端。 \\
+  数据提供器 & 运行在用户进程中的数据面实现。它使用设备句柄直接传输数据，不让数据经过 Server 中转。 \\
+  句柄 & 对象或操作系统资源的引用。没有特别说明时，“设备句柄”指 Linux 文件描述符。 \\
+  描述符 & 用结构体描述的一次配置或请求，不表示 Linux 文件描述符。 \\
+  令牌 & Server 为一次传输生成的授权记录，限定提供器、方向、长度和后端私有定位信息。 \\
+  内存分配 & HAL 管理的一段设备物理地址区间，以及它的类别、可见范围和所有者。 \\
+  Cluster / Core / Hart / Proc & Cluster 包含多个 Core；当前软件中一个 Core 对应一个 Hart；Proc 是 BL1 在 Hart 上调度的执行实例。 \\
+  Kernel / Task & Kernel 是可装载的算子入口；Task 是一次网格启动中的逻辑工作项。 \\
+  H2D / D2H / D2D & Host 到 Device、Device 到 Host，以及 Device 内部的三种数据搬运方向。 \\
+  性能采样 & 文中 API 名保留 \code{profile}，正文用“性能采样”表示对应功能。 \\
+\end{dayantable}
+
+除非另有说明，返回 \code{int} 的接口以 0 表示成功，以负 Linux errno 表示失败。
+
+\clearpage
+
 \subfile{chapters/01_hal}
 \clearpage
 \subfile{chapters/02_service}

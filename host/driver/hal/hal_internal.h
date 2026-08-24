@@ -5,7 +5,9 @@
 
 #include "hal.h"
 
-struct npu_hal_ops {
+struct npu_hal_backend_ops {
+    uint32_t backend;
+    int (*open)(const npu_hal_options_t *options, void **state_out);
     void (*close)(void *state);
     int (*get_info)(void *state, npu_hal_info_t *info);
     int (*copy_to_address)(void *state, uint32_t cluster, uint64_t address,
@@ -50,7 +52,7 @@ struct npu_hal_arena {
 };
 
 struct npu_hal {
-    const struct npu_hal_ops *ops;
+    const struct npu_hal_backend_ops *ops;
     void *state;
     int device_status;
     uint32_t backend;
@@ -62,8 +64,7 @@ struct npu_hal {
     uint32_t arena_count;
 };
 
-int npu_hal_fuse_open(const npu_hal_options_t *options,
-                      const struct npu_hal_ops **ops_out, void **state_out);
+extern const struct npu_hal_backend_ops npu_hal_xdma_backend_ops;
 int npu_hal_memory_manager_init(npu_hal_t *hal,
                                 const npu_hal_options_t *options);
 void npu_hal_memory_manager_destroy(npu_hal_t *hal);

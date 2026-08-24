@@ -665,15 +665,14 @@ int dayan_server_create(dayan_server_t **server_out,
     server->options.service.profile = server_device_profile;
     server->options.service.callback_context = server;
     server_log("startup",
-               "configuration: socket=%s backend=%u device_prefix=%s "
-               "device_index=%u requested_clusters=%u cluster_stride=%u "
-               "normal_memory_mib=%u",
-               options->socket_path, options->hal.backend,
-               options->hal.device_prefix ? options->hal.device_prefix :
-                                            "<default>",
-               options->hal.device_index, options->hal.cluster_count,
-               options->hal.cluster_device_stride,
-               options->hal.normal_memory_size_mib);
+               "configuration: socket=%s backend=%u requested_clusters=%u "
+               "cores_per_cluster=%u normal_memory_mib=%u",
+               options->socket_path,
+               options->hal.backend_options ?
+                   options->hal.backend_options->backend : 0U,
+               server->options.hal.cluster_count,
+               server->options.hal.cores_per_cluster,
+               server->options.hal.normal_memory_size_mib);
     server_log("startup",
                "requested masks: clusters=0x%08x cores=0x%08x; "
                "firmware=%s; api_elf=%s",
@@ -703,9 +702,10 @@ int dayan_server_create(dayan_server_t **server_out,
     condition_initialized = 1;
     stage = "opening the HAL";
     server_log("startup", "opening HAL");
-    status = npu_hal_open(&server->hal, &options->hal);
+    status = npu_hal_open(&server->hal, &server->options.hal);
     if (status < 0)
         goto fail;
+    server->options.hal.backend_options = 0;
     server_log("startup", "HAL opened");
     stage = "starting the Device RPC service";
     server_log("startup", "starting Device RPC service");
@@ -2172,7 +2172,7 @@ static int dispatch_data(dayan_server_t *server,
                           sizeof(complete->token)) != 0) {
             status = -EINVAL;
         } else {
-            status = npu_hal_finish_transfer(
+            status = npu_hal_transfer_finish(
                 server->hal, &complete->token,
                 complete->transfer_status);
             command->data.transfer.completed = 1;
@@ -2307,7 +2307,7 @@ static int connection_hello(struct server_connection *connection,
         response.session_id = session->id;
     pthread_mutex_unlock(&server->mutex);
     if (status == 0 && hello->role == NPU_IPC_ROLE_DATA) {
-        status = npu_hal_export_data_plane(server->hal,
+        status = npu_hal_data_plane_export(server->hal,
                                            &response.data_plane, handles);
         if (status == 0)
             handle_count = response.data_plane.handle_count;
@@ -2383,7 +2383,7 @@ static void connection_closed(dayan_server_t *server,
                          command->kind == SERVER_COMMAND_D2H) &&
                         command->data.transfer.granted &&
                         !command->data.transfer.completed) {
-                        (void)npu_hal_finish_transfer(
+                        (void)npu_hal_transfer_finish(
                             server->hal,
                             &command->data.transfer.token, -ECONNRESET);
                         command->data.transfer.completed = 1;

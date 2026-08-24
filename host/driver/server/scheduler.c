@@ -887,7 +887,7 @@ static int handle_simple_action(dayan_server_t *server,
             status = find_transfer_viewer(server, command,
                                            &command->data.transfer.viewer);
             if (status == 0)
-                status = npu_hal_prepare_transfer(
+                status = npu_hal_transfer_prepare(
                     server->hal, buffer->allocation,
                     command->data.transfer.viewer, offset,
                     (size_t)command->data.transfer.size, direction,

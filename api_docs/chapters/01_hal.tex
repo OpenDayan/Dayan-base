@@ -4,126 +4,161 @@
 
 \section{HAL API}\label{sec:api-hal}
 
-HAL 是 Server/Service 与具体设备后端之间的公开控制面，同时向 Runtime data worker
-定义不暴露物理拓扑的数据面 ABI。本章只记录
-\code{host/driver/hal/hal.h} 与 \code{host/driver/hal/dataplane.h}；
-\code{hal_internal.h}、\code{client_internal.h} 和 backend ops 不属于对外 API。
+HAL 向 Server 和 Service 提供设备控制、物理内存管理和传输授权；向 Runtime 提供可在
+用户进程内执行的数据搬运接口。公开头文件位于
+\code{host/driver/hal/include/}，包括 \code{npu_hal_config.h}、\code{hal.h} 和
+\code{dataplane.h}。内部能力表、具体后端的配置以及后端实现不属于公开 API。
 
-除特别说明外，返回 \code{int} 的函数以 0 表示成功，以负 Linux errno 表示失败。
-allocation、HAL 和 data client 都是不透明 handle；创建者负责按本章列出的对应 close/free
-函数释放。
+HAL 由两个相互独立的部分组成：
+
+\begin{itemize}
+  \item 控制面运行在 Server 进程中，负责打开设备、管理物理内存、访问寄存器、处理中断，
+        并为每次 Host 与 Device 之间的传输生成令牌。
+  \item 数据面运行在使用 Runtime 的用户进程中。数据提供器根据令牌直接访问设备文件，
+        不要求 Server 读取或暂存用户数据。
+\end{itemize}
+
+后端是控制面的平台实现，数据提供器是与该后端配套的用户进程传输实现。两者通过数值
+标识和不透明字段配对。通用 HAL 不解释后端写入的不透明字段。
 
 \subsection{公开类型与常量}
 
 \begin{dayantable}{HAL 核心类型}{tab:api-hal-types}{X[34,l] X[66,l]}
   类型 & 用途 \\
-  \code{npu_hal_t} & 一个已打开的控制后端；保存 topology、内存 arena 和首个致命 I/O 状态。 \\
-  \code{npu_hal_allocation_t} & HAL 物理 allocation handle；地址由 viewer 的 Cluster/Core 可见性决定。 \\
-  \code{npu_hal_core_t} & \code{cluster/core} 二元物理执行位置。 \\
-  \code{npu_hal_memory_class_t} & 普通 DRAM、coherent memory 或 Core-local URAM。 \\
-  \code{npu_hal_memory_scope_t} & Device、Cluster 或 Core 可见范围。 \\
-  \code{npu_hal_memory_usage_t} & Buffer、firmware、kernel、heap、launch、shared、URAM、profile 或 Atomic Cache backing。 \\
-  \code{npu_hal_memory_region_t} & 一个可分配地址区间及其 class、scope 和归属位置。 \\
-  \code{npu_hal_options_t} & backend、设备编号、Cluster stride、topology、地址偏移、默认 Normal memory 容量和 region 表。 \\
-  \code{npu_hal_info_t} & 已打开设备的 ABI、topology、data provider 和传输限制。 \\
-  \code{npu_hal_memory_request_t} & allocation 的 class/scope/usage/owner/位置/大小/对齐或固定地址请求。 \\
-  \code{npu_hal_allocation_info_t} & 已分配对象的地址、大小、属性和归属位置快照。 \\
+  \code{npu_hal_t} & 已打开的 HAL 实例，保存所选后端、设备拓扑、内存管理状态和首个不可恢复的 I/O 错误。 \\
+  \code{npu_hal_allocation_t} & 一段由 HAL 管理的设备物理内存。该类型是不透明句柄。 \\
+  \code{npu_hal_core_t} & 用 Cluster 编号和 Core 编号表示一个物理执行位置。 \\
+  \code{npu_hal_memory_class_t} & 内存类别：普通内存、一致性内存或 Core 私有 URAM。 \\
+  \code{npu_hal_memory_scope_t} & 内存可见范围：整个设备、一个 Cluster 或一个 Core。 \\
+  \code{npu_hal_memory_usage_t} & 内存用途，例如用户 Buffer、固件、算子、堆、启动描述符、共享区、URAM、性能采样区或 Atomic Cache 后备区。 \\
+  \code{npu_hal_memory_region_t} & 一段可分配的物理地址区间，以及它的类别、可见范围和归属位置。 \\
+  \code{npu_hal_backend_options_t} & 所有后端配置共有的头部，包含配置版本和后端标识。 \\
+  \code{npu_hal_options_t} & HAL 通用配置，包含设备拓扑、普通内存默认容量、内存区域表和后端配置指针。 \\
+  \code{npu_hal_info_t} & 已打开 HAL 的版本、拓扑、数据提供器和传输能力。 \\
+  \code{npu_hal_memory_request_t} & 一次内存申请的类别、范围、用途、所有者、位置、大小、对齐和可选固定地址。 \\
+  \code{npu_hal_allocation_info_t} & 已分配内存的地址和属性快照。 \\
 \end{dayantable}
 
 \begin{dayantable}{HAL 数据面类型}{tab:api-hal-data-types}{X[36,l] X[64,l]}
   类型 & 用途 \\
-  \code{npu_hal_data_client_t} & Runtime 侧导入 provider handles 后得到的不透明 client。 \\
-  \code{npu_hal_data_direction_t} & \code{HOST_TO_DEVICE} 或 \code{DEVICE_TO_HOST}。 \\
-  \code{npu_hal_data_export_t} & Server 通过 SCM\_RIGHTS 发送的 provider、handle 数与 opaque 参数。 \\
-  \code{npu_hal_data_token_t} & 一次传输的 provider、方向、长度和 opaque 定位信息。 \\
+  \code{npu_hal_data_plane_t} & Runtime 导入设备句柄后创建的数据面实例。该类型是不透明句柄。 \\
+  \code{npu_hal_data_direction_t} & 传输方向：Host 到 Device，或 Device 到 Host。 \\
+  \code{npu_hal_data_export_t} & 数据提供器标识、设备句柄数量，以及仅由该提供器解释的初始化数据。 \\
+  \code{npu_hal_data_token_t} & 一次传输的授权记录，包含提供器、方向、长度和后端私有定位信息。 \\
 \end{dayantable}
 
 \begin{dayantable}{HAL 枚举值与上限}{tab:api-hal-enums}{X[47,l] X[53,l]}
   API & 含义 \\
-  \code{NPU_HAL_MAX_CLUSTERS} / \code{NPU_HAL_MAX_CORES_PER_CLUSTER} & ABI 最多表示 32 个 Cluster、每 Cluster 32 个 Core。 \\
-  \code{NPU_HAL_MEMORY_NORMAL} / \code{NPU_HAL_MEMORY_COHERENT} / \code{NPU_HAL_MEMORY_URAM} & 三种 memory class。 \\
-  \code{NPU_HAL_MEMORY_DEVICE} / \code{NPU_HAL_MEMORY_CLUSTER} / \code{NPU_HAL_MEMORY_CORE} & 三种 visibility scope。 \\
-  \code{NPU_HAL_MEMORY_BUFFER} / \code{NPU_HAL_MEMORY_FIRMWARE} / \code{NPU_HAL_MEMORY_KERNEL} & 普通 Buffer、固件与已装载 kernel 用途。 \\
-  \code{NPU_HAL_MEMORY_HEAP} / \code{NPU_HAL_MEMORY_LAUNCH} / \code{NPU_HAL_MEMORY_SHARED} & Device heap、launch descriptor 与 coherent shared 用途。 \\
-  \code{NPU_HAL_MEMORY_KERNEL_URAM} / \code{NPU_HAL_MEMORY_PROFILE} / \code{NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING} & Kernel URAM、profile FIFO 与 Atomic Cache backing 用途。 \\
-  \code{NPU_HAL_DATA_HOST_TO_DEVICE} / \code{NPU_HAL_DATA_DEVICE_TO_HOST} & token 数据面的两个传输方向。 \\
-  \code{NPU_HAL_DATA_MAX_HANDLES} & 一次 data-plane export 最多携带 64 个 provider handle。 \\
+  \code{NPU_HAL_MAX_CLUSTERS} / \code{NPU_HAL_MAX_CORES_PER_CLUSTER} & 最多表示 32 个 Cluster，每个 Cluster 最多 32 个 Core。 \\
+  \code{NPU_HAL_MEMORY_NORMAL} / \code{NPU_HAL_MEMORY_COHERENT} / \code{NPU_HAL_MEMORY_URAM} & 三种内存类别。 \\
+  \code{NPU_HAL_MEMORY_DEVICE} / \code{NPU_HAL_MEMORY_CLUSTER} / \code{NPU_HAL_MEMORY_CORE} & 三种内存可见范围。 \\
+  \code{NPU_HAL_MEMORY_BUFFER} / \code{NPU_HAL_MEMORY_FIRMWARE} / \code{NPU_HAL_MEMORY_KERNEL} & 用户 Buffer、固件和算子代码用途。 \\
+  \code{NPU_HAL_MEMORY_HEAP} / \code{NPU_HAL_MEMORY_LAUNCH} / \code{NPU_HAL_MEMORY_SHARED} & Device 堆、启动描述符和共享区用途。 \\
+  \code{NPU_HAL_MEMORY_KERNEL_URAM} / \code{NPU_HAL_MEMORY_PROFILE} / \code{NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING} & 算子 URAM、性能采样区和 Atomic Cache 后备区用途。 \\
+  \code{NPU_HAL_DATA_HOST_TO_DEVICE} / \code{NPU_HAL_DATA_DEVICE_TO_HOST} & 两种用户进程直传方向。 \\
+  \code{NPU_HAL_DATA_MAX_HANDLES} & 一个数据面实例最多导入 64 个设备句柄。 \\
+  \code{NPU_HAL_BACKEND_XDMA} / \code{NPU_HAL_DATA_PROVIDER_XDMA} & XDMA 控制后端和与其配套的数据提供器标识。 \\
 \end{dayantable}
 
-版本字段分别使用 \code{NPU_HAL_ABI_VERSION}、\code{NPU_HAL_OPTIONS_VERSION}、
+结构版本由 \code{NPU_HAL_ABI_VERSION}、\code{NPU_HAL_OPTIONS_VERSION}、
 \code{NPU_HAL_MEMORY_REQUEST_VERSION}、\code{NPU_HAL_DATA_EXPORT_VERSION} 和
-\code{NPU_HAL_DATA_TOKEN_VERSION}。任意位置使用 \code{NPU_HAL_ANY_CLUSTER}、
-\code{NPU_HAL_ANY_CORE}；无限等待使用 \code{NPU_HAL_TIMEOUT_INFINITE}。当前公开 backend
-和 data provider 分别为 \code{NPU_HAL_BACKEND_FUSE_XDMA} 与
-\code{NPU_HAL_DATA_PROVIDER_FD_OFFSET}。
+\code{NPU_HAL_DATA_TOKEN_VERSION} 标识。\code{NPU_HAL_ANY_CLUSTER} 和
+\code{NPU_HAL_ANY_CORE} 表示任意物理位置；\code{NPU_HAL_TIMEOUT_INFINITE} 表示无限等待。
 
-\subsection{生命周期与 topology}
+\subsection{生命周期与设备拓扑}
 
 \begin{dayantable}{HAL 生命周期与查询}{tab:api-hal-life}{X[38,l] X[62,l]}
   API & 行为 \\
-  \code{npu_hal_options_init} & 填充 backend、单 Cluster 四 Core 等默认选项和版本。 \\
-  \code{npu_hal_open} & 校验 options，建立内存管理器并打开所选 backend。 \\
-  \code{npu_hal_close} & 关闭 backend，销毁全部 arena 与同步对象；接受空指针。 \\
-  \code{npu_hal_device_status} & 返回 0，或首个不可恢复 backend I/O 错误；故障状态具有粘性。 \\
-  \code{npu_hal_get_info} & 返回规范化后的 HAL ABI、topology 和 data-plane 能力。 \\
-  \code{npu_hal_get_memory_region} & 按索引返回一个公开 memory region。 \\
-  \code{npu_hal_core_valid} & 判断 Cluster/Core 二元组是否落在当前 topology 内。 \\
-  \code{npu_hal_memory_capacity} & 累加指定 viewer 可见的某类内存总容量。 \\
+  \code{npu_hal_options_init} & 写入配置版本和一个 Cluster、每个 Cluster 四个 Core 的默认拓扑，不写入任何后端私有配置。 \\
+  \code{npu_hal_open} & 校验通用配置，建立内存管理器并打开所选后端。未指定后端配置时使用注册表中的默认后端。 \\
+  \code{npu_hal_close} & 关闭后端并释放全部内存管理和同步状态。可传入空指针。 \\
+  \code{npu_hal_device_status} & 返回 0，或此前记录的首个不可恢复设备 I/O 错误。 \\
+  \code{npu_hal_get_info} & 返回 HAL 版本、设备拓扑、数据提供器和传输限制。 \\
+  \code{npu_hal_get_memory_region} & 按索引读取一项物理内存区域配置。 \\
+  \code{npu_hal_core_valid} & 判断给定 Cluster 和 Core 编号是否存在。 \\
+  \code{npu_hal_memory_capacity} & 统计指定 Core 可见的某类内存总容量。 \\
 \end{dayantable}
 
-\subsection{地址、寄存器、IRQ 与启动}
+\subsection{设备地址、寄存器、中断与启动}
 
-raw address API 只供 BL1、RPC 和 Service 实现使用；Runtime 应只持有逻辑 Buffer。
-Cluster 参数选择物理地址空间，Core 参数进一步选择 mailbox 或启动目标。
+原始设备地址接口只供 Service 的固件和 RPC 实现使用。Runtime 只操作逻辑 Buffer，
+不会取得设备物理地址。接口中的 Cluster 参数选择一套物理地址空间，Core 参数进一步
+选择该 Cluster 中的执行位置。
 
 \begin{dayantable}{HAL 控制面访问}{tab:api-hal-control}{X[39,l] X[61,l]}
   API & 行为 \\
-  \code{npu_hal_copy_to_address} & 将 Host 字节写到指定 Cluster 的原始设备地址。 \\
-  \code{npu_hal_copy_from_address} & 从指定 Cluster 的原始设备地址读取到 Host。 \\
-  \code{npu_hal_copy_address} & 通过有界 Host staging chunk 在同一 Cluster 内完成 D2D 拷贝。 \\
-  \code{npu_hal_register_read} & 从 backend 控制窗口读取任意长度寄存器字段。 \\
-  \code{npu_hal_register_write} & 向 backend 控制窗口写入任意长度寄存器字段。 \\
-  \code{npu_hal_irq_status} & 读取一个 Cluster 的 Host IRQ pending bitmap。 \\
-  \code{npu_hal_irq_wait} & 等待任一 Cluster 的非零 IRQ；超时返回 \code{-ETIMEDOUT} 并清空输出。 \\
-  \code{npu_hal_irq_ack} & 向目标 Cluster 写 IRQ clear mask。 \\
-  \code{npu_hal_irq_mailbox} & 读取指定 Core 对应的 Host IRQ mailbox command。 \\
-  \code{npu_hal_command_submit} & 写 Device mailbox 并置位目标 Core 的 MSIP。 \\
-  \code{npu_hal_wait_command_consumed} & 等待目标 Core 清除 MSIP，受毫秒 timeout 限制。 \\
-  \code{npu_hal_boot_core} & 等待旧命令消费、提交 BL1 entry，再等待 BL0 消费启动命令。 \\
+  \code{npu_hal_copy_to_address} & 把 Host 内存中的数据写到指定 Cluster 的设备物理地址。 \\
+  \code{npu_hal_copy_from_address} & 从指定 Cluster 的设备物理地址读到 Host 内存。 \\
+  \code{npu_hal_copy_address} & 借助固定大小的 Host 临时缓冲区，在同一 Cluster 内复制两段设备内存。 \\
+  \code{npu_hal_register_read} & 从后端控制窗口读取寄存器。 \\
+  \code{npu_hal_register_write} & 向后端控制窗口写寄存器。 \\
+  \code{npu_hal_irq_status} & 读取一个 Cluster 尚未处理的 Host 中断位图。 \\
+  \code{npu_hal_irq_wait} & 等待任一 Cluster 产生中断；超时返回 \code{-ETIMEDOUT} 并清空输出参数。 \\
+  \code{npu_hal_irq_ack} & 清除目标 Cluster 中指定的中断位。 \\
+  \code{npu_hal_irq_mailbox} & 读取指定 Core 的 Host 中断邮箱命令。 \\
+  \code{npu_hal_command_submit} & 写入 Device 邮箱并触发目标 Core 的软件中断。 \\
+  \code{npu_hal_wait_command_consumed} & 等待目标 Core 取走邮箱命令。超时时间以毫秒为单位。 \\
+  \code{npu_hal_boot_core} & 等待旧命令结束，提交 BL1 入口，再等待 BL0 取走启动命令。 \\
 \end{dayantable}
 
-设备文件返回 \code{EIO}、\code{ENODEV}、\code{EBADF} 等不可恢复错误时，访问函数会
-记录该状态；后续控制访问直接返回同一故障，供 Server 自动退出。
+设备文件返回 \code{EIO}、\code{ENODEV}、\code{EBADF} 等不可恢复错误时，HAL 会保存
+首个错误。后续控制操作直接返回该错误，Server 据此停止服务。
 
 \subsection{物理内存管理}
 
-\begin{dayantable}{HAL allocation API}{tab:api-hal-memory}{X[39,l] X[61,l]}
+\begin{dayantable}{HAL 内存管理 API}{tab:api-hal-memory}{X[39,l] X[61,l]}
   API & 行为 \\
-  \code{npu_hal_memory_request_init} & 初始化通用 Device-scope 普通 Buffer 请求及 64-byte 对齐。 \\
-  \code{npu_hal_memory_alloc} & 在匹配的 region 中按大小和对齐选择空闲地址。 \\
-  \code{npu_hal_memory_reserve} & 在匹配 region 中占用指定 \code{fixed_address} 范围。 \\
-  \code{npu_hal_memory_free} & 从 arena 移除 allocation；handle 随即失效。 \\
-  \code{npu_hal_memory_info} & 返回 allocation 的规范化属性。 \\
-  \code{npu_hal_memory_visible} & 判断 allocation 是否对指定 viewer 可见。 \\
-  \code{npu_hal_address_valid} & 判断原始地址范围是否属于 viewer 可见的任一 region。 \\
-  \code{npu_hal_memory_address} & 取得 allocation 对指定 viewer 的设备地址。 \\
-  \code{npu_hal_memory_write} & 校验 handle、viewer、offset 和长度后写入 allocation。 \\
-  \code{npu_hal_memory_read} & 校验 handle、viewer、offset 和长度后读出 allocation。 \\
+  \code{npu_hal_memory_request_init} & 初始化一个设备级普通 Buffer 申请，默认按 64 字节对齐。 \\
+  \code{npu_hal_memory_alloc} & 在类别、可见范围和位置均匹配的区域中查找一段空闲地址。 \\
+  \code{npu_hal_memory_reserve} & 在匹配的区域中占用调用方指定的固定地址范围。 \\
+  \code{npu_hal_memory_free} & 释放一段 HAL 内存分配；调用后原句柄失效。 \\
+  \code{npu_hal_memory_info} & 读取一段已分配内存的地址和属性。 \\
+  \code{npu_hal_memory_visible} & 判断一段已分配内存是否对指定 Core 可见。 \\
+  \code{npu_hal_address_valid} & 判断一个原始地址范围是否落在指定 Core 可见的区域内。 \\
+  \code{npu_hal_memory_address} & 取得一段已分配内存对指定 Core 可见的设备地址。 \\
+  \code{npu_hal_memory_write} & 校验句柄、访问位置和范围后，把 Host 数据写入已分配内存。 \\
+  \code{npu_hal_memory_read} & 校验句柄、访问位置和范围后，把已分配内存读到 Host。 \\
 \end{dayantable}
 
-\subsection{token 数据面}
+\subsection{令牌化数据面}
 
-\begin{dayantable}{HAL data-plane API}{tab:api-hal-data}{X[42,l] X[58,l]}
+数据面的目标是让用户进程直接访问设备，避免把大块数据先送到 Server 再转发。当前
+XDMA 数据提供器不创建、不连接也不读写 Socket。它运行在 Runtime 所在的用户进程中，
+直接对 \code{/dev} 或 \code{/tmp/virtual_npu} 下的 H2C/C2H 设备文件执行
+\code{pread}/\code{pwrite}。
+
+Unix 域 Socket 只属于 Runtime 与 Server 之间的通用协议。建立会话时，Server 使用
+\code{SCM_RIGHTS} 把已经打开的设备文件描述符交给用户进程。\code{SCM_RIGHTS} 传递的
+是文件描述符，不是待搬运的数据。之后的授权请求和完成通知仍是短控制消息；Host Buffer
+中的数据不会进入 Socket，也不会进入 Server 缓冲区。因此这里减少的是中转拷贝，
+并不承诺内核和设备驱动层面的零拷贝。
+
+\begin{dayantable}{HAL 数据面 API}{tab:api-hal-data}{X[42,l] X[58,l]}
   API & 行为 \\
-  \code{npu_hal_export_data_plane} & 导出 provider 描述和一组可经 SCM\_RIGHTS 发送的 handles。 \\
-  \code{npu_hal_prepare_transfer} & 校验 allocation 范围和传输限制，签发一次 scoped token。 \\
-  \code{npu_hal_finish_transfer} & 校验原 token 并向 provider 提交 Host 传输结果。 \\
-  \code{npu_hal_data_client_import} & Runtime 导入 export 与 handles，取得匹配 provider client。 \\
-  \code{npu_hal_data_client_close} & 关闭 client 持有的 handles 并释放 provider 状态。 \\
-  \code{npu_hal_data_client_transfer} & 使用 token 直接在 Host buffer 与 provider 之间搬运 payload。 \\
+  \code{npu_hal_data_plane_export} & Server 侧要求后端填写数据提供器标识，并复制用户进程直接访问设备所需的文件描述符。该函数只生成导出结果，不负责 Socket 发送。 \\
+  \code{npu_hal_transfer_prepare} & Server 侧校验内存归属、可见范围、偏移、长度和方向，再为这一笔传输生成令牌。 \\
+  \code{npu_hal_transfer_finish} & Server 侧核对用户进程返回的完整令牌，把数据提供器的传输结果交给后端完成收尾，并返回处理结果。 \\
+  \code{npu_hal_data_plane_import} & Runtime 侧根据提供器标识选择实现，接管导入的设备文件描述符，并创建数据面实例。 \\
+  \code{npu_hal_data_plane_close} & 关闭数据面实例持有的设备文件描述符并释放内部状态。 \\
+  \code{npu_hal_data_plane_transfer} & Runtime 侧把令牌和用户缓冲区交给数据提供器。XDMA 提供器据此选择 H2C 或 C2H 文件、Cluster 和设备偏移，直接执行读写。 \\
 \end{dayantable}
 
-export/token 的 opaque 字段只由 provider 解释。Runtime 仅校验版本、方向和长度，并在
-完成消息中原样回传 token；Cluster/Core 和物理地址不会进入 Runtime 公共对象 API。
+一次 H2D 或 D2H 传输按以下顺序执行：
+
+\begin{enumerate}
+  \item Runtime 只把逻辑 Buffer、偏移和长度提交给 Server，不发送用户数据。
+  \item Server 检查对象所有权和物理内存范围。命令可以执行时，HAL 生成一次性令牌。
+  \item Runtime 的传输线程取得令牌，调用匹配的数据提供器。XDMA 提供器直接读写设备文件。
+  \item Runtime 把原令牌和传输结果交还 Server。Server 核对后完成 Event，并允许相关内存被释放或复用。
+\end{enumerate}
+
+导出描述和令牌中的后端私有字段只由匹配的数据提供器解释。通用 Runtime 不推导物理
+地址，也不需要知道 Cluster 到设备文件的映射。其它 HAL 后端应遵循同一原则：控制面
+签发令牌，用户进程中的数据提供器使用导入的设备资源直接传输；具体实现可以使用
+\code{read/write}、\code{ioctl} 或 \code{mmap}，但不应让 Server 代理数据本身。
+
+令牌是 Runtime、Server 和 HAL 之间的协议授权与生命周期凭据。当前 XDMA 驱动把完整
+设备文件描述符交给用户进程，因此令牌本身不是针对恶意进程的内核级访问隔离；进程权限
+和设备文件权限仍是安全边界。
 
 \end{document}

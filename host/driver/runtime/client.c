@@ -495,9 +495,9 @@ int npu_runtime_open(npu_runtime_t **runtime_out,
                    runtime->session_id, &data_hello, handles, &handle_count);
     if (status < 0)
         goto fail;
-    status = npu_hal_data_client_import(&runtime->data_client,
-                                        &data_hello.data_plane, handles,
-                                        handle_count);
+    status = npu_hal_data_plane_import(&runtime->data_plane,
+                                       &data_hello.data_plane, handles,
+                                       handle_count);
     close_handles(handles, handle_count);
     handle_count = 0;
     if (status < 0)
@@ -521,7 +521,7 @@ fail:
         pthread_mutex_unlock(&runtime->mutex);
         (void)pthread_join(runtime->data_worker, 0);
     }
-    npu_hal_data_client_close(runtime->data_client);
+    npu_hal_data_plane_close(runtime->data_plane);
     if (runtime->data_fd >= 0)
         close(runtime->data_fd);
     if (runtime->control_fd >= 0)

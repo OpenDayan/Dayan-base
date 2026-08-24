@@ -5,7 +5,9 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 server_bin=${DAYAN_SERVER_BIN:-"$repo_dir/build/host/driver/dayan_server"}
 firmware=${DAYAN_FIRMWARE:-"$repo_dir/build/device/npu-os.elf"}
 api_elf=${DAYAN_API_ELF:-"$repo_dir/build/device/npu-os-api.elf"}
-device_prefix=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
+xdma_profile=${NPU_XDMA_PROFILE:-simulator}
+xdma_device_dir=${NPU_XDMA_DEVICE_DIR:-${NPU_DEVICE_PREFIX:-}}
+xdma_mmio_offset=${NPU_XDMA_MMIO_OFFSET:-}
 device_index=${NPU_DEVICE_INDEX:-0}
 cluster_count=${NPU_CLUSTER_COUNT:-1}
 cluster_stride=${NPU_CLUSTER_STRIDE:-1}
@@ -30,7 +32,9 @@ Start dayan_server after an external backend exposes its XDMA-compatible
 device files.  The backend may be cmodel, npu-cluster-sim, or hardware.
 
 Environment:
-  NPU_DEVICE_PREFIX          device directory (default: /tmp/virtual_npu)
+  NPU_XDMA_PROFILE           simulator or fpga (default: simulator)
+  NPU_XDMA_DEVICE_DIR        override the profile's XDMA device directory
+  NPU_XDMA_MMIO_OFFSET       override the profile's low-address MMIO offset
   NPU_DEVICE_INDEX           first XDMA index (default: 0)
   NPU_CLUSTER_COUNT          number of Clusters (default: 1)
   NPU_CLUSTER_STRIDE         XDMA index stride (default: 1)
@@ -59,8 +63,9 @@ extra_args=()
 for ((arg_index = 0; arg_index < ${#forwarded_args[@]}; ++arg_index)); do
     option=${forwarded_args[arg_index]}
     case "$option" in
-        --socket|--firmware|--api-elf|--device-prefix|--device-index|\
-        --cluster-count|--cluster-stride|--cluster-mask|--core-mask)
+        --socket|--firmware|--api-elf|--xdma-profile|--xdma-device-dir|\
+        --xdma-mmio-offset|--device-prefix|--device-index|--cluster-count|\
+        --cluster-stride|--cluster-mask|--core-mask)
             if [ "$((arg_index + 1))" -ge "${#forwarded_args[@]}" ]; then
                 echo "missing value after $option" >&2
                 exit 2
@@ -70,7 +75,9 @@ for ((arg_index = 0; arg_index < ${#forwarded_args[@]}; ++arg_index)); do
                 --socket) socket_path=$value ;;
                 --firmware) firmware=$value ;;
                 --api-elf) api_elf=$value ;;
-                --device-prefix) device_prefix=$value ;;
+                --xdma-profile) xdma_profile=$value ;;
+                --xdma-device-dir|--device-prefix) xdma_device_dir=$value ;;
+                --xdma-mmio-offset) xdma_mmio_offset=$value ;;
                 --device-index) device_index=$value ;;
                 --cluster-count) cluster_count=$value ;;
                 --cluster-stride) cluster_stride=$value ;;
@@ -81,6 +88,19 @@ for ((arg_index = 0; arg_index < ${#forwarded_args[@]}; ++arg_index)); do
         *) extra_args+=("$option") ;;
     esac
 done
+
+case "$xdma_profile" in
+    simulator)
+        xdma_device_dir=${xdma_device_dir:-/tmp/virtual_npu}
+        ;;
+    fpga)
+        xdma_device_dir=${xdma_device_dir:-/dev}
+        ;;
+    *)
+        echo "NPU_XDMA_PROFILE must be simulator or fpga" >&2
+        exit 2
+        ;;
+esac
 
 positive_decimal()
 {
@@ -160,8 +180,8 @@ devices_ready()
 
     for ((cluster = 0; cluster < cluster_count; ++cluster)); do
         index=$((device_index + cluster * cluster_stride))
-        if [ ! -w "$device_prefix/xdma${index}_h2c_0" ] ||
-           [ ! -r "$device_prefix/xdma${index}_c2h_0" ]; then
+        if [ ! -w "$xdma_device_dir/xdma${index}_h2c_0" ] ||
+           [ ! -r "$xdma_device_dir/xdma${index}_c2h_0" ]; then
             return 1
         fi
     done
@@ -170,10 +190,10 @@ devices_ready()
 
 attempt=0
 max_attempts=$((wait_seconds * 10))
-status "waiting up to ${wait_seconds}s for ${cluster_count} XDMA device(s) under $device_prefix"
+status "waiting up to ${wait_seconds}s for ${cluster_count} XDMA device(s) under $xdma_device_dir"
 while ! devices_ready; do
     if [ "$attempt" -ge "$max_attempts" ]; then
-        echo "XDMA device files did not appear under $device_prefix" >&2
+        echo "XDMA device files did not appear under $xdma_device_dir" >&2
         exit 1
     fi
     attempt=$((attempt + 1))
@@ -188,12 +208,16 @@ server_args=(
     --socket "$socket_path"
     --firmware "$firmware"
     --api-elf "$api_elf"
-    --device-prefix "$device_prefix"
+    --xdma-profile "$xdma_profile"
+    --xdma-device-dir "$xdma_device_dir"
     --device-index "$device_index"
     --cluster-count "$cluster_count"
     --cluster-stride "$cluster_stride"
     --core-mask "$core_mask"
 )
+if [ -n "$xdma_mmio_offset" ]; then
+    server_args+=(--xdma-mmio-offset "$xdma_mmio_offset")
+fi
 if [ -n "$cluster_mask" ]; then
     server_args+=(--cluster-mask "$cluster_mask")
 fi

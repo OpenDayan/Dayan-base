@@ -1,0 +1,69 @@
+#ifndef NPU_HOST_HAL_PUBLIC_CONFIG_H
+#define NPU_HOST_HAL_PUBLIC_CONFIG_H
+
+/* Public HAL topology and backend configuration. */
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define NPU_HAL_OPTIONS_VERSION         4U
+#define NPU_HAL_MAX_CLUSTERS            32U
+#define NPU_HAL_MAX_CORES_PER_CLUSTER   32U
+
+#define NPU_HAL_BACKEND_XDMA            1U
+#define NPU_HAL_ANY_CLUSTER             UINT32_MAX
+#define NPU_HAL_ANY_CORE                UINT32_MAX
+
+typedef struct npu_hal_core {
+    uint32_t cluster;
+    uint32_t core;
+} npu_hal_core_t;
+
+typedef enum npu_hal_memory_class {
+    NPU_HAL_MEMORY_NORMAL = 1,
+    NPU_HAL_MEMORY_COHERENT = 2,
+    NPU_HAL_MEMORY_URAM = 3,
+} npu_hal_memory_class_t;
+
+typedef enum npu_hal_memory_scope {
+    NPU_HAL_MEMORY_DEVICE = 1,
+    NPU_HAL_MEMORY_CLUSTER = 2,
+    NPU_HAL_MEMORY_CORE = 3,
+} npu_hal_memory_scope_t;
+
+/* A backend may expose multiple regions with different visibility scopes. */
+typedef struct npu_hal_memory_region {
+    uint64_t base;
+    uint64_t size;
+    uint32_t memory_class;
+    uint32_t scope;
+    uint32_t cluster;
+    uint32_t core;
+} npu_hal_memory_region_t;
+
+typedef struct npu_hal_backend_options {
+    uint32_t version;
+    uint32_t backend;
+} npu_hal_backend_options_t;
+
+/* Configuration is consumed only by dayan_server, never by applications. */
+typedef struct npu_hal_options {
+    uint32_t version;
+    uint32_t cluster_count;
+    uint32_t cores_per_cluster;
+    uint32_t normal_memory_size_mib;
+    const npu_hal_backend_options_t *backend_options;
+    const npu_hal_memory_region_t *memory_regions;
+    uint32_t memory_region_count;
+} npu_hal_options_t;
+
+void npu_hal_options_init(npu_hal_options_t *options);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

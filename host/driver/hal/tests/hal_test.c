@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "hal.h"
+#include "backend/xdma/npu_hal_xdma.h"
 #include "platform_regs.h"
 #include "rpc.h"
 
@@ -111,7 +112,8 @@ int main(void)
     int handles[NPU_HAL_DATA_MAX_HANDLES];
     npu_hal_data_token_t token;
     npu_hal_options_t options;
-    npu_hal_data_client_t *client = 0;
+    npu_hal_xdma_options_t xdma_options;
+    npu_hal_data_plane_t *data_plane = 0;
     npu_hal_info_t info;
     npu_hal_t *hal = 0;
     npu_hal_core_t core0 = { 0, 0 };
@@ -125,20 +127,37 @@ int main(void)
     uint32_t pending = 0;
     int fd;
 
+    assert(npu_hal_xdma_options_init(
+               &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) == 0);
+    assert(strcmp(xdma_options.device_directory,
+                  NPU_HAL_XDMA_SIMULATOR_DEVICE_DIRECTORY) == 0);
+    assert(xdma_options.mmio_address_offset == 0);
+    assert(npu_hal_xdma_options_init(
+               &xdma_options, NPU_HAL_XDMA_PROFILE_FPGA) == 0);
+    assert(strcmp(xdma_options.device_directory,
+                  NPU_HAL_XDMA_FPGA_DEVICE_DIRECTORY) == 0);
+    assert(xdma_options.mmio_address_offset ==
+           NPU_HAL_XDMA_FPGA_MMIO_OFFSET);
+    assert(npu_hal_xdma_options_init(&xdma_options, 0) == -EINVAL);
+    assert(npu_hal_xdma_options_init(
+               &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) == 0);
+
     assert(mkdtemp(directory));
     create_endpoint(directory, 0);
     create_endpoint(directory, 2);
     npu_hal_options_init(&options);
-    options.device_prefix = directory;
+    xdma_options.device_directory = directory;
+    xdma_options.mmio_address_offset = 0x10000;
+    options.backend_options = &xdma_options.base;
     options.cluster_count = 2;
     options.cores_per_cluster = 4;
-    options.cluster_device_stride = 2;
+    xdma_options.cluster_device_stride = 2;
     options.memory_regions = regions;
     options.memory_region_count = sizeof(regions) / sizeof(regions[0]);
     assert(npu_hal_open(&hal, &options) == 0);
     assert(npu_hal_get_info(hal, &info) == 0);
     assert(info.cluster_count == 2 && info.cores_per_cluster == 4);
-    assert(info.data_provider == NPU_HAL_DATA_PROVIDER_FD_OFFSET);
+    assert(info.data_provider == NPU_HAL_DATA_PROVIDER_XDMA);
     assert(info.data_handle_count == 4 && info.transfer_alignment == 1);
     {
         struct irq_writer writer;
@@ -166,7 +185,18 @@ int main(void)
                                    sizeof(value)) == 0);
     fd = endpoint_fd(directory, 2, "h2c_0", O_RDONLY);
     assert(fd >= 0);
-    assert(pread(fd, &observed, sizeof(observed), 0x1230) ==
+    assert(pread(fd, &observed, sizeof(observed), 0x11230) ==
+           (ssize_t)sizeof(observed));
+    close(fd);
+    assert(observed == value);
+
+    value = UINT64_C(0x8877665544332211);
+    assert(npu_hal_copy_to_address(hal, 1, UINT64_C(0x80001230),
+                                   &value, sizeof(value)) == 0);
+    fd = endpoint_fd(directory, 2, "h2c_0", O_RDONLY);
+    assert(fd >= 0);
+    observed = 0;
+    assert(pread(fd, &observed, sizeof(observed), UINT64_C(0x80001230)) ==
            (ssize_t)sizeof(observed));
     close(fd);
     assert(observed == value);
@@ -178,11 +208,11 @@ int main(void)
     assert(fd >= 0);
     observed = 0;
     assert(pread(fd, &observed, sizeof(observed),
-                 DAYAN_DEVICE_MAILBOX(core1.core)) ==
+                 0x10000 + DAYAN_DEVICE_MAILBOX(core1.core)) ==
            (ssize_t)sizeof(observed));
     assert(observed == command);
     assert(pread(fd, &pending, sizeof(pending),
-                 DAYAN_CLINT_MSIP(core1.core)) ==
+                 0x10000 + DAYAN_CLINT_MSIP(core1.core)) ==
            (ssize_t)sizeof(pending));
     close(fd);
     assert(pending == 1U);
@@ -234,35 +264,36 @@ int main(void)
     request.size = 0x100;
     request.alignment = 0x100;
 
-    assert(npu_hal_export_data_plane(hal, &exported, handles) == 0);
+    assert(npu_hal_data_plane_export(hal, &exported, handles) == 0);
     assert(exported.handle_count == 4);
-    assert(npu_hal_data_client_import(&client, &exported, handles,
-                                      exported.handle_count) == 0);
-    assert(npu_hal_prepare_transfer(hal, global, core1, 0, sizeof(value),
+    assert(npu_hal_data_plane_import(&data_plane, &exported, handles,
+                                     exported.handle_count) == 0);
+    assert(npu_hal_transfer_prepare(hal, global, core1, 0, sizeof(value),
                                     NPU_HAL_DATA_HOST_TO_DEVICE,
                                     &token) == 0);
     assert(token.provider == info.data_provider &&
            token.direction == NPU_HAL_DATA_HOST_TO_DEVICE);
+    assert(token.opaque[0] == 0x11000 && token.opaque[1] == 1);
     value = UINT64_C(0xaabbccddeeff0011);
-    assert(npu_hal_data_client_transfer(client, &token, &value,
-                                        sizeof(value)) == 0);
-    assert(npu_hal_finish_transfer(hal, &token, 0) == 0);
+    assert(npu_hal_data_plane_transfer(data_plane, &token, &value,
+                                       sizeof(value)) == 0);
+    assert(npu_hal_transfer_finish(hal, &token, 0) == 0);
     fd = endpoint_fd(directory, 2, "h2c_0", O_RDONLY);
     assert(fd >= 0);
     observed = 0;
-    assert(pread(fd, &observed, sizeof(observed), 0x1000) ==
+    assert(pread(fd, &observed, sizeof(observed), 0x11000) ==
            (ssize_t)sizeof(observed));
     close(fd);
     assert(observed == value);
 
-    npu_hal_data_client_close(client);
+    npu_hal_data_plane_close(data_plane);
     {
         npu_hal_data_export_t unsupported = exported;
-        npu_hal_data_client_t *unexpected = 0;
+        npu_hal_data_plane_t *unexpected = 0;
 
         unsupported.provider = UINT32_MAX;
-        assert(npu_hal_data_client_import(&unexpected, &unsupported, handles,
-                                          unsupported.handle_count) ==
+        assert(npu_hal_data_plane_import(&unexpected, &unsupported, handles,
+                                         unsupported.handle_count) ==
                -ENOTSUP);
         assert(!unexpected);
     }

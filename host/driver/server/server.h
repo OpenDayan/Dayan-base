@@ -5,7 +5,7 @@
 
 #include "service.h"
 
-#define DAYAN_SERVER_OPTIONS_VERSION 7U
+#define DAYAN_SERVER_OPTIONS_VERSION 10U
 
 typedef struct dayan_server dayan_server_t;
 

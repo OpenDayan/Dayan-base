@@ -17,6 +17,35 @@
 #define NPU_IRQ_MAILBOX_OFFSET   0x20U
 #define NPU_IRQ_POLL_INTERVAL_NS 1000000L
 
+static const struct npu_hal_backend_ops *const backends[] = {
+    &npu_hal_xdma_backend_ops,
+};
+
+static const struct npu_hal_backend_ops *default_backend(void)
+{
+    return backends[0];
+}
+
+static const struct npu_hal_backend_ops *find_backend(uint32_t backend)
+{
+    size_t index;
+
+    for (index = 0; index < sizeof(backends) / sizeof(backends[0]); ++index) {
+        if (backends[index]->backend == backend)
+            return backends[index];
+    }
+    return 0;
+}
+
+static int backend_ops_valid(const struct npu_hal_backend_ops *ops)
+{
+    return ops && ops->backend && ops->open && ops->close && ops->get_info &&
+           ops->copy_to_address && ops->copy_from_address &&
+           ops->register_read && ops->register_write &&
+           ops->export_data_plane && ops->prepare_transfer &&
+           ops->finish_transfer;
+}
+
 static int backend_error_is_fatal(int status)
 {
     switch (-status) {
@@ -66,18 +95,6 @@ static int monotonic_ms(uint64_t *value)
     return 0;
 }
 
-void npu_hal_options_init(npu_hal_options_t *options)
-{
-    if (!options)
-        return;
-    memset(options, 0, sizeof(*options));
-    options->version = NPU_HAL_OPTIONS_VERSION;
-    options->backend = NPU_HAL_BACKEND_FUSE_XDMA;
-    options->cluster_count = 1;
-    options->cores_per_cluster = 4;
-    options->cluster_device_stride = 1;
-}
-
 void npu_hal_memory_request_init(npu_hal_memory_request_t *request)
 {
     if (!request)
@@ -99,7 +116,6 @@ static int options_valid(const npu_hal_options_t *options)
            options->cluster_count <= NPU_HAL_MAX_CLUSTERS &&
            options->cores_per_cluster &&
            options->cores_per_cluster <= NPU_HAL_MAX_CORES_PER_CLUSTER &&
-           options->cluster_device_stride &&
            (!options->memory_region_count ||
             (options->memory_regions && !options->normal_memory_size_mib));
 }
@@ -107,6 +123,7 @@ static int options_valid(const npu_hal_options_t *options)
 int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
 {
     npu_hal_options_t defaults;
+    const struct npu_hal_backend_ops *ops;
     npu_hal_t *hal;
     int irq_mutex_initialized = 0;
     int mutex_initialized = 0;
@@ -121,10 +138,17 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
     }
     if (!options_valid(options))
         return -EINVAL;
+    ops = options->backend_options ?
+        find_backend(options->backend_options->backend) : default_backend();
+    if (!ops)
+        return -ENOTSUP;
+    if (!backend_ops_valid(ops))
+        return -EPROTO;
     hal = calloc(1, sizeof(*hal));
     if (!hal)
         return -ENOMEM;
-    hal->backend = options->backend;
+    hal->ops = ops;
+    hal->backend = ops->backend;
     hal->cluster_count = options->cluster_count;
     hal->cores_per_cluster = options->cores_per_cluster;
     status = pthread_mutex_init(&hal->memory_mutex, 0);
@@ -142,14 +166,7 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
     status = npu_hal_memory_manager_init(hal, options);
     if (status < 0)
         goto fail;
-    switch (options->backend) {
-    case NPU_HAL_BACKEND_FUSE_XDMA:
-        status = npu_hal_fuse_open(options, &hal->ops, &hal->state);
-        break;
-    default:
-        status = -ENOTSUP;
-        break;
-    }
+    status = hal->ops->open(options, &hal->state);
     if (status < 0)
         goto fail;
     *hal_out = hal;
@@ -532,7 +549,7 @@ int npu_hal_boot_core(npu_hal_t *hal, npu_hal_core_t core, uint64_t entry,
     return npu_hal_wait_command_consumed(hal, core, timeout_ms);
 }
 
-int npu_hal_export_data_plane(npu_hal_t *hal,
+int npu_hal_data_plane_export(npu_hal_t *hal,
                               npu_hal_data_export_t *exported,
                               int handles[NPU_HAL_DATA_MAX_HANDLES])
 {
@@ -577,7 +594,7 @@ int npu_hal_export_data_plane(npu_hal_t *hal,
     return status;
 }
 
-int npu_hal_prepare_transfer(npu_hal_t *hal,
+int npu_hal_transfer_prepare(npu_hal_t *hal,
                              const npu_hal_allocation_t *allocation,
                              npu_hal_core_t viewer, uint64_t offset,
                              size_t size,
@@ -621,7 +638,7 @@ int npu_hal_prepare_transfer(npu_hal_t *hal,
     return 0;
 }
 
-int npu_hal_finish_transfer(npu_hal_t *hal,
+int npu_hal_transfer_finish(npu_hal_t *hal,
                             const npu_hal_data_token_t *token,
                             int transfer_status)
 {

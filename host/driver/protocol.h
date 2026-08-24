@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "hal/dataplane.h"
+#include "dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
 #define NPU_IPC_VERSION           9U

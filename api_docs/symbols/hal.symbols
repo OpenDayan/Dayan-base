@@ -6,12 +6,11 @@ npu_hal_copy_address
 npu_hal_copy_from_address
 npu_hal_copy_to_address
 npu_hal_core_valid
-npu_hal_data_client_close
-npu_hal_data_client_import
-npu_hal_data_client_transfer
+npu_hal_data_plane_close
+npu_hal_data_plane_export
+npu_hal_data_plane_import
+npu_hal_data_plane_transfer
 npu_hal_device_status
-npu_hal_export_data_plane
-npu_hal_finish_transfer
 npu_hal_get_info
 npu_hal_get_memory_region
 npu_hal_irq_ack
@@ -30,7 +29,8 @@ npu_hal_memory_visible
 npu_hal_memory_write
 npu_hal_open
 npu_hal_options_init
-npu_hal_prepare_transfer
+npu_hal_transfer_finish
+npu_hal_transfer_prepare
 npu_hal_register_read
 npu_hal_register_write
 npu_hal_wait_command_consumed

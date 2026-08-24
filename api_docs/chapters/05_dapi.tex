@@ -4,25 +4,25 @@
 
 \section{dapi API}\label{sec:api-dapi}
 
-dapi 是 kernel 和 Device 子 Proc 可直接调用的稳定接口。公开面由
+dapi 是算子和 Device 子 Proc 可以直接调用的稳定接口。公开面由
 \code{device/include/api} 下的头文件定义，动态链接允许的函数集合由
 \code{device/dayan-api.symbols} 固定。本章逐项记录这 63 个可链接符号，并列出公开
-类型、常量与编译属性；BL1 scheduler、Proc 和资源实现细节不属于 dapi。
+类型、常量与编译属性；BL1 调度器、Proc 和资源实现细节不属于 dapi。
 
 \subsection{头文件与编译属性}
 
 \begin{dayantable}{dapi 公开头文件}{tab:api-dapi-headers}{X[34,l] X[66,l]}
   头文件 & 内容 \\
-  \code{dayan_sys.h} & Proc、launch 坐标、URAM、Cluster barrier、执行单元等待与资源 API。 \\
-  \code{dayan_attrs.h} & dapi / Device libc 的 visibility、noreturn 和 restrict 属性。 \\
+  \code{dayan_sys.h} & Proc、逻辑任务坐标、URAM、Cluster 屏障、执行单元等待与资源 API。 \\
+  \code{dayan_attrs.h} & dapi 和 Device libc 的符号可见性、函数不返回和指针不别名属性。 \\
   \code{stdio.h} / \code{stdlib.h} / \code{string.h} / \code{math.h} & Device libc 子集。 \\
   \code{stdint.h} / \code{stddef.h} / \code{stdbool.h} / \code{stdarg.h} / \code{limits.h} & freestanding 基础类型和宏。 \\
 \end{dayantable}
 
 \begin{dayantable}{dapi 编译属性}{tab:api-dapi-attrs}{X[36,l] X[64,l]}
   宏 & 含义 \\
-  \code{DAYAN_API} & 将 Dayan 系统函数放入公开 dapi section 并标记为 used。 \\
-  \code{DAYAN_LIBC_API} & 将 Device libc 函数放入公开 libc section 并标记为 used。 \\
+  \code{DAYAN_API} & 将 Dayan 系统函数放入公开 dapi 段，并要求编译器保留该符号。 \\
+  \code{DAYAN_LIBC_API} & 将 Device libc 函数放入公开 libc 段，并要求编译器保留该符号。 \\
   \code{DAYAN_NORETURN} & 声明函数不返回。 \\
   \code{DAYAN_RESTRICT} & C/C++ 兼容的 restrict 修饰。 \\
 \end{dayantable}
@@ -31,114 +31,113 @@ dapi 是 kernel 和 Device 子 Proc 可直接调用的稳定接口。公开面�
 
 \begin{dayantable}{Kernel 环境 API}{tab:api-dapi-environment}{X[43,l] X[57,l]}
   API & 含义 \\
-  \code{shared} & 绑定 \code{gp} 的 Host-owned coherent allocation 基址；kernel 只能读取该指针本身，可在所指区间放跨 Hart 状态。 \\
+  \code{shared} & 绑定到 \code{gp} 的一致性共享区基址。该内存由 Host 分配，算子可以在所指区间保存跨 Hart 状态。 \\
   \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION} & 当前静态 kernel 资源描述版本 2。 \\
-  \code{DAYAN_HART_MAX_PROCS} & 每个 Hart 最多 16 个用户 Proc slot。 \\
+  \code{DAYAN_HART_MAX_PROCS} & 每个 Hart 最多有 16 个用户 Proc 资源槽。 \\
   \code{DAYAN_KERNEL_MAX_CHILD_PROCS} & root Proc 最多声明 15 个子 Proc。 \\
   \code{DAYAN_PROC_NAME_SIZE} & Proc 名称存储为 16 B。 \\
   \code{DAYAN_URAM_ALLOCATION_GRANULE} & URAM 资源以 1024 B 对齐和分配。 \\
-  \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} & single-Core Task 需要独占一个 Hart 的资源 flag。 \\
-  \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} & 当前允许的 kernel resource flags 掩码。 \\
-  \code{dayan_kernel_resource_desc_t} & dycc/Runtime 消费的 32-B 版本化常量描述：最大子 Proc 数、Core 共驻数、flags、Atomic Cache 字节数及 URAM 字节数。 \\
+  \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} & 表示单 Core Task 需要独占一个 Hart。 \\
+  \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} & 当前允许的算子资源标志掩码。 \\
+  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 32 字节版本化常量，描述最大子 Proc 数、每 Core 共驻数、标志、Atomic Cache 字节数和 URAM 字节数。 \\
   \code{dayan_proc_entry_t} & 子 Proc 入口类型 \code{void (*)(void *)}。 \\
-  \code{dayan_cluster_barrier_t} & 四 Core barrier 的 16-B、零初始化 shared storage。 \\
+  \code{dayan_cluster_barrier_t} & 四 Core 屏障使用的 16 字节共享存储，使用前必须清零。 \\
   \code{dayan_resource_state} & \code{DAYAN_RESOURCE_FREE}、\code{DAYAN_RESOURCE_BUSY}、\code{DAYAN_RESOURCE_READY} 三态资源状态机。 \\
-  \code{dayan_task_axis} & \code{DAYAN_TASK_X}、\code{DAYAN_TASK_Y}、\code{DAYAN_TASK_Z} 三个 logical task 轴。 \\
+  \code{dayan_task_axis} & \code{DAYAN_TASK_X}、\code{DAYAN_TASK_Y}、\code{DAYAN_TASK_Z} 三个逻辑任务坐标轴。 \\
   \code{dayan_resource_t} & 同一 Hart 内的资源对象；字段私有，用户只负责存储生命周期。 \\
   \code{dayan_shared_resource_t} & 跨 Hart 资源对象；必须位于 \code{shared} 指向的分配内。 \\
   \code{list_head} & \code{dayan_resource_t} 的公开布局依赖类型；不作为独立容器 API 使用。 \\
 \end{dayantable}
 
-Kernel 使用 \code{DAYAN_KERNEL_DESC}（见 Runtime 章节）生成一个
-\code{dayan_kernel_resource_desc_t} 常量。Atomic Cache/URAM 数量在 Host launch 前一次性
-分配，子 Proc slot 在 root Proc 建立时一次性预留。会修改未做上下文保存/恢复的 Hart
-配置寄存器的 single-Core kernel 必须使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}；这不会
-把真实的 child Proc 上限改成 15。
+算子使用 \code{DAYAN_KERNEL_DESC}（见 Runtime 章节）生成一个
+\code{dayan_kernel_resource_desc_t} 常量。Atomic Cache 和 URAM 在 Host 启动算子前
+一次性分配，子 Proc 资源槽在根 Proc 建立时一次性预留。会修改未做上下文保存和恢复的
+Hart 配置寄存器的单 Core 算子必须使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}；该标志
+不会改变实际的子 Proc 数量上限。
 
 \subsection{Proc 生命周期}
 
 \begin{dayantable}{Proc dapi}{tab:api-dapi-proc}{X[39,l] X[61,l]}
   API & 行为 \\
   \code{dayan_yield} & 当前 Proc 主动让出调度机会。 \\
-  \code{dayan_create_proc} & 在同一物理 Core 的预留 slot 中创建具名直接子 Proc；成功返回正 Proc ID。名称必须非空、NUL 结尾并能放入 16 B。 \\
-  \code{dayan_join} & 等待指定直接子 Proc，按需返回其 64-bit result，并回收 zombie。 \\
+  \code{dayan_create_proc} & 在同一物理 Core 的预留资源槽中创建具名直接子 Proc；成功时返回正 Proc ID。名称必须非空、以空字符结尾且能放入 16 字节。 \\
+  \code{dayan_join} & 等待指定的直接子 Proc，按需返回其 64 位结果，并回收已退出 Proc。 \\
   \code{dayan_join_all} & 等待并回收当前 Proc 的全部直接子 Proc。 \\
-  \code{dayan_proc_exit} & 以 64-bit result 结束当前 Proc，不返回。 \\
+  \code{dayan_proc_exit} & 以 64 位结果结束当前 Proc，不返回。 \\
 \end{dayantable}
 
-父 Proc 退出前必须等待其子 Proc；root Proc 退出时 BL1 将结果通知 Host。子 Proc 的创建、
-退出和 slot 回收完全在 Device 内完成，不产生 Host create/exit RPC。
+父 Proc 退出前必须等待其子 Proc；根 Proc 退出时 BL1 将结果通知 Host。子 Proc 的创建、
+退出和资源槽回收完全在 Device 内完成，不产生 Host 侧的创建或退出 RPC。
 
-\subsection{Launch、URAM 与 Cluster 同步}
+\subsection{任务信息、URAM 与 Cluster 同步}
 
 \begin{dayantable}{执行环境查询与同步}{tab:api-dapi-launch}{X[39,l] X[61,l]}
   API & 行为 \\
-  \code{dayan_uram_base} & 返回当前 resident kernel instance 独占 URAM 区间的基址；未处于 Proc 时返回空。 \\
+  \code{dayan_uram_base} & 返回当前常驻算子实例独占的 URAM 区间基址；当前不在 Proc 中时返回空指针。 \\
   \code{dayan_uram_size} & 返回该 URAM 区间字节数。 \\
-  \code{dayan_task_id} & 返回 X/Y/Z 轴的当前 logical task ID；非法轴返回 0。 \\
-  \code{dayan_task_dim} & 返回 X/Y/Z 轴的 launch grid 大小；非法轴返回 0。 \\
+  \code{dayan_task_id} & 返回当前逻辑任务在 X、Y 或 Z 轴上的坐标；非法轴返回 0。 \\
+  \code{dayan_task_dim} & 返回启动网格在 X、Y 或 Z 轴上的大小；非法轴返回 0。 \\
   \code{dayan_task_mode} & 返回 1（单 Core）或 4（Cluster 协作）。 \\
-  \code{dayan_cluster_barrier} & 对 shared allocation 中的 barrier 执行可复用四 Core rendezvous；仅 mode 4 且 participants=4 合法。 \\
+  \code{dayan_cluster_barrier} & 在共享区中执行可复用的四 Core 屏障；仅四 Core 模式且参与者数量为 4 时合法。 \\
 \end{dayantable}
 
-logical task API 不暴露物理 Cluster/Core 编号。四 Core mode 下 Runtime 要求
+逻辑任务 API 不暴露物理 Cluster 或 Core 编号。四 Core 模式下 Runtime 要求
 \code{task_dim.x == 4}，X ID 对应同一 Cluster 内四个参与者。
 
 \subsection{执行单元完成等待}
 
 \begin{dayantable}{执行单元等待 dapi}{tab:api-dapi-wait}{X[37,l] X[63,l]}
   API & 行为 \\
-  \code{dayan_wait_lsu} & 等待当前 Proc 此前提交的 LSU 工作完成，并处理 scheduler produce token。 \\
+  \code{dayan_wait_lsu} & 等待当前 Proc 此前提交的 LSU 工作完成，并处理调度器收到的异步完成标记。 \\
   \code{dayan_wait_dma} & LSU/DMA 等待的兼容名称，当前与 \code{dayan_wait_lsu} 等价。 \\
   \code{dayan_wait_mat} & 等待此前提交的矩阵单元工作完成。 \\
   \code{dayan_wait_vec} & 等待此前提交的向量单元工作完成。 \\
-  \code{dayan_wait_macro} & 等待此前提交的 macro 单元工作完成。 \\
+  \code{dayan_wait_macro} & 等待此前提交的宏指令单元工作完成。 \\
 \end{dayantable}
 
-这些函数替代 kernel 内手写 barrier 宏。它们只保证当前执行单元此前工作的完成顺序；
-Core 间发布/消费关系应使用 shared resource 或 Cluster barrier 表达。
+这些函数替代算子内手写的等待宏。它们只保证当前执行单元此前工作的完成顺序；Core 间
+的发布和消费关系应使用共享资源或 Cluster 屏障表达。
 
 \subsection{Cache 维护}
 
 \begin{dayantable}{Cache 维护 dapi}{tab:api-dapi-cache}{X[39,l] X[61,l]}
   API & 行为 \\
-  \code{dayan_cache_invalidate} & 失效与给定地址区间相交的每条 D-cache line；size 为零时不执行操作。 \\
-  \code{dayan_cache_flush} & 将与给定地址区间相交的每条 D-cache line 写回；size 为零时不执行操作。 \\
+  \code{dayan_cache_invalidate} & 失效与给定地址区间相交的每条数据缓存线；大小为零时不执行操作。 \\
+  \code{dayan_cache_flush} & 写回与给定地址区间相交的每条数据缓存线；大小为零时不执行操作。 \\
 \end{dayantable}
 
-这两个接口不等待 LSU/MAT 等执行单元，也不提供 Hart 间同步。调用者仍需通过 resource、
-barrier 或其它协议建立数据所有权和发布/消费顺序。
+这两个接口不等待 LSU、MAT 等执行单元，也不提供 Hart 间同步。调用方仍需通过资源对象、
+屏障或其它协议建立数据所有权以及发布和消费顺序。
 
 \subsection{单 Hart 资源}
 
-\code{dayan_resource_t} 供同一 Hart 上的 producer/consumer Proc 协作。资源循环为
-FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE；当 producer count 为
-零时 alloc 直接进入 READY。所有函数成功返回 0，失败返回负 errno。
+\code{dayan_resource_t} 供同一 Hart 上的生产者 Proc 和消费者 Proc 协作。资源状态按
+FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE 循环。当生产者数量为
+零时，分配操作直接进入 READY。所有函数成功返回 0，失败返回负 errno。
 
 \begin{dayantable}{单 Hart resource dapi}{tab:api-dapi-resource}{X[44,l] X[56,l]}
   API & 行为 \\
   \code{dayan_resource_init} & 初始化对象为 FREE，并建立本 Hart 的等待队列。 \\
-  \code{dayan_resource_alloc} & 仅从 FREE 开始一代资源，设置 producer/consumer count；consumer count 必须非零。 \\
-  \code{dayan_resource_produce} & 递减 producer count；归零时发布 READY 并唤醒 waiter。 \\
-  \code{dayan_resource_consume} & 递减 consumer count；归零时释放为 FREE 并唤醒 waiter。 \\
+  \code{dayan_resource_alloc} & 仅从 FREE 状态开始新一代资源，并设置生产者和消费者数量；消费者数量必须非零。 \\
+  \code{dayan_resource_produce} & 递减生产者数量；归零时发布 READY 状态并唤醒等待者。 \\
+  \code{dayan_resource_consume} & 递减消费者数量；归零时恢复 FREE 状态并唤醒等待者。 \\
   \code{dayan_resource_wait_ready} & 阻塞当前 Proc，直到资源达到 READY。 \\
   \code{dayan_resource_wait_free} & 阻塞当前 Proc，直到资源回到 FREE。 \\
 \end{dayantable}
 
 \subsection{跨 Hart 资源}
 
-\code{dayan_shared_resource_t} 表达 Cluster 内跨 Hart 的发布/消费。对象必须位于当前 kernel
-的 \code{shared} allocation 且满足自然对齐；其状态更新使用 Atomic Cache 可见的原子
-操作，等待侧以 scheduler poll 让出 Core。producer/consumer 剩余计数打包在同一个
-64-bit 状态字中，分配使用 \code{amocas.d}，发布和消费使用 \code{amoadd.d}，不使用
-自旋锁。
+\code{dayan_shared_resource_t} 表达 Cluster 内跨 Hart 的发布和消费。对象必须位于当前
+算子的 \code{shared} 共享区内并满足自然对齐。状态更新使用 Atomic Cache 可见的原子
+操作；等待方在调度器轮询期间让出 Core。剩余的生产者和消费者数量编码在同一个 64 位
+状态字中。分配使用 \code{amocas.d}，发布和消费使用 \code{amoadd.d}，不使用自旋锁。
 
 \begin{dayantable}{Shared resource dapi}{tab:api-dapi-shared-resource}{X[47,l] X[53,l]}
   API & 行为 \\
   \code{dayan_shared_resource_init} & 校验 shared 范围，并将跨 Hart 对象初始化为 FREE。 \\
-  \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 开始一代资源并设置计数。 \\
-  \code{dayan_shared_resource_produce} & 使用 \code{amoadd.d} 原子递减 producer count，最后一个 producer 发布 READY。 \\
-  \code{dayan_shared_resource_consume} & 使用 \code{amoadd.d} 原子递减 consumer count，最后一个 consumer 发布 FREE。 \\
+  \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 状态开始新一代资源并设置计数。 \\
+  \code{dayan_shared_resource_produce} & 使用 \code{amoadd.d} 原子递减生产者数量；最后一个生产者发布 READY 状态。 \\
+  \code{dayan_shared_resource_consume} & 使用 \code{amoadd.d} 原子递减消费者数量；最后一个消费者发布 FREE 状态。 \\
   \code{dayan_shared_resource_wait_ready} & 可调度地轮询，直到跨 Hart 资源为 READY。 \\
   \code{dayan_shared_resource_wait_free} & 可调度地轮询，直到跨 Hart 资源为 FREE。 \\
 \end{dayantable}
@@ -147,7 +146,7 @@ FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE；当 producer co
 
 \begin{dayantable}{Device stdio API}{tab:api-dapi-stdio}{X[35,l] X[65,l]}
   API & 行为 \\
-  \code{FILE} & 不透明 stream 类型；当前公开 stream 只有 \code{stdout}。 \\
+  \code{FILE} & 不透明的输出流类型；当前只公开 \code{stdout}。 \\
   \code{stdout} & 当前 Proc 的 Host 输出缓冲。 \\
   \code{EOF} & stdio 失败返回值 $-1$。 \\
   \code{putchar} & 向当前 Proc 输出一个字节；失败返回 EOF。 \\
@@ -159,7 +158,7 @@ FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE；当 producer co
   \code{vsnprintf} & \code{va_list} 版本的 snprintf。 \\
 \end{dayantable}
 
-Proc 的 printf buffer 有固定容量，写满时自动 flush；Proc 结束时剩余内容也会 flush，Host
+Proc 的格式化输出缓冲区容量固定，写满时自动提交；Proc 结束时也会提交剩余内容，Host
 随后清空该 Proc 的输出状态。
 
 \subsection{Device 动态内存}
@@ -167,25 +166,25 @@ Proc 的 printf buffer 有固定容量，写满时自动 flush；Proc 结束时�
 \begin{dayantable}{Device stdlib API}{tab:api-dapi-stdlib}{X[34,l] X[66,l]}
   API & 行为 \\
   \code{malloc} & 从 BL1 管理的当前 Hart heap 分配至少指定字节数。 \\
-  \code{calloc} & 检查乘法溢出后分配并清零 count $\times$ size 字节。 \\
+  \code{calloc} & 检查乘法溢出后分配并清零“元素数量乘以元素大小”字节。 \\
   \code{realloc} & 调整已有分配；返回值可能与原地址不同。 \\
   \code{free} & 释放分配；空指针可安全传入。 \\
   \code{abort} & 停止当前 Hart，不返回。 \\
-  \code{exit} & 当前实现忽略 status 并停止 Hart，不返回；正常 Proc 返回应使用 \code{dayan_proc_exit}。 \\
+  \code{exit} & 当前实现忽略状态参数并停止 Hart，不返回；Proc 正常返回应使用 \code{dayan_proc_exit}。 \\
 \end{dayantable}
 
 \subsection{Device 字符串与内存}
 
 \begin{dayantable}{Device string API}{tab:api-dapi-string}{X[34,l] X[66,l]}
   API & 行为 \\
-  \code{memcpy} & 复制不重叠的 size 个字节，返回 dst。 \\
-  \code{memmove} & 复制可能重叠的 size 个字节，返回 dst。 \\
-  \code{memset} & 用 value 的低 8 bit 填充 size 个字节，返回 dst。 \\
+  \code{memcpy} & 复制指定字节数的不重叠内存，返回目标地址。 \\
+  \code{memmove} & 复制指定字节数的内存，源和目标可以重叠，返回目标地址。 \\
+  \code{memset} & 用给定值的低 8 位填充指定字节数，返回目标地址。 \\
   \code{memcmp} & 按 unsigned byte 字典序比较两个内存区。 \\
   \code{strlen} & 返回 NUL 结尾字符串的长度。 \\
-  \code{strnlen} & 返回字符串长度，但最多检查 maxlen 字节。 \\
-  \code{strcpy} & 复制包含结尾 NUL 的字符串，返回 dst。 \\
-  \code{strncpy} & 最多复制 size 字节并按标准 strncpy 规则补零。 \\
+  \code{strnlen} & 返回字符串长度，但最多检查调用方给出的字节数。 \\
+  \code{strcpy} & 复制包含结尾空字符的字符串，返回目标地址。 \\
+  \code{strncpy} & 最多复制调用方给出的字节数，并按标准 \code{strncpy} 规则补零。 \\
   \code{strcmp} & 按 unsigned char 比较两个 NUL 结尾字符串。 \\
   \code{strncmp} & 最多比较 size 个字符。 \\
   \code{strchr} & 返回字符第一次出现的位置或空指针。 \\
@@ -197,7 +196,7 @@ Proc 的 printf buffer 有固定容量，写满时自动 flush；Proc 结束时�
 \begin{dayantable}{Device math API}{tab:api-dapi-math}{X[34,l] X[66,l]}
   API & 行为 \\
   \code{fabsf} & 单精度绝对值。 \\
-  \code{copysignf} & 取 value 的幅值与 sign 的符号位。 \\
+  \code{copysignf} & 使用第一个参数的幅值和第二个参数的符号位。 \\
   \code{fminf} & 单精度最小值，按实现处理 NaN。 \\
   \code{fmaxf} & 单精度最大值，按实现处理 NaN。 \\
   \code{sqrtf} & 单精度平方根。 \\
@@ -205,13 +204,13 @@ Proc 的 printf buffer 有固定容量，写满时自动 flush；Proc 结束时�
   \code{expf} & 单精度自然指数。 \\
   \code{logf} & 单精度自然对数。 \\
   \code{INFINITY} / \code{NAN} / \code{HUGE_VALF} & 单精度特殊值常量。 \\
-  \code{isnan} / \code{isinf} / \code{isfinite} / \code{signbit} & 编译器 builtin 分类宏。 \\
+  \code{isnan} / \code{isinf} / \code{isfinite} / \code{signbit} & 由编译器内建函数实现的浮点分类宏。 \\
 \end{dayantable}
 
 \subsection{Freestanding 基础定义}
 
-这些头文件是面向 RISC-V Device 的 freestanding 子集，不承诺 Host libc 的完整功能、
-locale、文件系统、errno 或线程安全语义。
+这些头文件是面向 RISC-V Device 的独立运行环境子集，不承诺 Host libc 的完整功能，
+也不提供区域设置、文件系统、errno 或线程安全语义。
 
 \begin{dayantable}{基础类型与宏}{tab:api-dapi-foundation}{X[43,l] X[57,l]}
   头文件 & 对外定义 \\

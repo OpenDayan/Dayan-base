@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "hal/hal.h"
+#include "hal.h"
 
 #ifdef __cplusplus
 extern "C" {

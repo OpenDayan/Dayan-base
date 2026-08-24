@@ -40,10 +40,10 @@ cd "$repo_root"
 
 check_pattern api_docs/chapters/01_hal.tex \
     '\b(?:NPU|DAYAN)_[A-Z][A-Z0-9_]+\b' \
-    host/driver/hal/hal.h host/driver/hal/dataplane.h
+    host/driver/hal/include/*.h
 check_pattern api_docs/chapters/01_hal.tex \
     '\b(?:npu|dayan)_[a-z0-9_]+_t\b' \
-    host/driver/hal/hal.h host/driver/hal/dataplane.h
+    host/driver/hal/include/*.h
 
 check_pattern api_docs/chapters/02_service.tex \
     '\b(?:NPU|DAYAN)_[A-Z][A-Z0-9_]+\b' \

@@ -1,9 +1,9 @@
-#ifndef NPU_HOST_HAL_CLIENT_INTERNAL_H
-#define NPU_HOST_HAL_CLIENT_INTERNAL_H
+#ifndef NPU_HOST_HAL_DATAPLANE_INTERNAL_H
+#define NPU_HOST_HAL_DATAPLANE_INTERNAL_H
 
 #include "dataplane.h"
 
-struct npu_hal_data_provider_ops {
+struct npu_hal_data_plane_ops {
     uint32_t provider;
     int (*import)(const npu_hal_data_export_t *exported, int *handles,
                   size_t handle_count, void **state_out);
@@ -12,6 +12,6 @@ struct npu_hal_data_provider_ops {
                     void *host_buffer, size_t size);
 };
 
-extern const struct npu_hal_data_provider_ops npu_hal_fd_offset_provider;
+extern const struct npu_hal_data_plane_ops npu_hal_xdma_data_plane_ops;
 
 #endif

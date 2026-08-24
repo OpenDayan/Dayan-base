@@ -253,7 +253,7 @@ int npu_runtime_close(npu_runtime_t *runtime)
     pthread_mutex_unlock(&runtime->mutex);
     if (runtime->data_worker_started)
         (void)pthread_join(runtime->data_worker, 0);
-    npu_hal_data_client_close(runtime->data_client);
+    npu_hal_data_plane_close(runtime->data_plane);
     if (runtime->data_fd >= 0)
         close(runtime->data_fd);
     if (runtime->control_fd >= 0)

@@ -17,6 +17,7 @@
 #include "rpc.h"
 #include "runtime_internal.h"
 #include "server_internal.h"
+#include "backend/xdma/npu_hal_xdma.h"
 #include "service_internal.h"
 
 struct run_state {
@@ -198,6 +199,7 @@ int main(void)
     uint64_t output[2] = { 0, 0 };
     struct output_capture output_capture = { { 0 }, 0, 0, 0, 0, 0, 0 };
     dayan_server_options_t server_options;
+    npu_hal_xdma_options_t xdma_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
     npu_context_t *foreign_context = 0;
@@ -221,13 +223,16 @@ int main(void)
                     directory) > 0);
 
     dayan_server_options_init(&server_options);
+    assert(npu_hal_xdma_options_init(
+        &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) == 0);
+    server_options.hal.backend_options = &xdma_options.base;
     assert(server_options.max_procs_per_hart == NPU_PACKAGE_HART_MAX_PROCS);
     server_options.max_procs_per_hart = NPU_PACKAGE_HART_MAX_PROCS + 1U;
     assert(dayan_server_create(&server, &server_options) == -EINVAL);
     assert(!server);
     server_options.max_procs_per_hart = NPU_PACKAGE_HART_MAX_PROCS - 1U;
     server_options.socket_path = socket_path;
-    server_options.hal.device_prefix = directory;
+    xdma_options.device_directory = directory;
     server_options.hal.memory_regions = regions;
     server_options.hal.memory_region_count =
         sizeof(regions) / sizeof(regions[0]);
@@ -857,7 +862,7 @@ int main(void)
     }
     dayan_server_destroy(server);
 
-    /* A lost XDMA/FUSE endpoint must stop the Server without a signal. */
+    /* A lost XDMA endpoint must stop the Server without a signal. */
     server = 0;
     assert(dayan_server_create(&server, &server_options) == 0);
     run.server = server;

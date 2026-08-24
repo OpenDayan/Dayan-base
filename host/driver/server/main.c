@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "server.h"
+#include "backend/xdma/npu_hal_xdma.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -37,6 +38,33 @@ static int parse_u32(const char *value, uint32_t *result)
     return 0;
 }
 
+static int parse_u64(const char *value, uint64_t *result)
+{
+    char *end;
+    unsigned long long parsed;
+
+    errno = 0;
+    parsed = strtoull(value, &end, 0);
+    if (errno || !*value || *end)
+        return -EINVAL;
+    *result = (uint64_t)parsed;
+    return 0;
+}
+
+static int parse_xdma_profile(const char *value,
+                              npu_hal_xdma_profile_t *profile)
+{
+    if (strcmp(value, "simulator") == 0) {
+        *profile = NPU_HAL_XDMA_PROFILE_SIMULATOR;
+        return 0;
+    }
+    if (strcmp(value, "fpga") == 0) {
+        *profile = NPU_HAL_XDMA_PROFILE_FPGA;
+        return 0;
+    }
+    return -EINVAL;
+}
+
 static void usage(FILE *stream, const char *program)
 {
     fprintf(stream,
@@ -44,7 +72,9 @@ static void usage(FILE *stream, const char *program)
             "  --socket PATH           Unix socket path\n"
             "  --firmware PATH         BL1 ELF\n"
             "  --api-elf PATH          public BL1 API ELF\n"
-            "  --device-prefix PATH    FUSE/XDMA device directory\n"
+            "  --xdma-profile NAME    simulator or fpga\n"
+            "  --xdma-device-dir PATH XDMA device directory\n"
+            "  --xdma-mmio-offset N   Host offset for addresses below 0x80000000\n"
             "  --device-index N        first XDMA device index\n"
             "  --cluster-count N       number of Clusters\n"
             "  --cluster-stride N      XDMA index stride per Cluster\n"
@@ -59,6 +89,7 @@ static void usage(FILE *stream, const char *program)
 int main(int argc, char **argv)
 {
     dayan_server_options_t options;
+    npu_hal_xdma_options_t xdma;
     dayan_server_t *server = 0;
     struct sigaction action;
     int index;
@@ -66,8 +97,23 @@ int main(int argc, char **argv)
 
     (void)setvbuf(stderr, 0, _IONBF, 0);
     dayan_server_options_init(&options);
+    (void)npu_hal_xdma_options_init(
+        &xdma, NPU_HAL_XDMA_PROFILE_SIMULATOR);
+    options.hal.backend_options = &xdma.base;
     options.firmware_path = DAYAN_DEFAULT_FIRMWARE;
     options.api_elf_path = DAYAN_DEFAULT_API_ELF;
+    for (index = 1; index < argc; ++index) {
+        npu_hal_xdma_profile_t profile;
+
+        if (strcmp(argv[index], "--xdma-profile") != 0)
+            continue;
+        if (++index >= argc ||
+            parse_xdma_profile(argv[index], &profile) < 0 ||
+            npu_hal_xdma_options_init(&xdma, profile) < 0) {
+            fprintf(stderr, "dayan_server: invalid XDMA profile\n");
+            return 2;
+        }
+    }
     for (index = 1; index < argc; ++index) {
         const char *argument = argv[index];
         const char *value;
@@ -89,15 +135,24 @@ int main(int argc, char **argv)
             options.firmware_path = value;
         else if (strcmp(argument, "--api-elf") == 0)
             options.api_elf_path = value;
-        else if (strcmp(argument, "--device-prefix") == 0)
-            options.hal.device_prefix = value;
+        else if (strcmp(argument, "--xdma-profile") == 0) {
+            npu_hal_xdma_profile_t profile;
+
+            status = parse_xdma_profile(value, &profile);
+        }
+        else if (strcmp(argument, "--xdma-device-dir") == 0 ||
+                 strcmp(argument, "--device-prefix") == 0)
+            xdma.device_directory = value;
+        else if (strcmp(argument, "--xdma-mmio-offset") == 0)
+            status = parse_u64(value,
+                               &xdma.mmio_address_offset);
         else if (strcmp(argument, "--device-index") == 0)
-            status = parse_u32(value, &options.hal.device_index);
+            status = parse_u32(value, &xdma.device_index);
         else if (strcmp(argument, "--cluster-count") == 0)
             status = parse_u32(value, &options.hal.cluster_count);
         else if (strcmp(argument, "--cluster-stride") == 0)
             status = parse_u32(value,
-                               &options.hal.cluster_device_stride);
+                               &xdma.cluster_device_stride);
         else if (strcmp(argument, "--cluster-mask") == 0)
             status = parse_u32(value, &options.enabled_cluster_mask);
         else if (strcmp(argument, "--core-mask") == 0)

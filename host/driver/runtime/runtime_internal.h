@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "hal/dataplane.h"
+#include "dataplane.h"
 #include "npu_runtime.h"
 #include "protocol.h"
 
@@ -18,7 +18,7 @@ struct runtime_transfer_job;
 struct npu_runtime {
     int control_fd;
     int data_fd;
-    npu_hal_data_client_t *data_client;
+    npu_hal_data_plane_t *data_plane;
     uint64_t session_id;
     uint64_t next_request_id;
     uint32_t default_timeout_ms;

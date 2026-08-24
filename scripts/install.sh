@@ -86,8 +86,7 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$sdk_target/host/include/"
 "$install_tool" -m 0644 "$root/host/dycc/include/dayan_compiler.h" \
     "$sdk_target/host/dycc/include/"
-"$install_tool" -m 0644 "$root/host/driver/hal/hal.h" \
-    "$root/host/driver/hal/dataplane.h" \
+"$install_tool" -m 0644 "$root/host/driver/hal/include/"*.h \
     "$sdk_target/host/driver/hal/"
 "$install_tool" -m 0644 "$root/host/driver/server/server.h" \
     "$root/host/driver/server/service.h" \

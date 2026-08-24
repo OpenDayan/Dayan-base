@@ -13,6 +13,7 @@
 
 #include "npu_package.h"
 #include "npu_runtime.h"
+#include "backend/xdma/npu_hal_xdma.h"
 #include "server_internal.h"
 
 #define LOCK_TEST_CHILD_PROCS 2U
@@ -657,6 +658,7 @@ int main(int argc, char **argv)
     npu_package_argument_t arguments[3];
     npu_package_kernel_desc_t kernel_desc[5];
     dayan_server_options_t server_options;
+    npu_hal_xdma_options_t xdma_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
     npu_buffer_t *buffer = 0;
@@ -755,11 +757,15 @@ int main(int argc, char **argv)
     assert(snprintf(socket_path, sizeof(socket_path),
                     "/tmp/dayan-cmodel-%ld.sock", (long)getpid()) > 0);
     dayan_server_options_init(&server_options);
+    if (npu_hal_xdma_options_init(
+            &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) < 0)
+        return 1;
+    server_options.hal.backend_options = &xdma_options.base;
     server_options.socket_path = socket_path;
     server_options.firmware_path = argv[1];
     server_options.api_elf_path = argv[2];
     server_options.enabled_core_mask = (UINT32_C(1) << core_count) - 1U;
-    server_options.hal.device_prefix = device_prefix;
+    xdma_options.device_directory = device_prefix;
     server_options.service.proc_exit = capture_proc_exit;
     server_options.service.callback_context = &exits;
     status = dayan_server_create(&server, &server_options);
