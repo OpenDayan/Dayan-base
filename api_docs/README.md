@@ -1,8 +1,9 @@
 # Dayan 对外 API 参考手册
 
-该目录按 HAL、Service、Runtime、RPC 和 dapi 五层记录当前对外接口。文档只采用公开
-头文件中的声明：`*_internal.h`、模块私有结构、静态实现函数和仅供测试使用的接口不在
-范围内。
+该目录按 HAL、Service、Runtime、RPC 和 dapi 五层记录当前对外接口，主体内容采用公开
+头文件中的声明。为指导新平台接入，HAL 章节还描述了 `hal_internal.h` 和
+`dataplane_internal.h` 中两组内部 Ops 的实现契约；这些 Ops 不属于应用程序 API。其它
+模块私有结构、静态实现函数和仅供测试使用的接口不在范围内。
 
 ## 构建
 

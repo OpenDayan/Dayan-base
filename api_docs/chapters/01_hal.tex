@@ -21,6 +21,10 @@ HAL 由两个相互独立的部分组成：
 后端是控制面的平台实现，数据提供器是与该后端配套的用户进程传输实现。两者通过数值
 标识和不透明字段配对。通用 HAL 不解释后端写入的不透明字段。
 
+本章主体描述公开 API；为便于接入新的驱动或平台，最后一节另外记录内部
+\code{Ops} 能力表的实现契约。这些能力表只在 HAL 内部使用，不构成应用程序可直接调用的
+接口。
+
 \subsection{公开类型与常量}
 
 \begin{dayantable}{HAL 核心类型}{tab:api-hal-types}{X[34,l] X[66,l]}
@@ -160,5 +164,67 @@ Unix 域 Socket 只属于 Runtime 与 Server 之间的通用协议。建立会�
 令牌是 Runtime、Server 和 HAL 之间的协议授权与生命周期凭据。当前 XDMA 驱动把完整
 设备文件描述符交给用户进程，因此令牌本身不是针对恶意进程的内核级访问隔离；进程权限
 和设备文件权限仍是安全边界。
+
+\subsection{新增 HAL 后端的能力契约}
+
+新增平台需要同时提供 Server 进程中的控制后端和 Runtime 进程中的数据提供器。控制后端
+实现 \code{hal_internal.h} 中的 \code{npu_hal_backend_ops}；数据提供器实现
+\code{dataplane_internal.h} 中的 \code{npu_hal_data_plane_ops}。两部分可以采用
+不同的内部状态和资源表示，但必须使用相互匹配的非零后端标识、数据提供器标识、导出描述
+和传输令牌格式。
+
+除 \code{irq_wait} 外，\code{npu_hal_backend_ops} 中的函数均为必选能力；缺少任一
+必选函数时 \code{npu_hal_open} 返回 \code{-EPROTO}。所有返回 \code{int} 的回调成功时
+返回 0，失败时返回负 Linux errno。回调中的 \code{state} 是后端私有状态，通用 HAL 不读取
+其内容。
+
+\begin{dayantable}{控制后端 Ops 能力}{tab:api-hal-backend-ops}{X[28,l] X[72,l]}
+  Ops 函数 & 新后端需要提供的能力 \\
+  \code{open} & 校验通用配置和后端私有配置，按 \code{cluster_count} 建立控制面所需的设备连接、文件描述符、映射或其它资源，并通过 \code{state_out} 发布后端状态。只有返回 0 后该状态才交给 HAL；失败路径必须自行回收已取得的全部资源，因为前端不会再调用 \code{close}。 \\
+  \code{close} & 释放成功 \code{open} 后由后端持有的全部控制面资源和私有状态。该函数没有错误返回值，并在 HAL 关闭时调用一次。 \\
+  \code{get_info} & 报告与该控制后端配套的 \code{data_provider}、导出句柄数 \code{data_handle_count}、单次最大传输长度 \code{max_transfer_size} 和二次幂传输对齐 \code{transfer_alignment}。HAL 负责填写 ABI 版本、后端标识、设备拓扑和内存区域数量。 \\
+  \code{copy_to_address} & 将 \code{size} 字节从 Host 缓冲区完整写入指定 Cluster 的设备地址空间。后端负责 Cluster 到设备资源的选择、地址转换、分段传输和短写处理；原始地址接口不会由通用 HAL 再次检查内存区域。 \\
+  \code{copy_from_address} & 从指定 Cluster 的设备地址空间完整读取 \code{size} 字节到 Host 缓冲区。它与 \code{copy_to_address} 使用同一设备地址语义，并负责地址转换、分段传输和短读处理。 \\
+  \code{register_read} & 从指定 Cluster 的控制寄存器窗口读取 \code{offset} 起始的 \code{size} 字节。该窗口必须能提供 HAL 通用中断逻辑所需的中断状态和每 Core Host 邮箱寄存器。 \\
+  \code{register_write} & 向指定 Cluster 的控制寄存器窗口写入 \code{offset} 起始的 \code{size} 字节。该窗口必须支持通用 HAL 写入中断清除位图。 \\
+  \code{irq_wait} & 可选的阻塞式中断等待。成功时返回产生中断的有效 Cluster 和非零 pending 位图，但不清除中断；超时返回 \code{-ETIMEDOUT}。未实现时可将函数指针置空，实现无法继续使用事件等待时可返回 \code{-ENOTSUP}，HAL 会在剩余超时时间内退化为轮询 \code{register_read}。 \\
+  \code{export_data_plane} & 生成一次数据面导出：填写版本、与 \code{get_info} 一致的提供器标识和句柄数，将 \code{flags} 保持为 0，并在 \code{opaque} 中写入仅由配套提供器解释的初始化信息。\code{handles[0..handle_count)} 必须全部有效，其余项保持为 -1；句柄一旦写入数组，其清理责任即交给 HAL 前端。 \\
+  \code{prepare_transfer} & 接收已由 HAL 校验过可见性、范围、最大长度和对齐的 Cluster、设备地址、长度及方向，将它们转换为数据提供器可执行的一次传输令牌。必须填写规定的令牌版本、提供器、方向和长度，将 \code{flags} 保持为 0，并把资源编号、设备偏移等私有定位信息放入 \code{opaque}。 \\
+  \code{finish_transfer} & 接收 Runtime 原样返回的令牌以及 0 或负 errno 形式的传输结果，复核提供器私有字段并完成解锁、解除映射、同步或统计等收尾。即使后端无需额外收尾，该函数仍为必选项，并应在令牌有效时返回 \code{transfer_status}；不能把用户进程返回的私有字段视为可信输入。 \\
+\end{dayantable}
+
+\code{register_read} 和 \code{register_write} 面向的是 HAL 约定的逻辑控制窗口，而不是
+某一驱动的原始文件偏移。当前通用逻辑从偏移 \code{0x00} 读取 Host 中断状态，向偏移
+\code{0x0c} 写入中断清除位图，并从 \code{0x20 + core * 8} 读取每个 Core 的 Host 中断
+邮箱。若硬件或驱动采用其它布局，后端应在这两个回调中完成转换。
+
+配套数据提供器的三个函数均为必选能力。它运行在 Runtime 所在的用户进程中，仅解释自身
+的导出描述、令牌和设备句柄，不调用 Server 代理数据传输。
+
+\begin{dayantable}{数据提供器 Ops 能力}{tab:api-hal-provider-ops}{X[28,l] X[72,l]}
+  Ops 函数 & 新数据提供器需要提供的能力 \\
+  \code{import} & 校验导出描述中的 \code{opaque}、句柄数量和排列，建立用户进程数据面状态，并通过 \code{state_out} 返回。提供器接管的每个句柄都必须在输入数组中改写为 -1；失败时自行关闭已经接管的句柄，未接管的句柄由 Runtime 统一关闭。 \\
+  \code{close} & 关闭 \code{import} 接管的全部设备句柄，撤销映射并释放数据面私有状态。它在成功导入的数据面实例销毁时调用一次。 \\
+  \code{transfer} & 再次校验令牌方向和全部私有字段，选择正确的设备资源和偏移，并直接在设备与 \code{host_buffer} 之间完整搬运 \code{size} 字节。H2D 从 Host 缓冲区读取，D2H 写入 Host 缓冲区；成功返回 0，驱动或协议失败返回负 errno。 \\
+\end{dayantable}
+
+接入代码时还需要完成以下注册和一致性工作：
+
+\begin{enumerate}
+  \item 为控制后端和数据提供器分配唯一标识；如需私有配置，定义以
+        \code{npu_hal_backend_options_t} 为首成员且带独立版本号的配置结构。
+  \item 将控制 Ops 加入 \code{hal.c} 的后端注册表，将数据提供器 Ops 加入
+        \code{dataplane.c} 的提供器注册表。
+  \item 保证 \code{get_info}、\code{export_data_plane}、
+        \code{prepare_transfer} 和数据提供器的 \code{provider} 字段使用同一提供器标识，
+        并保证导出句柄数与 \code{data_handle_count} 完全一致。
+  \item 为后端配置校验、打开失败清理、地址读写、中断等待、数据面导入以及 H2D/D2H
+        令牌往返增加测试。
+\end{enumerate}
+
+物理内存区域解析、分配与可见性检查由通用 HAL 完成，新后端不需要重新实现。
+\code{npu_hal_copy_address} 由两个原始地址读写回调组合实现；中断状态、应答和邮箱操作
+由寄存器回调组合实现；命令提交和 Core 启动则由原始地址读写回调组合实现。后端只需保证
+上述 Ops 契约成立，这些公开能力即可在新平台上复用。
 
 \end{document}
