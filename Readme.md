@@ -389,7 +389,11 @@ join-all，因此 root 进入终态时整棵子树已经完成。`dayan_thread_e
 入口。它们把当前 proc 的 `tp` 作为 token，分别通过 BASE 单元地址 1、2、3、4 发出
 Produce，然后进入默认 event 等待；`dayan_wait_dma()` 是 LSU 入口的兼容别名。
 scheduler 每轮通过 BASE 全局地址 0 的 pop 读取所有已完成 token，并由
-`proc_scan_produce()` 调用内部 `proc_wake()`。event 链表本身仍不遍历；只要
+`scheduler_scan_produce()` 按 token 高 16 位分发事件：0 唤醒 Thread，1/2 对本地资源
+执行 produce/consume，3/4 对共享资源执行 produce/consume；低 48 位保存 Thread 或
+resource 指针。`dayan_resource_wait_<unit>_{produce,consume}()` 与对应的
+`dayan_shared_resource_wait_<unit>_{produce,consume}()` 会非阻塞发出这种绑定操作，
+调用方必须保证资源对象在事件完成前保持有效。event 链表本身仍不遍历；只要
 其中存在等待者，scheduler 就持续扫描 Produce，而不会进入 `wfi`。每次等待占用一个
 Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项的无阻塞保证，不能无界
 发射同步项。

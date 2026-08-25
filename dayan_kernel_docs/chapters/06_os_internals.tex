@@ -148,9 +148,12 @@ allocator，并立即请求 Host 回收。
 \subsection{执行单元完成事件}
 
 \code{dayan_wait_lsu/mat/vec/macro} 把当前 \code{tp} 写入对应 Produce 队列，然后
-进入事件等待。scheduler 的 \code{proc_scan_produce()} 从 BASE 全局完成队列取回
-token，并唤醒对应 proc。若 token 指向 \code{KILL_WAIT_PRODUCE}，scheduler 只完成延迟
-slot 回收，不再恢复其 kernel 代码。DMA 复用 LSU 路径。
+进入事件等待。非阻塞资源 wait API 改为写入显式 token：低 48 位是资源地址，高 16 位
+事件值 1/2/3/4 分别表示 local produce、local consume、shared produce、shared consume；
+普通 Thread 等待的事件值为 0。scheduler 的 \code{scheduler_scan_produce()} 从 BASE
+全局完成队列取回 token，按事件值唤醒 Thread 或执行对应资源操作。若事件 0 指向
+\code{KILL_WAIT_PRODUCE}，scheduler 只完成延迟 slot 回收，不再恢复其 kernel 代码。
+DMA 复用 LSU 路径；未知事件或失败的资源状态迁移视为固件内部协议错误。
 
 \subsection{异常处理}
 

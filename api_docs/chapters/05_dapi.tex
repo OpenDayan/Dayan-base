@@ -127,6 +127,8 @@ FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE 循环。当生�
   \code{dayan_resource_alloc} & 仅从 FREE 状态开始新一代资源，并设置生产者和消费者数量；消费者数量必须非零。 \\
   \code{dayan_resource_produce} & 递减生产者数量；归零时发布 READY 状态并唤醒等待者。 \\
   \code{dayan_resource_consume} & 递减消费者数量；归零时恢复 FREE 状态并唤醒等待者。 \\
+  \code{dayan_resource_wait_lsu_produce} / \code{dayan_resource_wait_mat_produce} / \code{dayan_resource_wait_vec_produce} / \code{dayan_resource_wait_macro_produce} & 非阻塞地登记对应单元完成事件；完成后由调度器对资源执行一次 produce。 \\
+  \code{dayan_resource_wait_lsu_consume} / \code{dayan_resource_wait_mat_consume} / \code{dayan_resource_wait_vec_consume} / \code{dayan_resource_wait_macro_consume} & 非阻塞地登记对应单元完成事件；完成后由调度器对资源执行一次 consume。 \\
   \code{dayan_resource_wait_ready} & 阻塞当前 Proc，直到资源达到 READY。 \\
   \code{dayan_resource_wait_free} & 阻塞当前 Proc，直到资源回到 FREE。 \\
 \end{dayantable}
@@ -144,9 +146,15 @@ FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE 循环。当生�
   \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 状态开始新一代资源并设置计数。 \\
   \code{dayan_shared_resource_produce} & 使用 \code{amoadd.d} 原子递减生产者数量；最后一个生产者发布 READY 状态。 \\
   \code{dayan_shared_resource_consume} & 使用 \code{amoadd.d} 原子递减消费者数量；最后一个消费者发布 FREE 状态。 \\
+  \code{dayan_shared_resource_wait_lsu_produce} / \code{dayan_shared_resource_wait_mat_produce} / \code{dayan_shared_resource_wait_vec_produce} / \code{dayan_shared_resource_wait_macro_produce} & 非阻塞登记单元完成事件；完成后原子执行一次 shared produce。 \\
+  \code{dayan_shared_resource_wait_lsu_consume} / \code{dayan_shared_resource_wait_mat_consume} / \code{dayan_shared_resource_wait_vec_consume} / \code{dayan_shared_resource_wait_macro_consume} & 非阻塞登记单元完成事件；完成后原子执行一次 shared consume。 \\
   \code{dayan_shared_resource_wait_ready} & 可调度地轮询，直到跨 Hart 资源为 READY。 \\
   \code{dayan_shared_resource_wait_free} & 可调度地轮询，直到跨 Hart 资源为 FREE。 \\
 \end{dayantable}
+
+上述异步资源接口把事件类型编码在 Produce token 高 16 位，把资源地址编码在低 48 位，
+调用本身不挂起当前 Proc。资源对象及其所属 kernel 实例必须保持有效，直到调度器处理完成
+token；若完成时资源状态不允许对应的 produce/consume，固件按内部协议错误停机。
 
 \subsection{Device stdio}
 

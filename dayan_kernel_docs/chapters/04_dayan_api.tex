@@ -107,6 +107,8 @@ x=0--3 分别对应同一 Cluster 内一次 group 调度的四个 lane；y、z �
   \code{dayan_resource_alloc} & 在 FREE 状态设置 producer/consumer 数量；consumer 不能为 0。 \\
   \code{dayan_resource_produce} & 减少 producer；最后一次操作把状态改为 READY 并唤醒等待者。 \\
   \code{dayan_resource_consume} & 减少 consumer；最后一次操作把状态改为 FREE 并唤醒等待者。 \\
+  \code{dayan_resource_wait_lsu_produce} / \code{dayan_resource_wait_mat_produce} / \code{dayan_resource_wait_vec_produce} / \code{dayan_resource_wait_macro_produce} & 非阻塞登记对应单元的完成 token；完成后由 scheduler 执行一次 produce。 \\
+  \code{dayan_resource_wait_lsu_consume} / \code{dayan_resource_wait_mat_consume} / \code{dayan_resource_wait_vec_consume} / \code{dayan_resource_wait_macro_consume} & 非阻塞登记对应单元的完成 token；完成后由 scheduler 执行一次 consume。 \\
   \code{dayan_resource_wait_ready} & 未到 READY 时把当前 proc 挂入 ready 等待链表。 \\
   \code{dayan_resource_wait_free} & 未到 FREE 时把当前 proc 挂入 free 等待链表。 \\
 \end{dayantable}
@@ -122,6 +124,8 @@ x=0--3 分别对应同一 Cluster 内一次 group 调度的四个 lane；y、z �
   \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 原子安装 producer/consumer 计数。 \\
   \code{dayan_shared_resource_produce} & 使用一条 \code{amoadd.d} 减少 producer；归零即发布 READY。 \\
   \code{dayan_shared_resource_consume} & 使用一条 \code{amoadd.d} 减少 consumer；整个状态字归零即发布 FREE。 \\
+  \code{dayan_shared_resource_wait_lsu_produce} / \code{dayan_shared_resource_wait_mat_produce} / \code{dayan_shared_resource_wait_vec_produce} / \code{dayan_shared_resource_wait_macro_produce} & 非阻塞登记单元完成 token；完成后原子执行一次 shared produce。 \\
+  \code{dayan_shared_resource_wait_lsu_consume} / \code{dayan_shared_resource_wait_mat_consume} / \code{dayan_shared_resource_wait_vec_consume} / \code{dayan_shared_resource_wait_macro_consume} & 非阻塞登记单元完成 token；完成后原子执行一次 shared consume。 \\
   \code{dayan_shared_resource_wait_ready} & 读取打包状态字检查 READY，未满足时进入 poll wait。 \\
   \code{dayan_shared_resource_wait_free} & 读取打包状态字检查 FREE，未满足时进入 poll wait。 \\
 \end{dayantable}
@@ -138,5 +142,9 @@ alloc/produce/consume 会返回失败，不会修正计数。
 
 单核 resource 不得跨 hart 使用；shared resource 不得并发初始化。Host 回收 coherent
 allocation 前，应确认所有参与 proc 已结束且没有 hart 继续轮询。
+
+异步资源接口把事件类型放在 Produce token 高 16 位，低 48 位保存资源地址；调用后当前
+proc 继续运行。资源对象不得在完成 token 被 scheduler 处理前移动、释放或离开所属
+kernel 实例，完成时的资源状态也必须允许对应的 produce/consume。
 
 \end{document}

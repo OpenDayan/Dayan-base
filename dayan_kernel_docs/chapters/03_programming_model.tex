@@ -214,8 +214,10 @@ Service 根据可见性选择调度目标，HAL 决定具体 region、地址和�
 或跨 hart 迁移；长时间不进入等待点的 kernel 会阻塞同一 hart 上的其它 proc。
 
 LSU、MAT、VEC 和 MACRO 可以异步执行。\code{dayan_wait_*} 等待调用前已发射到对应
-单元的工作。硬件 Produce 队列同时保证全局 32 项、每单元 2 项；软件不能超过这一
-无阻塞容量。
+单元的工作；\code{dayan_resource_wait_*} 与
+\code{dayan_shared_resource_wait_*} 则非阻塞地把完成事件绑定到一次资源
+produce/consume。硬件 Produce 队列同时保证全局 32 项、每单元 2 项；软件不能超过这一
+无阻塞容量，异步事件引用的资源在完成前必须保持有效。
 
 \subsection{内存模型}
 
