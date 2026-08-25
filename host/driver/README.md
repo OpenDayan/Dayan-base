@@ -118,19 +118,20 @@ URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB。真实多 Cluster 
 `dayan_server_options_t.hal.memory_regions` 提供准确的物理布局。对同一 Cluster
 可见的 region 不得重叠；不同 Cluster 的局部地址空间可以使用相同数值地址。
 
-每个 kernel 的 Package 元信息声明 `max_child_procs`、`atomic_cache_size`、
-`uram_size` 和 kernel flags。Server 选 Core 时累加检查三类资源：每个 invocation 按
-`1 + max_child_procs` 预留 proc slot，同一 Hart 最多 16 个（root 计入，init/RPC
-proc 不计入）；atomic cache 与 URAM 分别受 HAL 对该 Core 可见的容量限制。URAM
-allocation 固定为 Core scope，以 1 KiB 为分配和释放粒度；物理 Cluster/Core 仍不会
+每个 kernel 的 Package 元信息声明 `max_child_threads`、`atomic_cache_size`、
+`uram_size`、四类 TCSR 数量和 kernel flags。Server 选 Core 时累加检查 proc slot、
+Atomic Cache、URAM 及 LSU/MAT/VEC/MACRO TCSR 位图：每个 invocation 按
+`1 + max_child_threads` 预留 proc slot，同一 Hart 最多 16 个（root 计入，init/RPC
+proc 不计入）。URAM allocation 固定为 Core scope，以 32 KiB 为分配和释放粒度；
+Server 把 URAM 与 TCSR 物理范围压缩进 64-bit Context。物理 Cluster/Core 仍不会
 出现在 Runtime 启动接口中。
 
 `NPU_PACKAGE_KERNEL_LOCKED_TASK` 只允许 single-Core kernel。带该标记的一个 logical
 Task 只能派发到空 Hart；从 root Proc 建立到整个 family 终态期间，该 Hart 不接受任何
-其它 logical Task，包括同一 grid 的下一 Task，但该 Task 自己的 child Proc 可在其真实
+其它 logical Task，包括同一 grid 的下一 Task，但该 Task 自己的 child Thread 可在其真实
 预留范围内运行。root 退出前会隐式 join-all，所以 invocation 终态就是安全解锁点；
 Device launch 失败则沿预留回滚路径立即解锁。该标记不虚增 Proc 计数，
-`max_child_procs=15` 仍表示真实预留 root 加 15 个 child 的旧式资源独占。
+`max_child_threads=15` 仍表示真实预留 root 加 15 个 child Thread。
 
 ## 用户进程直接搬运数据
 
@@ -170,7 +171,7 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
 内部。
 
 - Device→Host：输出、清屏、Device heap acquire/release、trap report、root proc
-  exit 和 profile FIFO flush；退出通知携带返回值与 cookie，子 proc 不发送 Host 生命周期消息。子 proc 的
+  exit 和 profile FIFO flush；退出通知携带返回值与 cookie，子 Thread 不发送 Host 生命周期消息。子 Thread 的
   独立 Device printf buffer 使用所属 Host root ID 输出；Cluster、Core 与 root proc ID
   由 Server 归属到发起任务的 Runtime Session。Runtime
   在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
@@ -178,14 +179,15 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
-create-proc ABI v4 使用 224-byte `rpc_proc_create_request`，包含 entry、栈、shared、
+create-proc ABI v5 使用 232-byte `rpc_proc_create_request`，包含 entry、栈、shared、
 printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
-最大子 proc 数、URAM base/size，以及固定 16-byte Proc 名称。Runtime launch 必须提供
+最大子 Thread 数、URAM base/size、64-bit Tensor Context，以及固定 16-byte Proc 名称。Runtime launch 必须提供
 非空 Task 名称；名称最多 15 bytes，最后一 byte 留给 NUL。BL1 创建 root 时一次性专属
-预留全部子 slot；`dayan_create_proc(name, entry, argument)` 在同一 Core 创建有独立名称的
-子 proc，返回正的 ID 并继承 logical task、`shared/gp` 和 URAM。
-`dayan_join`/`dayan_join_all` 回收直属子 proc；父
-proc 返回前隐式等待全部子 proc，因而 root 的终态覆盖整棵子树。每个 proc 退出会
+预留全部子 slot；`dayan_create_thread(name, entry, argument, resources)` 在同一 Core
+创建有独立名称的子 Thread，返回正的 ID 并继承 logical task、`shared/gp` 和 URAM；
+TCSR 资源由参数显式声明并形成独立 Context。
+`dayan_thread_join`/`dayan_thread_join_all` 回收直属子 Thread；父
+执行对象返回前隐式等待全部子 Thread，因而 root 的终态覆盖整棵子树。每个执行对象退出会
 flush/CLEAR 输出；只有 root 主动向 Host 上报返回值。最后由 scheduler 栈归还整组静态
 slot，并把描述符置为 `EXITED` 或 `FAILED`。
 
@@ -194,7 +196,7 @@ slot，并把描述符置为 `EXITED` 或 `FAILED`。
 `RPC_PROC_KILL_ALL` 不碰 init 和
 三个系统 proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
 等待者标为 `KILL_WAIT_PRODUCE`，结果 token 到达后再释放。被 kill 的 root 以
-`-ECANCELED` 完成，子 proc 不单独通知 Host。
+`-ECANCELED` 完成，子 Thread 不单独通知 Host。
 Service 接受 create response 后已经快速进入终态仍是合法情况。
 
 Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-local URAM。

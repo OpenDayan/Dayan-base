@@ -25,7 +25,7 @@ static_assert(sizeof(TaskGridRecord) == 64, "task grid record ABI");
 __kernel__ void task_grid_probe(TaskGridRecord *records)
 {
     if (!records)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     const uint32_t x = dayan_task_id(DAYAN_TASK_X);
     const uint32_t y = dayan_task_id(DAYAN_TASK_Y);
@@ -37,7 +37,7 @@ __kernel__ void task_grid_probe(TaskGridRecord *records)
 
     if (x >= 4U || y != 0U || z != 0U || dim_x != 4U || dim_y != 1U ||
         dim_z != 1U || mode != 1U)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     TaskGridRecord *record = records + x;
     record->x = x;
@@ -52,7 +52,7 @@ __kernel__ void task_grid_probe(TaskGridRecord *records)
     dayan_cache_flush(record, sizeof(*record));
 }
 
-DAYAN_KERNEL_DESC(task_grid_probe, 0, 0, 0);
+DAYAN_KERNEL_DESC(task_grid_probe, 0, 0, 0, 0, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

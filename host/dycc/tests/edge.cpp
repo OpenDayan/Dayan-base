@@ -17,11 +17,11 @@ __kernel__ void declared_kernel(int value)
     device_a += value;
 }
 
-DAYAN_KERNEL_DESC(declared_kernel, 0, 0, 0);
+DAYAN_KERNEL_DESC(declared_kernel, 0, 0, 0, 0, 0, 0, 0);
 
 extern "C" __kernel__ void c_kernel(uintptr_t address)
 {
     *(int *)address = device_b;
 }
 
-DAYAN_KERNEL_DESC(c_kernel, 0, 0, 0);
+DAYAN_KERNEL_DESC(c_kernel, 0, 0, 0, 0, 0, 0, 0);

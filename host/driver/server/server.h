@@ -5,7 +5,7 @@
 
 #include "service.h"
 
-#define DAYAN_SERVER_OPTIONS_VERSION 10U
+#define DAYAN_SERVER_OPTIONS_VERSION 11U
 
 typedef struct dayan_server dayan_server_t;
 
@@ -14,6 +14,10 @@ typedef struct dayan_server_options {
     uint32_t enabled_cluster_mask;
     uint32_t enabled_core_mask;
     uint32_t max_procs_per_hart;
+    uint32_t lsu_tcsr_count_per_hart;
+    uint32_t mat_tcsr_count_per_hart;
+    uint32_t vec_tcsr_count_per_hart;
+    uint32_t macro_tcsr_count_per_hart;
     const char *socket_path;
     const char *firmware_path;
     const char *api_elf_path;

@@ -9,17 +9,18 @@ extern "C" {
 #endif
 
 #define NPU_PACKAGE_MAGIC             "DAYANPKG"
-#define NPU_PACKAGE_VERSION           4U
+#define NPU_PACKAGE_VERSION           5U
 #define NPU_PACKAGE_HEADER_SIZE       128U
-#define NPU_PACKAGE_KERNEL_VERSION    4U
+#define NPU_PACKAGE_KERNEL_VERSION    5U
 #define NPU_PACKAGE_MAX_KERNELS       4096U
 #define NPU_PACKAGE_MAX_ARGS          8U
 #define NPU_PACKAGE_HART_MAX_PROCS    16U
-#define NPU_PACKAGE_MAX_CHILD_PROCS   (NPU_PACKAGE_HART_MAX_PROCS - 1U)
+#define NPU_PACKAGE_MAX_CHILD_THREADS (NPU_PACKAGE_HART_MAX_PROCS - 1U)
 #define NPU_PACKAGE_PROC_MIN_STACK_SIZE 1024U
 #define NPU_PACKAGE_PROC_STACK_SIZE   0x10000U
 #define NPU_PACKAGE_PROC_PRINTF_SIZE  0x1000U
-#define NPU_PACKAGE_URAM_GRANULE      1024U
+#define NPU_PACKAGE_URAM_GRANULE      (32U * 1024U)
+#define NPU_PACKAGE_TCSR_MAX_COUNT    8U
 #define NPU_PACKAGE_ISA_RV64_DAYAN    "rv64imaf_zicsr_zifencei"
 
 #define NPU_PACKAGE_IMMUTABLE_MODULE  (1U << 0)
@@ -80,7 +81,7 @@ typedef struct npu_package_kernel {
     uint32_t first_sync;
     uint32_t sync_count;
     uint32_t max_tasks_per_core;
-    uint32_t max_child_procs;
+    uint32_t max_child_threads;
     uint32_t flags;
     uint32_t reserved0;
     uint64_t stack_size;
@@ -88,7 +89,11 @@ typedef struct npu_package_kernel {
     uint64_t printf_buffer_size;
     uint64_t resident_memory;
     uint64_t uram_size;
-    uint64_t reserved[1];
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
+    uint32_t reserved1;
 } npu_package_kernel_t;
 
 typedef struct npu_package_argument {
@@ -112,8 +117,12 @@ typedef struct npu_package_kernel_desc {
     const char *entry_symbol;
     uint32_t supported_task_modes;
     uint32_t max_tasks_per_core;
-    uint32_t max_child_procs;
+    uint32_t max_child_threads;
     uint32_t flags;
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t printf_buffer_size;

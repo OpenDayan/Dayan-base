@@ -24,7 +24,7 @@ static_assert(sizeof(CacheSemanticsState) == 320, "cache test state ABI");
 __kernel__ void cache_semantics(CacheSemanticsState *state, uint64_t operation)
 {
     if (!state || operation > 3U)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     volatile uint64_t *target = operation >= 2U ? &state->far_value :
                                                   &state->value;
@@ -53,7 +53,7 @@ __kernel__ void cache_semantics(CacheSemanticsState *state, uint64_t operation)
     dayan_cache_flush((const void *)&state->observed, 64);
 }
 
-DAYAN_KERNEL_DESC(cache_semantics, 0, 0, 0);
+DAYAN_KERNEL_DESC(cache_semantics, 0, 0, 0, 0, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

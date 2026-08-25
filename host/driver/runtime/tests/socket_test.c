@@ -429,7 +429,7 @@ int main(void)
         kernel.entry_symbol = "resource_kernel";
         kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
         kernel.max_tasks_per_core = 1;
-        kernel.max_child_procs = NPU_PACKAGE_MAX_CHILD_PROCS;
+        kernel.max_child_threads = NPU_PACKAGE_MAX_CHILD_THREADS;
         assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                                  &package, &package_size) == 0);
         assert(npu_module_load(context, package, package_size, &module) == 0);
@@ -455,8 +455,8 @@ int main(void)
         module = 0;
         package = 0;
         package_size = 0;
-        kernel.max_child_procs = 0;
-        kernel.uram_size = 1024;
+        kernel.max_child_threads = 0;
+        kernel.uram_size = NPU_PACKAGE_URAM_GRANULE;
         assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                                  &package, &package_size) == 0);
         assert(npu_module_load(context, package, package_size, &module) == 0);
@@ -476,7 +476,7 @@ int main(void)
         package_size = 0;
         kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
         kernel.max_tasks_per_core = 1;
-        kernel.max_child_procs = 0;
+        kernel.max_child_threads = 0;
         kernel.flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
         kernel.uram_size = 0;
         assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,

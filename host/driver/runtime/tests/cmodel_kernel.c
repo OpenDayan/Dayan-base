@@ -3,8 +3,8 @@
 #include <dayan_sys.h>
 
 #define TEST_FAILURE (~(uint64_t)0)
-#define TEST_CHILD_PROCS 15U
-#define LOCK_TEST_CHILD_PROCS 2U
+#define TEST_CHILD_THREADS 15U
+#define LOCK_TEST_CHILD_THREADS 2U
 #define LOCK_TEST_RESULT 0x1234567800003000ULL
 #define NORMAL_TEST_RESULT 0x1234567800004000ULL
 
@@ -12,8 +12,8 @@ struct lock_test_results {
     volatile uint64_t release;
     uint64_t release_padding[7];
     uint64_t root_begin;
-    uint64_t child_begin[LOCK_TEST_CHILD_PROCS];
-    uint64_t child_end[LOCK_TEST_CHILD_PROCS];
+    uint64_t child_begin[LOCK_TEST_CHILD_THREADS];
+    uint64_t child_end[LOCK_TEST_CHILD_THREADS];
     volatile uint64_t started_mask;
     uint64_t family_end;
     uint64_t normal_begin;
@@ -57,7 +57,7 @@ static void locked_child(void *argument)
     }
     results->child_end[work->index] = read_mcycle();
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
-    dayan_proc_exit((int64_t)(LOCK_TEST_RESULT + work->index));
+    dayan_thread_exit((int64_t)(LOCK_TEST_RESULT + work->index));
 }
 
 static void child_write(void *argument)
@@ -74,19 +74,19 @@ static void child_write(void *argument)
         *work->uram_tail ==
             (work->value ^ 0x55aa55aa55aa55aaULL) ?
         work->value : TEST_FAILURE;
-    dayan_proc_exit((int64_t)work->value);
+    dayan_thread_exit((int64_t)work->value);
 }
 
 static void nested_write(void *argument)
 {
     struct child_work *work = argument;
     int64_t result = -1;
-    int child = dayan_create_proc("child-write", child_write, work);
+    int child = dayan_create_thread("child-write", child_write, work, 0);
 
-    if (child < 0 || dayan_join((uint32_t)child, &result) < 0 ||
+    if (child < 0 || dayan_thread_join((uint32_t)child, &result) < 0 ||
         result != (int64_t)work->value)
-        dayan_proc_exit(-1);
-    dayan_proc_exit(result);
+        dayan_thread_exit(-1);
+    dayan_thread_exit(result);
 }
 
 void grid_kernel(uint64_t *output, uint64_t base)
@@ -100,11 +100,11 @@ void grid_kernel(uint64_t *output, uint64_t base)
     uint64_t expected = base + (uint64_t)dayan_task_mode() * 100U + linear;
     uint64_t *uram = dayan_uram_base();
     struct child_work *work;
-    int children[TEST_CHILD_PROCS];
+    int children[TEST_CHILD_THREADS];
     int64_t child_result;
 
     if (!uram || dayan_uram_size() != 0x180000U ||
-        ((uintptr_t)uram & 1023U)) {
+        ((uintptr_t)uram & (DAYAN_URAM_ALLOCATION_GRANULE - 1U))) {
         output[linear] = TEST_FAILURE;
         return;
     }
@@ -128,29 +128,29 @@ void grid_kernel(uint64_t *output, uint64_t base)
     work->uram_tail = (uint64_t *)((unsigned char *)uram +
                                   dayan_uram_size() - sizeof(uint64_t));
     work->value = expected;
-    if (dayan_create_proc("", child_write, work) >= 0 ||
-        dayan_create_proc("child-name-is-too-long", child_write, work) >= 0) {
+    if (dayan_create_thread("", child_write, work, 0) >= 0 ||
+        dayan_create_thread("child-name-is-too-long", child_write, work, 0) >= 0) {
         output[linear] = TEST_FAILURE;
         return;
     }
-    for (uint32_t child = 0; child < TEST_CHILD_PROCS; ++child) {
-        children[child] = dayan_create_proc("child-write", child_write,
-                                            work);
+    for (uint32_t child = 0; child < TEST_CHILD_THREADS; ++child) {
+        children[child] = dayan_create_thread("child-write", child_write,
+                                              work, 0);
         if (children[child] < 0) {
             output[linear] = TEST_FAILURE;
             return;
         }
     }
-    if (dayan_create_proc("child-write", child_write, work) >= 0)
+    if (dayan_create_thread("child-write", child_write, work, 0) >= 0)
         output[linear] = TEST_FAILURE;
     child_result = -1;
-    if (dayan_join((uint32_t)children[0], &child_result) < 0 ||
+    if (dayan_thread_join((uint32_t)children[0], &child_result) < 0 ||
         child_result != (int64_t)expected ||
-        dayan_join((uint32_t)children[1], 0) < 0 ||
-        dayan_create_proc("nested-write", nested_write, work) < 0 ||
-        dayan_join_all() < 0)
+        dayan_thread_join((uint32_t)children[1], 0) < 0 ||
+        dayan_create_thread("nested-write", nested_write, work, 0) < 0 ||
+        dayan_thread_join_all() < 0)
         output[linear] = TEST_FAILURE;
-    dayan_proc_exit((int64_t)expected);
+    dayan_thread_exit((int64_t)expected);
 }
 
 void kill_kernel(uint64_t *output, uint64_t value)
@@ -162,41 +162,41 @@ void kill_kernel(uint64_t *output, uint64_t value)
 
 void locked_kernel(struct lock_test_results *results)
 {
-    struct lock_child_work work[LOCK_TEST_CHILD_PROCS];
-    int children[LOCK_TEST_CHILD_PROCS];
+    struct lock_child_work work[LOCK_TEST_CHILD_THREADS];
+    int children[LOCK_TEST_CHILD_THREADS];
     uint32_t index;
 
     dayan_cache_invalidate(results, sizeof(*results));
     results->root_begin = read_mcycle();
-    for (index = 0; index < LOCK_TEST_CHILD_PROCS; ++index) {
+    for (index = 0; index < LOCK_TEST_CHILD_THREADS; ++index) {
         work[index].results = results;
         work[index].index = index;
-        children[index] = dayan_create_proc("lock-child", locked_child,
-                                            &work[index]);
+        children[index] = dayan_create_thread("lock-child", locked_child,
+                                              &work[index], 0);
         if (children[index] < 0)
-            dayan_proc_exit(children[index]);
+            dayan_thread_exit(children[index]);
     }
-    for (index = 0; index < LOCK_TEST_CHILD_PROCS; ++index) {
+    for (index = 0; index < LOCK_TEST_CHILD_THREADS; ++index) {
         int64_t result = -1;
 
-        if (dayan_join((uint32_t)children[index], &result) < 0 ||
+        if (dayan_thread_join((uint32_t)children[index], &result) < 0 ||
             result != (int64_t)(LOCK_TEST_RESULT + index))
-            dayan_proc_exit(-1);
+            dayan_thread_exit(-1);
     }
     results->family_end = read_mcycle();
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
-    dayan_proc_exit((int64_t)LOCK_TEST_RESULT);
+    dayan_thread_exit((int64_t)LOCK_TEST_RESULT);
 }
 
 void normal_kernel(struct lock_test_results *results)
 {
     results->normal_begin = read_mcycle();
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
-    dayan_proc_exit((int64_t)NORMAL_TEST_RESULT);
+    dayan_thread_exit((int64_t)NORMAL_TEST_RESULT);
 }
 
 void sequence_kernel(uint64_t *output, uint64_t value)
 {
     *output = value;
-    dayan_proc_exit((int64_t)value);
+    dayan_thread_exit((int64_t)value);
 }

@@ -37,14 +37,14 @@ __kernel__ void vector_add(uint64_t *output, uint64_t value, float scale)
     *output = device_helper(value) + (uint64_t)scale;
 }
 
-DAYAN_KERNEL_DESC(vector_add, 3, 4096, 2048);
+DAYAN_KERNEL_DESC(vector_add, 3, 4096, 32768, 1, 2, 3, 4);
 
 __kernel__ void locked_kernel(uint64_t *output)
 {
     *output = 1;
 }
 
-DAYAN_KERNEL_LOCKED_TASK_DESC(locked_kernel, 0, 0, 0);
+DAYAN_KERNEL_LOCKED_TASK_DESC(locked_kernel, 0, 0, 0, 0, 0, 0, 0);
 
 } // namespace sample
 

@@ -19,8 +19,9 @@
   \item 进入 \code{scheduler()}，不再返回。
 \end{enumerate}
 
-BL1 清空 \code{mie} 和 \code{mstatus.MIE}。mailbox doorbell 只作为可轮询状态；同步
-异常仍进入 \code{mtvec}。
+BL1 初始化期间保持中断关闭；进入 scheduler 前只在 \code{mie} 中启用 MEIE，并设置
+\code{mstatus.MIE}。mailbox 的 MSIP 仍只作为可轮询状态，张量错误通过机器外部中断
+进入 \code{mtvec}，同步异常沿用同一入口。
 
 \subsection{每 hart 状态}
 
@@ -30,7 +31,7 @@ BL1 清空 \code{mie} 和 \code{mstatus.MIE}。mailbox doorbell 只作为可轮�
   init 栈 & 64 KiB & BL1、初始化和 scheduler。 \\
   RPC 栈 & 4 KiB $\times$ 2 & receive proc 与 send proc。 \\
   profile 栈 & 4 KiB & profile FIFO 满时执行反向 RPC。 \\
-  trap 栈 & 4 KiB & 同步异常入口。 \\
+  trap 栈 & 4 KiB & 同步异常与张量机器外部中断入口。 \\
   proc slot & $(64+4)$ KiB $\times$ 16 & 算子 proc 的固定栈与 printf buffer；不含 init/RPC/profile proc。 \\
   初始堆 & 1 MiB & 当前 hart 私有 allocator 的首个 region。 \\
 \end{dayantable}
@@ -78,14 +79,15 @@ mailbox 状态与跨核 resource 使用 poll。
 每个 Hart 在链接阶段静态准备 16 个算子 proc slot，每个 slot 包含 proc 对象、64 KiB
 栈和 4 KiB printf buffer；init、两个 RPC proc 与 profile proc 使用独立对象和栈，
 不占这些 slot。
-\code{RPC_PROC_CREATE} 取得 root 后立即从全局空闲池摘下 \code{max\_child\_procs} 个
+\code{RPC_PROC_CREATE} 取得 root 后立即从全局空闲池摘下 \code{max\_child\_threads} 个
 slot，形成该 family 的专属池；root 计入 reservation，单个 descriptor 最多声明 15 个
-子 proc。子孙创建和退出只操作专属池，不再通知 Host。Device 自己也检查物理空闲量和
+子 Thread。子孙创建和退出只操作专属池，不再通知 Host。Device 自己也检查物理空闲量和
 所有 active family 的 reservation，不能依赖 Host 正确性。
 
-\code{dayan_create_proc} 从同一 Hart 的空闲静态 slot 创建带名称的子 proc，传递一个指针参数并
-继承 logical task、\code{gp/shared} 和 URAM。proc 保存 parent ID/pointer、直属未结束子
-proc 计数与 join 状态。子 proc 退出后成为 zombie，减少父计数并按 join 条件精确唤醒；
+\code{dayan_create_thread} 从同一 Hart 的空闲静态 slot 创建带名称的子 Thread，传递一个
+指针参数并继承 logical task、\code{gp/shared} 和 URAM。显式 TCSR 请求从根 Proc 的
+静态池中子分配并写入该 Thread 的 Context。proc 保存 parent ID/pointer、直属未结束子
+Thread 计数与 join 状态。子 Thread 退出后成为 zombie，减少父计数并按 join 条件精确唤醒；
 join 回收 zombie。每个 proc 退出前隐式 join-all，该规则递归保证 root cleanup 时没有
 存活后代。root 最终一次性归还 family 的专属 slot；栈和 printf buffer 始终是静态存储。
 每个 proc 退出均 best-effort flush 并 CLEAR 自己的输出，只有 Host 创建的 root 使用
@@ -96,7 +98,28 @@ join 回收 zombie。每个 proc 退出前隐式 join-all，该规则递归保�
 transaction 被取消，已由 send proc 持有的 transaction 在释放调用者 slot 前排空。
 非 Produce slot 立即归还全局池；\code{WAIT_PRODUCE} 改为
 \code{KILL_WAIT_PRODUCE}，硬件 token 返回后才归还。kill 仍只对 root 发送一次退出通知，
-子 proc 不产生 Host 生命周期消息。
+子 Thread 不产生 Host 生命周期消息。
+
+\subsection{Tensor Context 与 TCSR 虚拟化}
+
+每个算子 proc 和子 Thread 都保存独立的 64-bit Tensor Context。\code{switch_context}
+在恢复执行对象时把该值写入硬件 Context TCSR，使 kernel 使用逻辑 TCSR 组号，不感知
+Server 分配的物理组号。编码只使用低 56 bit：
+
+\begin{dayantable}{Tensor Context 编码}{tab:kernel-tensor-context}{X[28,l] X[72,l]}
+  位域 & 含义 \\
+  7:0 / 15:8 & \code{URAMLo} / \code{URAMHi}，按 32 KiB 编码半开区间。 \\
+  19:16 / 25:20 & LSU \code{TCFGCNT} / \code{TCFGBASE}。 \\
+  29:26 / 35:30 & MAT \code{TCFGCNT} / \code{TCFGBASE}。 \\
+  39:36 / 45:40 & VEC \code{TCFGCNT} / \code{TCFGBASE}。 \\
+  49:46 / 55:50 & MACRO \code{TCFGCNT} / \code{TCFGBASE}。 \\
+\end{dayantable}
+
+Server 为根 Proc 静态分配 URAM 和四类 TCSR 范围，并把编码结果随
+\code{RPC_PROC_CREATE} 下发。子 Thread 继承根 Proc 的 URAM 上下界；其 TCSR 数量由
+\code{dayan_thread_resources_t} 显式声明，再从 family 的静态 TCSR 池中子分配。
+因此每个执行对象都应优先使用自己的逻辑组 0，Thread 退出并被 join 回收后归还对应
+TCSR 位图。
 
 \subsection{proc profile}
 
@@ -137,5 +160,18 @@ slot 回收，不再恢复其 kernel 代码。DMA 复用 LSU 路径。
 
 普通 proc 异常后以失败状态退出。init/scheduler 异常、嵌套异常、RPC send proc 异常或
 报告无法入队时，Dayan OS 停机；这些场景无法安全恢复或保证诊断送达。
+
+\subsection{张量中断处理}
+
+RVTNG 把 URAM 越界或未对齐、TCSR 逻辑组越界以及指令解码错误汇总为每 Hart 的
+机器外部中断。trap 入口保存通用寄存器和 machine/FCSR 状态后读取中断控制、48-bit
+累计计数与最近 16 条记录，连同当前 Thread ID、状态和 Tensor Context 写入
+184-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
+原执行对象。错误指令是否继续以及采用何种降级结果由 RVTNG 定义。
+
+scheduler 随后用 \code{RPC_TENSOR_INTERRUPT_REPORT} 异步上报该快照。上一条报告尚未
+离开本 Hart 时，新中断仍会清除硬件 pending，并累计 \code{dropped_reports}，避免中断
+线长期阻塞。Server 默认打印 source ID/名称、低 32-bit info、Context 和累计次数；source
+编号与 RVTNG 的 \code{RVTIntPlacer} 输入顺序一致。
 
 \end{document}

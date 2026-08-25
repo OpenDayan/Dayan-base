@@ -9,6 +9,7 @@
 #include "sche.h"
 #include "stdlib.h"
 #include "string.h"
+#include "tensor_context.h"
 
 _Static_assert(RPC_DESCRIPTOR_GRANULE == CONFIG_CACHE_LINE_SIZE,
                "RPC descriptors must occupy whole cache lines");
@@ -44,12 +45,15 @@ static int dcache_flush_request_valid(
 
 static int proc_request_valid(const struct rpc_proc_create_request *request)
 {
+    struct dayan_context_fields tensor_context =
+        dayan_context_unpack(request->tensor_context);
     uint64_t coherent_base = CONFIG_COHERENT_BASE;
     uint64_t coherent_size = CONFIG_COHERENT_SIZE;
     uint64_t uram_window = CONFIG_URAM_BASE +
         (uint64_t)platform_hart_id() * CONFIG_URAM_STRIDE;
     int shared_valid;
     int uram_valid;
+    int context_uram_valid;
 
     if (request->version != RPC_PROC_CREATE_VERSION ||
         request->size != sizeof(*request) || request->flags ||
@@ -60,7 +64,7 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
         !request->name[0] ||
         strnlen(request->name, sizeof(request->name)) ==
             sizeof(request->name) ||
-        request->max_child_procs > RPC_PROC_MAX_CHILD_PROCS ||
+        request->max_child_threads > RPC_PROC_MAX_CHILD_THREADS ||
         request->stack_size < RPC_PROC_MIN_STACK_SIZE ||
         request->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         request->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
@@ -72,7 +76,9 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
         request->task_id[1] >= request->task_dim[1] ||
         request->task_id[2] >= request->task_dim[2] ||
         (request->task_mode != 1U && request->task_mode != 4U) ||
-        (request->task_mode == 4U && request->task_dim[0] != 4U))
+        (request->task_mode == 4U && request->task_dim[0] != 4U) ||
+        (request->tensor_context >> 56) ||
+        !dayan_context_fields_valid(&tensor_context))
         return 0;
     shared_valid = (!request->shared_base && !request->shared_size) ||
         (request->shared_base && request->shared_size &&
@@ -85,7 +91,14 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
          !(request->uram_size & (RPC_PROC_URAM_GRANULE - 1U)) &&
          range_inside(request->uram_base, request->uram_size,
                       uram_window, CONFIG_URAM_SIZE));
-    return shared_valid && uram_valid;
+    context_uram_valid =
+        tensor_context.uram_lo ==
+            ((request->uram_base & (DAYAN_CONTEXT_URAM_WINDOW - 1U)) /
+             DAYAN_CONTEXT_URAM_GRANULE) &&
+        tensor_context.uram_hi ==
+            (((request->uram_base & (DAYAN_CONTEXT_URAM_WINDOW - 1U)) +
+              request->uram_size) / DAYAN_CONTEXT_URAM_GRANULE);
+    return shared_valid && uram_valid && context_uram_valid;
 }
 
 static void proc_request_publish_state(
@@ -132,7 +145,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
                                (size_t)request->printf_buffer_size, &proc);
     if (status < 0)
         goto complete;
-    status = proc_family_create(proc, request->max_child_procs,
+    status = proc_family_create(proc, request->max_child_threads,
                                 (size_t)request->stack_size,
                                 (size_t)request->printf_buffer_size,
                                 &family);
@@ -148,7 +161,8 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     status = proc_set_resources(proc, family,
                                 (size_t)request->shared_size,
                                 (void *)(uintptr_t)request->uram_base,
-                                (size_t)request->uram_size);
+                                (size_t)request->uram_size,
+                                request->tensor_context);
     if (status < 0)
         platform_halt();
     proc->cookie = request->cookie;

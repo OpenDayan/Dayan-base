@@ -43,7 +43,7 @@ make -C demo
 
 两个示例都计算固定的 `A[64] + B[64] -> C[64]`，输入输出均为 FP32。
 Device 部分只有一个 kernel，不定义或调用自定义 Device 子函数，也不创建
-child proc。LSU 配置、计算单元配置以及 `load -> calc -> store` 全部在
+子 Thread。LSU 配置、计算单元配置以及 `load -> calc -> store` 全部在
 kernel 体内直接展开：
 
 - `add_fp32_macro.cpp` 使用 `__tx_macro_elemwise_add_fp32`。

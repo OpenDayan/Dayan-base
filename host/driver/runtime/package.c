@@ -98,7 +98,11 @@ int npu_package_build(const void *riscv_object, size_t object_size,
                  NPU_PACKAGE_TASK_MODE_SINGLE_CORE) ||
             ((kernel->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
              kernel->max_tasks_per_core > 1U) ||
-            kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
+            kernel->max_child_threads > NPU_PACKAGE_MAX_CHILD_THREADS ||
+            kernel->lsu_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->mat_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->vec_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->macro_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
             (kernel->stack_size &&
              kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
             kernel->stack_size > NPU_PACKAGE_PROC_STACK_SIZE ||
@@ -219,8 +223,12 @@ int npu_package_build(const void *riscv_object, size_t object_size,
         destination->sync_count = (uint32_t)source->sync_count;
         destination->max_tasks_per_core = source->max_tasks_per_core ?
             source->max_tasks_per_core : 1U;
-        destination->max_child_procs = source->max_child_procs;
+        destination->max_child_threads = source->max_child_threads;
         destination->flags = source->flags;
+        destination->lsu_tcsr_count = source->lsu_tcsr_count;
+        destination->mat_tcsr_count = source->mat_tcsr_count;
+        destination->vec_tcsr_count = source->vec_tcsr_count;
+        destination->macro_tcsr_count = source->macro_tcsr_count;
         destination->stack_size = source->stack_size;
         destination->atomic_cache_size = source->atomic_cache_size;
         destination->printf_buffer_size = source->printf_buffer_size;

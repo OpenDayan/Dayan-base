@@ -20,25 +20,26 @@ Socket 协议不属于公开 API。
   \code{npu_service_launch_state_t} & 启动状态：已提交、运行中、正常退出或失败。 \\
   \code{npu_service_output_fn} & 接收指定 Cluster、Core 和 Proc 的输出数据或清空事件。 \\
   \code{npu_service_trap_fn} & 接收指定 Hart 上报的异常记录。 \\
+  \code{npu_service_tensor_interrupt_fn} & 接收指定 Hart 上报的张量中断快照。 \\
   \code{npu_service_proc_exit_fn} & 接收根 Proc 的返回值和调用方标识。 \\
   \code{npu_service_profile_fn} & 接收某个 Cluster 和 Core 产生的一段原始性能采样数据。 \\
   \code{npu_service_options_t} & Service 配置，包含 RPC 轮询间隔、默认超时、回调函数和回调参数。 \\
-  \code{npu_service_launch_desc_t} & Proc 启动描述符，包含物理位置、入口、参数、逻辑任务信息、共享区、URAM、子 Proc 上限、名称和调用方标识。 \\
+  \code{npu_service_launch_desc_t} & Proc 启动描述符，包含物理位置、入口、参数、逻辑任务信息、共享区、URAM、子 Thread 上限、Tensor Context、名称和调用方标识。 \\
   \code{npu_service_launch_info_t} & 一次启动的状态、物理位置、Proc ID、返回结果、任务坐标和名称。 \\
   \code{npu_service_proc_info_t} & 一个 Proc 的父子关系、状态、资源槽、任务坐标、结果、PC 和名称。 \\
   \code{npu_service_proc_snapshot_t} & 一个 Hart 上的 Proc 快照及资源槽统计。 \\
-  \code{npu_service_kill_result_t} & 批量终止 Proc 后的根 Proc、子 Proc 和资源槽回收统计。 \\
+  \code{npu_service_kill_result_t} & 批量终止 Proc 后的根 Proc、子 Thread 和资源槽回收统计。 \\
   \code{dayan_server_t} & 一个 Server 实例。该类型是不透明句柄。 \\
   \code{dayan_server_options_t} & Server 配置，包含监听地址、固件路径、启用范围、资源限制以及通用 HAL 和 Service 配置。具体后端配置通过 \code{hal.backend_options} 传入。 \\
 \end{dayantable}
 
-\code{struct trap_record} 只在回调参数中以只读指针出现。Service API 不公开该结构的
-Device 侧布局。
+\code{struct trap_record} 和 \code{struct tensor_interrupt_record} 只在回调参数中以
+只读指针出现。Service API 不公开这两个结构的 Device 侧布局。
 
 \begin{dayantable}{Service 常量与枚举}{tab:api-service-constants}{X[47,l] X[53,l]}
   API & 含义 \\
-  \code{NPU_SERVICE_OPTIONS_VERSION} / \code{NPU_SERVICE_LAUNCH_DESC_VERSION} & Service 配置版本为 7，启动描述符版本为 4。 \\
-  \code{DAYAN_SERVER_OPTIONS_VERSION} & Server 配置版本为 10。 \\
+  \code{NPU_SERVICE_OPTIONS_VERSION} / \code{NPU_SERVICE_LAUNCH_DESC_VERSION} & Service 配置版本为 8，启动描述符版本为 5。 \\
+  \code{DAYAN_SERVER_OPTIONS_VERSION} & Server 配置版本为 11。 \\
   \code{NPU_SERVICE_TIMEOUT_INFINITE} & 无限等待。 \\
   \code{NPU_SERVICE_LAUNCH_MAX_ARGS} & 一个根 Proc 最多接收 8 个 64 位参数。 \\
   \code{NPU_SERVICE_PROC_NAME_SIZE} & Proc 名称占 16 字节，其中必须包含结尾空字符。 \\
@@ -47,7 +48,7 @@ Device 侧布局。
   \code{NPU_SERVICE_OUTPUT_CLEAR} & 输出回调应清空该 Proc 已保存的 Host 输出。 \\
   \code{NPU_SERVICE_LAUNCH_SUBMITTED} / \code{NPU_SERVICE_LAUNCH_RUNNING} & 启动已经提交，或 Proc 正在运行。 \\
   \code{NPU_SERVICE_LAUNCH_EXITED} / \code{NPU_SERVICE_LAUNCH_FAILED} & Proc 已正常退出，或创建和执行过程失败。 \\
-  \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统 Proc、Host 创建的根 Proc，以及 Device 创建的子 Proc。 \\
+  \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统 Proc、Host 创建的根 Proc，以及 Device 创建的子 Thread。 \\
   \code{NPU_SERVICE_PROC_ZOMBIE} / \code{NPU_SERVICE_PROC_KILL_WAIT_PRODUCE} & 已退出但尚未回收的 Proc，或终止后仍在等待异步执行单元完成的 Proc。 \\
 \end{dayantable}
 
@@ -96,8 +97,8 @@ Device 侧布局。
 
 \code{target} 必须明确指定 Cluster 和 Core。\code{task_id}、\code{task_dim} 和
 \code{task_mode} 描述逻辑任务。共享区和 URAM 通过 HAL 内存句柄、偏移和长度指定；
-Service 会再次校验内存类别、可见范围和对齐。根 Proc 的子 Proc 资源槽在创建时一次性
-预留。
+Service 会再次校验内存类别、可见范围和对齐。根 Proc 的子 Thread 资源槽在创建时一次性
+预留；64 位 Tensor Context 随创建请求下发，并在该 Proc 被调度时加载。
 
 \subsection{Hart 管理与性能采样}
 

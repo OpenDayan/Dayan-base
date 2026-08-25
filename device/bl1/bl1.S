@@ -34,7 +34,7 @@ _start:
     /* Scheduler/init owns no Host shared allocation. */
     mv      gp, zero
 
-    /* Synchronous exceptions use a per-hart stack; functional IRQs stay off. */
+    /* Exceptions and tensor external interrupts use a per-Hart trap stack. */
     la      t0, __trap_stack_start
     li      t1, CONFIG_TRAP_STACK_SIZE
     addi    t2, a0, 1
@@ -48,18 +48,12 @@ _start:
     csrs    mstatus, t0
     csrw    fcsr, zero
 
-    /* Drain the CSR pipeline before entering code that polls RPC interrupts. */
-.Lmask_irqs:
-    csrw    mie, zero
-    li      t0, 0x8
-    csrc    mstatus, t0
-    csrr    t1, mie
-    bnez    t1, .Lmask_irqs
-    csrr    t1, mstatus
-    andi    t1, t1, 0x8
-    bnez    t1, .Lmask_irqs
-
     call    init
+    /* RPC MSIP is polled; enable only the tensor machine-external IRQ. */
+    li      t0, 0x800
+    csrw    mie, t0
+    li      t0, 0x8
+    csrs    mstatus, t0
     call    scheduler
 
 .Lpark:

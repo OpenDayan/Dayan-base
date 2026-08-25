@@ -68,8 +68,13 @@ int npu_kernel_descriptor_create(
         resources->version != DAYAN_KERNEL_RESOURCE_DESC_VERSION ||
         resources->size != sizeof(*resources) ||
         resources->max_tasks_per_core > 4U ||
-        resources->max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
+        resources->max_child_threads > DAYAN_KERNEL_MAX_CHILD_THREADS ||
         (resources->flags & ~DAYAN_KERNEL_RESOURCE_FLAGS_ALL) ||
+        resources->reserved ||
+        resources->lsu_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->mat_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->vec_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->macro_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         ((resources->flags & DAYAN_KERNEL_RESOURCE_LOCKED_TASK) &&
          resources->max_tasks_per_core > 1U) ||
         (resources->uram_size & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
@@ -98,9 +103,13 @@ int npu_kernel_descriptor_create(
             NPU_PACKAGE_TASK_MODE_SINGLE_CORE : NPU_PACKAGE_TASK_MODE_ALL;
     kernel.max_tasks_per_core = resources->max_tasks_per_core ?
         resources->max_tasks_per_core : 1U;
-    kernel.max_child_procs = resources->max_child_procs;
+    kernel.max_child_threads = resources->max_child_threads;
     kernel.flags = resources->flags & DAYAN_KERNEL_RESOURCE_LOCKED_TASK ?
         NPU_PACKAGE_KERNEL_LOCKED_TASK : 0U;
+    kernel.lsu_tcsr_count = resources->lsu_tcsr_count;
+    kernel.mat_tcsr_count = resources->mat_tcsr_count;
+    kernel.vec_tcsr_count = resources->vec_tcsr_count;
+    kernel.macro_tcsr_count = resources->macro_tcsr_count;
     kernel.atomic_cache_size = resources->atomic_cache_size;
     kernel.uram_size = resources->uram_size;
     kernel.arguments = arguments;

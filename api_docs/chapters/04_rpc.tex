@@ -30,6 +30,7 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
   \code{RPC_HEAP_ACQUIRE} & 从 Host 管理的 Device 堆取得一段内存。 \\
   \code{RPC_HEAP_RELEASE} & 将此前取得的 Device 堆区间交还 Host。 \\
   \code{RPC_TRAP_REPORT} & 上报异常记录；具体结构属于内部异常 ABI。 \\
+  \code{RPC_TENSOR_INTERRUPT_REPORT} & 上报当前 Hart 捕获的张量中断快照；低 48 位参数指向已写回缓存的 \code{tensor_interrupt_record}。 \\
   \code{RPC_PROC_EXIT} & 上报 Host 创建的根 Proc 的返回值和调用方标识。 \\
   \code{RPC_PROFILE_FLUSH} & 将当前 Hart 的一批性能采样数据交给 Host。 \\
 \end{dayantable}
@@ -74,14 +75,14 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
 
 \begin{dayantable}{Proc ABI 常量}{tab:api-rpc-proc-constant}{X[44,l] X[56,l]}
   常量 & 含义 \\
-  \code{RPC_PROC_CREATE_VERSION} & 当前 Proc 创建描述符版本为 4。 \\
+  \code{RPC_PROC_CREATE_VERSION} & 当前 Proc 创建描述符版本为 5。 \\
   \code{RPC_PROC_MAX_ARGS} & 一个 Proc 最多 8 个 64-bit 参数。 \\
   \code{RPC_PROC_SLOTS_PER_HART} & 每个 Hart 有 16 个用户 Proc 资源槽。 \\
-  \code{RPC_PROC_MAX_CHILD_PROCS} & 一个根 Proc 最多预留 15 个子 Proc 资源槽。 \\
+  \code{RPC_PROC_MAX_CHILD_THREADS} & 一个根 Proc 最多预留 15 个子 Thread 资源槽。 \\
   \code{RPC_PROC_NAME_SIZE} & Proc 名称固定占 16 B，必须含结尾 NUL。 \\
   \code{RPC_PROC_MIN_STACK_SIZE} / \code{RPC_PROC_MAX_STACK_SIZE} & Proc stack 合法范围为 1024 B 到 64 KiB。 \\
   \code{RPC_PROC_MAX_PRINTF_SIZE} & 单个 Proc 的格式化输出缓冲区上限为 4 KiB。 \\
-  \code{RPC_PROC_URAM_GRANULE} & URAM 资源以 1 KiB 为分配粒度。 \\
+  \code{RPC_PROC_URAM_GRANULE} & URAM 资源以 32 KiB 为分配粒度。 \\
   \code{RPC_PROC_EXIT_VERSION} & 当前退出通知版本 1。 \\
   \code{RPC_PROC_EXIT_ROOT} & 标记退出者为 Host 管理的 root Proc。 \\
   \code{RPC_PROC_PS_VERSION} & 当前 Proc 快照版本为 3。 \\
@@ -97,18 +98,18 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
   \code{RPC_PROC_EXITED} / \code{RPC_PROC_FAILED} & Proc 正常结束并写回结果，或创建/执行失败。 \\
   \code{RPC_PROC_INFO_SYSTEM} & 记录属于 BL1 系统 Proc。 \\
   \code{RPC_PROC_INFO_HOST_ROOT} & 记录属于 Host 创建的根 Proc。 \\
-  \code{RPC_PROC_INFO_CHILD} & 记录属于 Device Proc 创建的直接或间接子 Proc。 \\
+  \code{RPC_PROC_INFO_CHILD} & 记录属于 Device 执行对象创建的直接或间接子 Thread。 \\
   \code{RPC_PROC_INFO_ZOMBIE} & Proc 已结束但其结果尚未被 join 回收。 \\
   \code{RPC_PROC_INFO_KILL_WAIT_PRODUCE} & Proc 已被终止，但仍须等待异步工作完成才能释放资源槽。 \\
 \end{dayantable}
 
 \begin{dayantable}{Proc 传输类型}{tab:api-rpc-proc-wire}{X[42,l] X[58,l]}
   类型 & ABI / 用途 \\
-  \code{rpc_proc_create_request} & 224 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、8 个参数、任务网格和模式、子 Proc 与 URAM 资源、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
+  \code{rpc_proc_create_request} & 232 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、8 个参数、任务网格和模式、子 Thread 槽上限、URAM、64 位 Tensor Context、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
   \code{rpc_proc_exit_request} & 40 字节；包含根 Proc 的 Hart 和 Proc ID、返回值、调用方标识及标志。 \\
   \code{rpc_proc_info} & 96 字节；包含一个 Proc 的父子关系、状态、资源槽、任务坐标、结果、PC 和名称。 \\
   \code{rpc_proc_ps_snapshot} & 1872 字节；由快照头和最多 19 条 \code{rpc_proc_info} 组成。 \\
-  \code{rpc_proc_kill_result} & 48 字节；记录终止状态、根 Proc 和子 Proc 数量、已释放资源槽及仍在等待异步完成的数量。 \\
+  \code{rpc_proc_kill_result} & 48 字节；记录终止状态、根 Proc 和子 Thread 数量、已释放资源槽及仍在等待异步完成的数量。 \\
 \end{dayantable}
 
 \code{rpc_proc_create_request.state} 由 Host 初始化为 SUBMITTED，BL1 开始执行后改为
@@ -155,7 +156,7 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
   API & 含义 \\
   \code{RPC_PROFILE_PROC_RUNNING} / \code{RPC_PROFILE_PROC_READY} & Proc 正在执行或位于就绪队列。 \\
   \code{RPC_PROFILE_PROC_WAIT_POLL} / \code{RPC_PROFILE_PROC_WAIT_EVENT} & 等待轮询条件或事件。 \\
-  \code{RPC_PROFILE_PROC_WAIT_START} / \code{RPC_PROFILE_PROC_WAIT_EXIT} & 等待启动或等待子 Proc 退出。 \\
+  \code{RPC_PROFILE_PROC_WAIT_START} / \code{RPC_PROFILE_PROC_WAIT_EXIT} & Proc/Thread 等待启动，或父执行对象等待子 Thread 退出。 \\
   \code{RPC_PROFILE_PROC_WAIT_PRODUCE} & 等待异步执行单元完成工作。 \\
   \code{RPC_PROFILE_PROC_KILL_WAIT_PRODUCE} & Proc 已被终止，但资源槽要等异步工作完成后才能释放。 \\
 \end{dayantable}

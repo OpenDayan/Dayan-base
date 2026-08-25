@@ -8,16 +8,19 @@
 #include "npu_runtime.h"
 
 #ifndef DAYAN_KERNEL_RESOURCE_DESC_VERSION
-#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 2U
+#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 3U
 #endif
 #ifndef DAYAN_HART_MAX_PROCS
 #define DAYAN_HART_MAX_PROCS 16U
 #endif
-#ifndef DAYAN_KERNEL_MAX_CHILD_PROCS
-#define DAYAN_KERNEL_MAX_CHILD_PROCS (DAYAN_HART_MAX_PROCS - 1U)
+#ifndef DAYAN_KERNEL_MAX_CHILD_THREADS
+#define DAYAN_KERNEL_MAX_CHILD_THREADS (DAYAN_HART_MAX_PROCS - 1U)
 #endif
 #ifndef DAYAN_URAM_ALLOCATION_GRANULE
-#define DAYAN_URAM_ALLOCATION_GRANULE 1024U
+#define DAYAN_URAM_ALLOCATION_GRANULE (32U * 1024U)
+#endif
+#ifndef DAYAN_TCSR_LOGICAL_GROUPS
+#define DAYAN_TCSR_LOGICAL_GROUPS 8U
 #endif
 #ifndef DAYAN_KERNEL_RESOURCE_LOCKED_TASK
 #define DAYAN_KERNEL_RESOURCE_LOCKED_TASK (1U << 0)
@@ -29,9 +32,14 @@
 typedef struct dayan_kernel_resource_desc {
     uint32_t version;
     uint32_t size;
-    uint16_t max_child_procs;
+    uint16_t max_child_threads;
     uint16_t max_tasks_per_core;
     uint32_t flags;
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
+    uint32_t reserved;
     uint64_t atomic_cache_size;
     uint64_t uram_size;
 } dayan_kernel_resource_desc_t;
@@ -50,10 +58,12 @@ typedef struct dayan_kernel_resource_desc {
 #define DAYAN_KERNEL_DESC_LINKAGE extern
 #define DAYAN_KERNEL_DESC_ASSERT(condition, message) _Static_assert(condition, message)
 #endif
-#define DAYAN_KERNEL_RESOURCE_DESC(kernel, tasks, child_procs, resource_flags, \
-                                   atomic_bytes, uram_bytes)                  \
-    DAYAN_KERNEL_DESC_ASSERT((child_procs) <= DAYAN_KERNEL_MAX_CHILD_PROCS,   \
-                             "kernel child Proc limit exceeds one Hart");     \
+#define DAYAN_KERNEL_RESOURCE_DESC(kernel, tasks, child_threads,              \
+                                   resource_flags, atomic_bytes, uram_bytes,  \
+                                   lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)  \
+    DAYAN_KERNEL_DESC_ASSERT(                                                 \
+        (child_threads) <= DAYAN_KERNEL_MAX_CHILD_THREADS,                    \
+        "kernel child Thread limit exceeds one Hart");                       \
     DAYAN_KERNEL_DESC_ASSERT((tasks) <= 4U,                                  \
                              "kernel tasks-per-Core limit exceeds four");     \
     DAYAN_KERNEL_DESC_ASSERT(                                                \
@@ -65,33 +75,46 @@ typedef struct dayan_kernel_resource_desc {
         "locked kernel cannot declare task co-residency");                   \
     DAYAN_KERNEL_DESC_ASSERT(                                                \
         ((uram_bytes) & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) == 0U,         \
-        "kernel URAM size must be 1 KiB aligned");                            \
+        "kernel URAM size must be 32 KiB aligned");                           \
+    DAYAN_KERNEL_DESC_ASSERT((lsu_tcsr) <= DAYAN_TCSR_LOGICAL_GROUPS &&       \
+                             (mat_tcsr) <= DAYAN_TCSR_LOGICAL_GROUPS &&       \
+                             (vec_tcsr) <= DAYAN_TCSR_LOGICAL_GROUPS &&       \
+                             (macro_tcsr) <= DAYAN_TCSR_LOGICAL_GROUPS,       \
+                             "kernel TCSR count exceeds eight groups");      \
     DAYAN_KERNEL_DESC_LINKAGE __device__                                      \
     __attribute__((visibility("default"), section(".dayan.kernel_desc")))     \
     const dayan_kernel_resource_desc_t kernel##__desc = {                     \
         DAYAN_KERNEL_RESOURCE_DESC_VERSION,                                   \
         sizeof(dayan_kernel_resource_desc_t),                                 \
-        (child_procs), (tasks), (resource_flags),                             \
+        (child_threads), (tasks), (resource_flags),                           \
+        (lsu_tcsr), (mat_tcsr), (vec_tcsr), (macro_tcsr), 0U,                \
         (atomic_bytes), (uram_bytes)                                           \
     }
-#define DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes)       \
-    DAYAN_KERNEL_RESOURCE_DESC(kernel, 0U, child_procs, 0U, atomic_bytes,      \
-                               uram_bytes)
-#define DAYAN_KERNEL_TASK_DESC(kernel, tasks, child_procs, atomic_bytes, uram_bytes) \
+#define DAYAN_KERNEL_DESC(kernel, child_threads, atomic_bytes, uram_bytes,     \
+                          lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)            \
+    DAYAN_KERNEL_RESOURCE_DESC(kernel, 0U, child_threads, 0U, atomic_bytes,    \
+                               uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr,       \
+                               macro_tcsr)
+#define DAYAN_KERNEL_TASK_DESC(kernel, tasks, child_threads, atomic_bytes,     \
+                               uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr,       \
+                               macro_tcsr)                                    \
     DAYAN_KERNEL_DESC_ASSERT((tasks) >= 1U,                                   \
                              "kernel tasks-per-Core limit is at least one");  \
-    DAYAN_KERNEL_RESOURCE_DESC(kernel, tasks, child_procs, 0U, atomic_bytes,   \
-                               uram_bytes)
-#define DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child_procs, atomic_bytes, uram_bytes) \
-    DAYAN_KERNEL_RESOURCE_DESC(kernel, 1U, child_procs,                       \
+    DAYAN_KERNEL_RESOURCE_DESC(kernel, tasks, child_threads, 0U, atomic_bytes, \
+                               uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr,       \
+                               macro_tcsr)
+#define DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child_threads, atomic_bytes,    \
+                                      uram_bytes, lsu_tcsr, mat_tcsr,          \
+                                      vec_tcsr, macro_tcsr)                   \
+    DAYAN_KERNEL_RESOURCE_DESC(kernel, 1U, child_threads,                     \
                                DAYAN_KERNEL_RESOURCE_LOCKED_TASK,             \
-                               atomic_bytes, uram_bytes)
+                               atomic_bytes, uram_bytes, lsu_tcsr, mat_tcsr,  \
+                               vec_tcsr, macro_tcsr)
 #else
-#define DAYAN_KERNEL_RESOURCE_DESC(kernel, tasks, child_procs, resource_flags, \
-                                   atomic_bytes, uram_bytes)
-#define DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes)
-#define DAYAN_KERNEL_TASK_DESC(kernel, tasks, child_procs, atomic_bytes, uram_bytes)
-#define DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child_procs, atomic_bytes, uram_bytes)
+#define DAYAN_KERNEL_RESOURCE_DESC(kernel, tasks, child_threads, resource_flags, atomic_bytes, uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)
+#define DAYAN_KERNEL_DESC(kernel, child_threads, atomic_bytes, uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)
+#define DAYAN_KERNEL_TASK_DESC(kernel, tasks, child_threads, atomic_bytes, uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)
+#define DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child_threads, atomic_bytes, uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)
 #endif
 
 #ifdef __cplusplus
@@ -149,7 +172,7 @@ static inline uint64_t npu_kernel_pack_f64(double value)
 }
 
 #ifdef __cplusplus
-static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
+static_assert(sizeof(dayan_kernel_resource_desc_t) == 40,
               "Dayan kernel resource descriptor ABI");
 static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 12,
               "Dayan kernel resource flags offset");
@@ -163,7 +186,7 @@ static_assert(offsetof(npu_kernel_launch_attrs_t, event_out) == 72,
               "Dayan kernel launch event offset");
 }
 #else
-_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
+_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 40,
                "Dayan kernel resource descriptor ABI");
 _Static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 12,
                "Dayan kernel resource flags offset");

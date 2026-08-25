@@ -109,8 +109,8 @@ namespace matmul_bf16_4c_detail {
 struct Constants {
     enum : int {
         kDramLoad = 0,
-        kRemoteCopy = 1,
-        kLsuCStore = 3,
+        kRemoteCopy = 0,
+        kLsuCStore = 0,
         kTileM = MATMUL_BF16_4C_TILE_M,
         kTileN = MATMUL_BF16_4C_TILE_N,
         kTileK = MATMUL_BF16_4C_TILE_K,
@@ -423,7 +423,7 @@ static inline void decode_generation(const MatmulState *state,
 static inline void require_status(int status)
 {
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 }
 
 #if !MATMUL_BF16_4C_BROADCAST_MODEL
@@ -573,7 +573,7 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
     }
 #if !MATMUL_BF16_4C_D2A_MODEL
     if (signal_copy && !issued)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 #endif
 }
 
@@ -772,7 +772,7 @@ static void remote_copy(void *argument)
 #endif
 
 template <long GroupBase, int Slice>
-static inline void configure_mat_slice(const MatmulState *state)
+static inline void configure_mat_slice(MatmulState *state)
 {
     long checksum = 0;
     constexpr int rows = Layout::slice_rows(Slice);
@@ -805,18 +805,10 @@ static inline void configure_mat_slice(const MatmulState *state)
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_PERSISTENTMODE>(0);
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_DATATYPE>(
         BaseNPUInstBuilder::DT_BF16);
-}
-
-static inline void configure_mat_slices(const MatmulState *state)
-{
-    configure_mat_slice<0, 0>(state);
-#if MATMUL_BF16_4C_SLICES >= 3
-    configure_mat_slice<4, 1>(state);
-    configure_mat_slice<2, 2>(state);
-#endif
-#if MATMUL_BF16_4C_SLICES == 4
-    configure_mat_slice<1, 3>(state);
-#endif
+    state->mat_config[Slice].rows = rows;
+    state->mat_config[Slice].columns = Constants::kTileN;
+    state->mat_config[Slice].store_rows = rows;
+    state->mat_config[Slice].store_columns = Constants::kTileN;
 }
 
 static inline void pass_mat_turn(MatmulState *state, uint32_t worker);
@@ -982,23 +974,27 @@ static void mat_worker(void *argument)
         if (active) {
             switch (job.slice) {
             case 0:
+                configure_mat_slice<0, 0>(state);
                 execute_mat_job<0, 0>(state, &job, worker);
                 break;
 #if MATMUL_BF16_4C_SLICES >= 3
             case 1:
-                execute_mat_job<4, 1>(state, &job, worker);
+                configure_mat_slice<0, 1>(state);
+                execute_mat_job<0, 1>(state, &job, worker);
                 break;
             case 2:
-                execute_mat_job<2, 2>(state, &job, worker);
+                configure_mat_slice<0, 2>(state);
+                execute_mat_job<0, 2>(state, &job, worker);
                 break;
 #endif
 #if MATMUL_BF16_4C_SLICES == 4
             case 3:
-                execute_mat_job<1, 3>(state, &job, worker);
+                configure_mat_slice<0, 3>(state);
+                execute_mat_job<0, 3>(state, &job, worker);
                 break;
 #endif
             default:
-                dayan_proc_exit(-22);
+                dayan_thread_exit(-22);
             }
         } else {
             pass_mat_turn(state, worker);
@@ -1106,11 +1102,11 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
         dayan_task_dim(DAYAN_TASK_X) != 4U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
         dayan_task_dim(DAYAN_TASK_Z) != 1U || lane >= 4U || !shared)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     void *uram = dayan_uram_base();
     if (!uram || dayan_uram_size() < Layout::total_bytes())
-        dayan_proc_exit(-12);
+        dayan_thread_exit(-12);
 
     const uint64_t physical_uram = (uint64_t)(uintptr_t)uram;
     const uint64_t expected_window =
@@ -1119,12 +1115,12 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     if (physical_uram < expected_window ||
         physical_uram - expected_window >
             Constants::kUramWindowStride - Layout::total_bytes())
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     ClusterShared *cluster = (ClusterShared *)shared;
     int status = initialize_cluster_shared(cluster, lane, physical_uram);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 #if MATMUL_BF16_4C_D2A_MODEL
     cluster->kernel_begin[lane] = kernel_begin;
 #endif
@@ -1166,7 +1162,7 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
 
             status = dayan_resource_init(&buffer->resource);
             if (status < 0)
-                dayan_proc_exit(status);
+                dayan_thread_exit(status);
             buffer->uram =
                 state.uram_base + Layout::a_base(slice, index);
         }
@@ -1174,22 +1170,21 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     for (int index = 0; index < 2; ++index) {
         status = dayan_resource_init(&state.b[index].resource);
         if (status < 0)
-            dayan_proc_exit(status);
+            dayan_thread_exit(status);
         state.b[index].uram = state.uram_base + Layout::b_base(index);
 #if !MATMUL_BF16_4C_D2A_MODEL
         status = dayan_resource_init(&state.load_issued[index]);
         if (status < 0)
-            dayan_proc_exit(status);
+            dayan_thread_exit(status);
 #endif
         status = dayan_resource_init(&state.mat_turn[index]);
         if (status < 0)
-            dayan_proc_exit(status);
+            dayan_thread_exit(status);
     }
     status = dayan_resource_alloc(&state.mat_turn[0], 0U, 1U);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
-    configure_mat_slices(&state);
     MatWorkerArgs mat_args[2] = {
         {&state, 0U},
         {&state, 1U},
@@ -1198,23 +1193,29 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     const uint64_t pipeline_begin = read_cycle();
     cluster->pipeline_begin[lane] = pipeline_begin;
 #endif
-    status = dayan_create_proc("dram-load", dram_loader, &state);
+    dayan_thread_resources_t resources;
+    dayan_thread_resources_init(&resources);
+    resources.lsu_tcsr_count = 1;
+    status = dayan_create_thread("dram-load", dram_loader, &state,
+                                 &resources);
 #if !MATMUL_BF16_4C_BROADCAST_MODEL
     if (status >= 0)
-        status = dayan_create_proc("remote-copy", remote_copy, &state);
+        status = dayan_create_thread("remote-copy", remote_copy, &state,
+                                     &resources);
 #endif
+    resources.mat_tcsr_count = 1;
     if (status >= 0)
-        status = dayan_create_proc("mat-store-0", mat_worker,
-                                   &mat_args[0]);
+        status = dayan_create_thread("mat-store-0", mat_worker,
+                                     &mat_args[0], &resources);
     if (status >= 0)
-        status = dayan_create_proc("mat-store-1", mat_worker,
-                                   &mat_args[1]);
+        status = dayan_create_thread("mat-store-1", mat_worker,
+                                     &mat_args[1], &resources);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
-    status = dayan_join_all();
+    status = dayan_thread_join_all();
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
 #if MATMUL_BF16_4C_D2A_MODEL
     const uint64_t pipeline_end = read_cycle();
@@ -1224,7 +1225,7 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     status = dayan_cluster_barrier(Constants::kClusterCores,
                                    &cluster->finish_barrier);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
     if (lane == 0U) {
         uint64_t first_kernel = cluster->kernel_begin[0];
         uint64_t last_kernel = cluster->kernel_end[0];
@@ -1257,15 +1258,15 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
 #if MATMUL_BF16_4C_BROADCAST_MODEL
 DAYAN_KERNEL_DESC(matmul_bf16_broadcast_4c, MATMUL_BF16_4C_WORKERS,
                   MATMUL_BF16_4C_ATOMIC_BYTES,
-                  MATMUL_BF16_4C_URAM_BYTES);
+                  MATMUL_BF16_4C_URAM_BYTES, 4, 2, 0, 0);
 #elif MATMUL_BF16_4C_D2A_MODEL
 DAYAN_KERNEL_DESC(matmul_bf16_4c_d2a_model, MATMUL_BF16_4C_WORKERS,
                   MATMUL_BF16_4C_ATOMIC_BYTES,
-                  MATMUL_BF16_4C_URAM_BYTES);
+                  MATMUL_BF16_4C_URAM_BYTES, 4, 2, 0, 0);
 #else
 DAYAN_KERNEL_DESC(matmul_bf16_4c, MATMUL_BF16_4C_WORKERS,
                   MATMUL_BF16_4C_ATOMIC_BYTES,
-                  MATMUL_BF16_4C_URAM_BYTES);
+                  MATMUL_BF16_4C_URAM_BYTES, 4, 2, 0, 0);
 #endif
 
 #if !defined(__DAYAN_DEVICE__)

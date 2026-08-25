@@ -89,9 +89,9 @@ int main(void)
           1, NPU_HAL_ANY_CORE },
         { 0x20000, 0x4000, NPU_HAL_MEMORY_COHERENT,
           NPU_HAL_MEMORY_DEVICE, NPU_HAL_ANY_CLUSTER, NPU_HAL_ANY_CORE },
-        { 0x30000, 0x2000, NPU_HAL_MEMORY_URAM, NPU_HAL_MEMORY_CORE,
+        { 0x30000, 0x8000, NPU_HAL_MEMORY_URAM, NPU_HAL_MEMORY_CORE,
           0, 0 },
-        { 0x30000, 0x2000, NPU_HAL_MEMORY_URAM, NPU_HAL_MEMORY_CORE,
+        { 0x30000, 0x8000, NPU_HAL_MEMORY_URAM, NPU_HAL_MEMORY_CORE,
           1, 3 },
     };
     static const npu_hal_memory_region_t overlapping_regions[] = {
@@ -238,13 +238,13 @@ int main(void)
 
     assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM, core0,
                                    &capacity) == 0);
-    assert(capacity == 0x2000);
+    assert(capacity == 0x8000);
     request.memory_class = NPU_HAL_MEMORY_URAM;
     request.scope = NPU_HAL_MEMORY_CORE;
     request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
     request.location = core0;
-    request.size = 0x400;
-    request.alignment = 0x400;
+    request.size = 0x8000;
+    request.alignment = 0x8000;
     assert(npu_hal_memory_alloc(hal, &request, &uram0) == 0);
     assert(npu_hal_memory_address(hal, uram0, core0, &address0) == 0);
     assert(address0 == 0x30000);
@@ -253,7 +253,7 @@ int main(void)
     assert(npu_hal_memory_alloc(hal, &request, &uram1) == 0);
     assert(npu_hal_memory_address(hal, uram1, core1, &address1) == 0);
     assert(address1 == 0x30000);
-    request.size = 0x200;
+    request.size = 0x4000;
     assert(npu_hal_memory_alloc(hal, &request, &invalid) == -EINVAL);
     assert(!invalid);
     request.memory_class = NPU_HAL_MEMORY_NORMAL;
@@ -350,8 +350,8 @@ int main(void)
     request.scope = NPU_HAL_MEMORY_CORE;
     request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
     request.location = core1;
-    request.size = 0x400;
-    request.alignment = 0x400;
+    request.size = 0x8000;
+    request.alignment = 0x8000;
     assert(npu_hal_memory_alloc(hal, &request, &uram1) == 0);
     assert(npu_hal_memory_address(hal, uram1, core1, &address1) == 0);
     assert(address1 == 0xe00000);

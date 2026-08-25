@@ -13,7 +13,7 @@
 #include <dayan_intrinsics.h>
 #endif
 
-_Static_assert(DAYAN_PROC_NAME_SIZE == 16U, "public proc name ABI");
+_Static_assert(DAYAN_THREAD_NAME_SIZE == 16U, "public Thread name ABI");
 
 static void compile_child(void *argument)
 {
@@ -116,12 +116,12 @@ int operator_api_compile(dayan_resource_t *resource,
     status |= dayan_shared_resource_wait_ready(shared_resource);
     status |= dayan_shared_resource_consume(shared_resource);
     status |= dayan_shared_resource_wait_free(shared_resource);
-    child = dayan_create_proc("compile-child", compile_child, memory);
+    child = dayan_create_thread("compile-child", compile_child, memory, 0);
     if (child > 0)
-        status |= dayan_join((uint32_t)child, &child_result);
+        status |= dayan_thread_join((uint32_t)child, &child_result);
     else
         status |= child;
-    status |= dayan_join_all();
+    status |= dayan_thread_join_all();
     uram = dayan_uram_base();
     if (uram && !dayan_uram_size())
         status = -1;
@@ -139,7 +139,7 @@ int operator_api_compile(dayan_resource_t *resource,
     free(memory);
 
     if (size == SIZE_MAX)
-        dayan_proc_exit(child_result);
+        dayan_thread_exit(child_result);
 
     return snprintf(buffer, size, "%d %x", status,
                     (unsigned)fabsf((float)CHAR_BIT));

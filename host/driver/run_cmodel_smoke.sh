@@ -4,7 +4,7 @@ set -eu
 runtime_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$runtime_dir/../.." && pwd)
 cmodel_dir=${RVTNG_CMODEL_DIR:-/home/wangzhe/rvtng-cmodel}
-qemu=${RVTNG_QEMU:-/home/wangzhe/npu-qemu/build/dl-riscv64}
+qemu=${RVTNG_QEMU:-"$repo_dir/deps/npu-qemu/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}
 log_file=${NPU_CMODEL_LOG:-"$repo_dir/build/host/driver/cmodel.log"}

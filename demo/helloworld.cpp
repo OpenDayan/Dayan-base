@@ -19,7 +19,7 @@ __kernel__ void helloworld(uint64_t arg0, uint64_t arg1)
     fflush(stdout);
 }
 
-DAYAN_KERNEL_DESC(helloworld, 0, 0, 0);
+DAYAN_KERNEL_DESC(helloworld, 0, 0, 0, 0, 0, 0, 0);
 
 __host__ int main() {
     npu_runtime_options_t runtime_options; npu_runtime_t *runtime = nullptr;
@@ -34,4 +34,3 @@ __host__ int main() {
         "hello-world");
     helloworld(1, 2, &launch_attrs);
 }
-

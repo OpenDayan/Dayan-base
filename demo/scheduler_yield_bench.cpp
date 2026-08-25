@@ -103,7 +103,7 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
     using namespace scheduler_yield_bench_detail;
 
     if (!iterations || !results)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     BenchState state = {};
     WorkerArgument arguments[2] = {
@@ -113,13 +113,15 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
     state.iterations = iterations;
     state.start_delay_cycles = start_delay_cycles;
 
-    int status = dayan_create_proc("yield-0", yield_worker, &arguments[0]);
+    int status = dayan_create_thread("yield-0", yield_worker, &arguments[0],
+                                     nullptr);
     if (status >= 0)
-        status = dayan_create_proc("yield-1", yield_worker, &arguments[1]);
+        status = dayan_create_thread("yield-1", yield_worker, &arguments[1],
+                                     nullptr);
     if (status >= 0)
-        status = dayan_join_all();
+        status = dayan_thread_join_all();
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
     const uint64_t total_cycles = state.cycles[0] + state.cycles[1];
     const uint64_t round_trip_cycles = total_cycles / (2U * iterations);
@@ -133,7 +135,7 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
     results->handoff_cycles = handoff_cycles;
 }
 
-DAYAN_KERNEL_DESC(scheduler_yield_bench, 3, 0, 0);
+DAYAN_KERNEL_DESC(scheduler_yield_bench, 3, 0, 0, 0, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

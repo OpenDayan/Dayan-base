@@ -171,10 +171,15 @@ typedef struct npu_event_info {
 typedef struct npu_kernel_info {
     uint32_t supported_task_modes;
     uint32_t max_tasks_per_core;
-    uint32_t max_child_procs;
+    uint32_t max_child_threads;
     uint32_t arg_count;
     uint32_t sync_resource_count;
     uint32_t flags;
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
+    uint32_t reserved;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t resident_memory;
@@ -339,7 +344,7 @@ static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
               "NPU launch task name offset");
 static_assert(offsetof(npu_launch_desc_t, args) == 56,
               "NPU launch argument offset");
-static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
+static_assert(sizeof(npu_kernel_info_t) == 64, "NPU kernel info ABI");
 static_assert(sizeof(npu_profile_record_t) == NPU_PROFILE_RECORD_SIZE,
               "NPU profile record ABI");
 static_assert(sizeof(npu_profile_slot_define_t) ==
@@ -358,7 +363,7 @@ _Static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
                "NPU launch task name offset");
 _Static_assert(offsetof(npu_launch_desc_t, args) == 56,
                "NPU launch argument offset");
-_Static_assert(sizeof(npu_kernel_info_t) == 56, "NPU kernel info ABI");
+_Static_assert(sizeof(npu_kernel_info_t) == 64, "NPU kernel info ABI");
 _Static_assert(sizeof(npu_profile_record_t) == NPU_PROFILE_RECORD_SIZE,
                "NPU profile record ABI");
 _Static_assert(sizeof(npu_profile_slot_define_t) ==

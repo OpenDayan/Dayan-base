@@ -1,9 +1,9 @@
 # NPU cooperative OS skeleton
 
 这是一个面向 RISC-V NPU Device 的最小裸机系统骨架。当前版本已经建立启动、
-每核资源隔离、协作式调度、mailbox RPC、同步异常处理、基础 libc 和堆管理。
-系统不使用抢占式调度：包括 CLINT 在内的功能中断始终屏蔽，mailbox 状态由专用
-proc 协作式轮询；同步异常仍通过 `mtvec` 进入 trap。
+每核资源隔离、协作式调度、mailbox RPC、同步异常处理、张量外部中断、基础 libc
+和堆管理。系统不使用时钟抢占：mailbox 的 MSIP 由专用 proc 协作式轮询；张量错误
+通过机器外部中断进入 trap，同步异常仍通过 `mtvec` 处理。
 
 源码按运行位置组织：`device/` 包含 BL0/BL1、Dayan OS、Device API 和 Device
 测试；`host/` 包含 dycc、Runtime、Service 与 HAL；`demo/` 保存同时使用 Host 和
@@ -13,8 +13,8 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
 
 1. `device/bl0/bootrom.S` 从当前 hart 的 mailbox 读取入口地址，并把 hart id 留在 `a0`。
 2. `device/bl1/bl1.S` 为该 hart 选择独立栈，令 `tp/current` 指向 CPU-local 中的 init
-   thread，清零该区，将 `gp/shared` 置空，配置独立 trap 栈与 `mtvec`，屏蔽功能
-   中断并初始化浮点状态。
+   thread，清零该区，将 `gp/shared` 置空，配置独立 trap 栈与 `mtvec`，仅启用张量
+   机器外部中断并初始化浮点状态。
 3. `device/boot/boot.c:init()` 初始化平台、调度器、该 hart 的链接期初始堆，以及 RPC
    收发 proc 和 profile proc。
 4. BL1 调用 `device/sche/sche.c:scheduler()`，此后不再返回。
@@ -256,7 +256,7 @@ RPC 命令固定为一个 64-bit word：高 16 位是 opcode，低 48 位是参�
 Device 发送前后都轮询 `IRQ_STATUS` (`0x2000`) 中自己的 bit，只有 Host 清除前一笔
 事务后才复用 mailbox。初始化还会清除本核遗留状态，并通过 `IRQ_ENABLE_SET`
 (`0x2010`) 使能对应的 Host IRQ 输出。上述 doorbell 只用于握手，不会触发 NPU 上的
-抢占：BL1 将 `mie` 清零并清除 `mstatus.MIE`。
+抢占：BL1 用 `csrw mie, 0x800` 仅启用张量机器外部中断，RPC MSIP 保持轮询。
 
 每个 hart 有三个内核 proc。receive proc 以 `proc_wait_poll()` 等待本核 `msip`，读取
 Host 命令，调用弱的 `rpc_receive(opcode, arg, &response)` 分派接口，并在需要回复时
@@ -270,19 +270,21 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
-有符号 status。当前 opcode 1–7 分别为字符串输出、清空输出缓冲、申请堆 region、
-归还堆 region、异常报告、root proc 退出通知和 profile 满缓冲上报。除异常报告外均使用 packet；异常报告的低 48 位参数直接指向一份
-稳定的 320-byte `struct trap_record`。输出和清空操作的 packet request 指向固定
+有符号 status。当前 opcode 1–8 分别为字符串输出、清空输出缓冲、申请堆 region、
+归还堆 region、异常报告、张量中断报告、root proc 退出通知和 profile 满缓冲上报。
+异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
+稳定的 320-byte `struct trap_record`，后者直接指向 184-byte
+`struct tensor_interrupt_record`。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
 
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
-224-byte v4 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
-0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 proc 数、URAM
-base/size、固定 16-byte Proc 名称以及完成状态。BL1 校验
+232-byte v5 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
+base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
-回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_procs` 个静态 slot；
+回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_threads` 个静态 slot；
 子孙创建、退出与 join 不再经过 Host。每个 proc 退出都 flush/CLEAR 自己的输出；只有
 Host root 通过 40-byte `RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。随后
 scheduler 在自己的栈上调用 cleanup，把描述符从 `RUNNING` 更新为 `EXITED` 或
@@ -357,12 +359,14 @@ scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队
 链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。普通 proc 仍由
 所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留 `1 + max_children`
 个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init、两个 RPC
-proc 和 profile proc 不计入，因此单个 kernel 最多声明 15 个子 proc。
-`dayan_create_proc(name, entry, argument)` 创建的子 proc 保持在同一 hart，拥有不超过
-15 bytes 的名称，继承 logical task、`gp/shared` 与 URAM，并返回正的 proc ID。
-`dayan_join(id, &result)` 精确等待直属子 proc，
-`dayan_join_all()` 等待全部直属子 proc；每个 proc 退出前都会隐式 join-all，因此 root
-进入终态时整棵子树已经完成。`dayan_proc_exit(result)` 可显式设置 64-bit 返回值。
+proc 和 profile proc 不计入，因此单个 kernel 最多声明 15 个子 Thread。
+`dayan_create_thread(name, entry, argument, resources)` 创建的子 Thread 保持在同一 hart，
+拥有不超过 15 bytes 的名称，继承 logical task、`gp/shared` 与 URAM，并返回正的 Thread
+ID。传入空资源表示不占用 TCSR；显式资源由固件映射为该 Thread 从逻辑组 0 开始的
+独立 Context。`dayan_thread_join(id, &result)` 精确等待直属子 Thread，
+`dayan_thread_join_all()` 等待全部直属子 Thread；每个执行对象退出前都会隐式
+join-all，因此 root 进入终态时整棵子树已经完成。`dayan_thread_exit(result)` 可显式
+设置 64-bit 返回值。
 托管 cleanup 在退出后把 slot 归还静态池；slot 的 64 KiB 栈和 4 KiB 输出缓冲在
 固件链接时已经按 Hart 预留，不走运行时堆分配。当前没有抢占或跨 hart 迁移。
 
@@ -392,10 +396,27 @@ Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项�
 
 `dayan_uram_base()` 和 `dayan_uram_size()` 返回 Service 为当前 kernel 实例在本 Core
 分配的私有 URAM；默认每 Core 容量为 1.5 MiB，地址窗口从 `0x00800000` 起并以 2 MiB
-为 Core stride。声明、分配和释放大小以 1 KiB 为粒度。
-`dayan_create_proc(name, entry, arg)` 使用 kernel 描述符预留的 slot 在同 Core 创建一个
-有名称的单参数子 proc；达到声明上限时返回
-失败。
+为 Core stride。声明、分配和释放大小以 32 KiB 为粒度。
+`dayan_create_thread(name, entry, arg, resources)` 使用 kernel 描述符预留的 slot 在同
+Core 创建一个有名称的单参数子 Thread；子 Thread 继承 URAM，TCSR 必须显式申请，达到
+声明上限或 TCSR 池耗尽时返回失败。
+
+### 推荐的算子分片模型
+
+普通激活和 Element-wise 算子优先使用无子 Thread 的顺序 Proc：Host 将输入/
+输出分成多个逻辑分片，每个 Task 坐标启动一个 Proc，Proc 在自己的循环中执行
+`Load -> 计算 -> Store`。用
+`DAYAN_KERNEL_TASK_DESC(kernel, 4, 0, ...)` 可声明每 Hart 最多共驻 4 个这类
+Proc。它们在执行单元等待点主动让出，Scheduler 使其 Load、计算和 Store 在同
+Hart 上交错执行，从而提高 LSU 与计算单元的利用率。
+
+资源描述符按单 Proc 声明 URAM 和 TCSR 最坏需求；Server 仅在 Proc slot、URAM
+与四类 TCSR 都足够时允许共驻。每个 Proc 都拥有独立 Context，算子仍然使用
+逻辑配置组 0。对分片独立的算子，不应为 Load/计算/Store 各创建一个 Thread。
+
+多 Thread 保留给需要核间数据广播、远程 URAM 复制或显式多阶段生产者/消费者
+流水的特殊算子，典型例子是需要在四个 Core 间广播 A/B tile 的矩阵乘。这类
+算子再使用 `kFourCore`、`shared` resource 和独立的 loader/copy/MAT/store Thread。
 
 `dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前
 `shared` allocation 内的零初始化 8-byte 对象，四个 lane 到达后以 release/acquire
@@ -459,10 +480,11 @@ Runtime 只依赖无拓扑语义的 data-plane provider ABI，因此后续可以
 Device 算子通过 `dayan_task_id/dim/mode()` 获取逻辑坐标，不感知物理放置。
 
 每个 `__kernel__` 旁必须定义
-`DAYAN_KERNEL_DESC(kernel, max_children, atomic_bytes, uram_bytes)`。dycc 在 Device
-object 中保留 `<kernel>__desc`，并把相同资源值写入 Package。Server 对同一 Core 上
-所有 resident kernel 的 proc slot、atomic cache 和 URAM 声明求和后再调度。每个
-invocation 占用 `1 + max_children` 个 slot，同一 Hart 的总和不得超过 16。
+`DAYAN_KERNEL_DESC(kernel, max_child_threads, atomic_bytes, uram_bytes,
+lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr)`。dycc 在 Device object 中保留
+`<kernel>__desc`，并把相同资源值写入 Package。Server 对同一 Core 上所有 resident
+Task 的 proc slot、Atomic Cache、URAM 和四类 TCSR 声明求和后再调度。每个 invocation
+占用 `1 + max_child_threads` 个 slot，同一 Hart 的总和不得超过 16。
 
 Runtime 与 Server 使用 Unix socket 控制协议。H2D/D2H payload 不进入 socket：Runtime
 先在 data socket 申请受范围和方向约束的 token，再用 HELLO 时经 `SCM_RIGHTS` 导入的

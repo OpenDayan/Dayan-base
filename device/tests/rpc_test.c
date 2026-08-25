@@ -19,7 +19,7 @@ int main(void)
     assert(sizeof(struct rpc_heap_response) == 16);
     assert(sizeof(struct rpc_heap_release) == 16);
     assert(sizeof(struct rpc_proc_exit_request) == 40);
-    assert(sizeof(struct rpc_proc_create_request) == 224);
+    assert(sizeof(struct rpc_proc_create_request) == 232);
     assert(sizeof(struct rpc_proc_info) == 96);
     assert(sizeof(struct rpc_proc_ps_snapshot) == 1872);
     assert(sizeof(struct rpc_proc_kill_result) == 48);
@@ -33,15 +33,16 @@ int main(void)
     assert(offsetof(struct rpc_proc_create_request, task_id) == 152);
     assert(offsetof(struct rpc_proc_create_request, task_dim) == 164);
     assert(offsetof(struct rpc_proc_create_request, task_mode) == 176);
-    assert(offsetof(struct rpc_proc_create_request, max_child_procs) == 184);
+    assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 184);
     assert(offsetof(struct rpc_proc_create_request, uram_base) == 192);
-    assert(offsetof(struct rpc_proc_create_request, name) == 208);
+    assert(offsetof(struct rpc_proc_create_request, tensor_context) == 208);
+    assert(offsetof(struct rpc_proc_create_request, name) == 216);
     assert(offsetof(struct rpc_proc_info, name) == 80);
     assert(offsetof(struct rpc_profile_slot_define, name) == 8);
     assert(RPC_PROC_SLOTS_PER_HART == 16);
     assert(RPC_PROC_NAME_SIZE == 16);
-    assert(RPC_PROC_MAX_CHILD_PROCS == 15);
-    assert(RPC_PROC_CREATE_VERSION == 4U);
+    assert(RPC_PROC_MAX_CHILD_THREADS == 15);
+    assert(RPC_PROC_CREATE_VERSION == 5U);
     assert(RPC_PROC_CREATE == 0x0100);
     assert(RPC_PROC_CREATE_RESPONSE == (RPC_PROC_CREATE | 0x8000));
     assert(RPC_ICACHE_FLUSH == 0x0101);
@@ -51,7 +52,9 @@ int main(void)
     assert(RPC_PROC_KILL_ALL == 0x0103);
     assert(RPC_PROC_KILL_ALL_RESPONSE ==
            (RPC_PROC_KILL_ALL | 0x8000));
-    assert(RPC_PROFILE_FLUSH == 7);
+    assert(RPC_TENSOR_INTERRUPT_REPORT == 6);
+    assert(RPC_PROC_EXIT == 7);
+    assert(RPC_PROFILE_FLUSH == 8);
     assert(RPC_PROFILE_CONFIG == 0x0104);
     assert(RPC_PROFILE_CONFIG_RESPONSE ==
            (RPC_PROFILE_CONFIG | 0x8000));

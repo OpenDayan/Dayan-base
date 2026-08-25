@@ -55,9 +55,9 @@ int main(void)
     kernel.entry_symbol = "grid_kernel";
     kernel.supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
     kernel.max_tasks_per_core = 2;
-    kernel.max_child_procs = 3;
+    kernel.max_child_threads = 3;
     kernel.atomic_cache_size = 4096;
-    kernel.uram_size = 2048;
+    kernel.uram_size = NPU_PACKAGE_URAM_GRANULE;
     kernel.arguments = arguments;
     kernel.argument_count = 2;
     assert(npu_package_build(object, sizeof(object), &kernel, 1,
@@ -67,10 +67,10 @@ int main(void)
     assert(view.kernels[0].supported_task_modes ==
            NPU_PACKAGE_TASK_MODE_ALL);
     assert(view.kernels[0].max_tasks_per_core == 2);
-    assert(view.kernels[0].max_child_procs == 3);
+    assert(view.kernels[0].max_child_threads == 3);
     assert(view.kernels[0].flags == 0);
     assert(view.kernels[0].atomic_cache_size == 4096);
-    assert(view.kernels[0].uram_size == 2048);
+    assert(view.kernels[0].uram_size == NPU_PACKAGE_URAM_GRANULE);
     assert(strcmp(npu_package_string(&view, view.kernels[0].name_offset),
                   "grid_kernel") == 0);
     npu_package_free(package);
@@ -110,11 +110,11 @@ int main(void)
 
     package = 0;
     package_size = 0;
-    kernel.max_child_procs = NPU_PACKAGE_MAX_CHILD_PROCS + 1U;
+    kernel.max_child_threads = NPU_PACKAGE_MAX_CHILD_THREADS + 1U;
     assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                              &package, &package_size) < 0);
     assert(!package && !package_size);
-    kernel.max_child_procs = 3;
+    kernel.max_child_threads = 3;
     kernel.stack_size = NPU_PACKAGE_PROC_MIN_STACK_SIZE - 1U;
     assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                              &package, &package_size) < 0);
@@ -133,7 +133,7 @@ int main(void)
     assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                              &package, &package_size) < 0);
     assert(!package && !package_size);
-    kernel.uram_size = 2048;
+    kernel.uram_size = NPU_PACKAGE_URAM_GRANULE;
 
     make_object(object, sizeof(object), SHF_ALLOC | SHF_WRITE, SHT_PROGBITS);
     assert(npu_package_build(object, sizeof(object), &kernel, 1,

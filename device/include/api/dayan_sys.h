@@ -10,11 +10,12 @@
 /* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
 register void *shared __asm__("gp");
 
-#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 2U
+#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 3U
 #define DAYAN_HART_MAX_PROCS                16U
-#define DAYAN_KERNEL_MAX_CHILD_PROCS        (DAYAN_HART_MAX_PROCS - 1U)
-#define DAYAN_PROC_NAME_SIZE                16U
-#define DAYAN_URAM_ALLOCATION_GRANULE       1024U
+#define DAYAN_KERNEL_MAX_CHILD_THREADS      (DAYAN_HART_MAX_PROCS - 1U)
+#define DAYAN_THREAD_NAME_SIZE              16U
+#define DAYAN_URAM_ALLOCATION_GRANULE       (32U * 1024U)
+#define DAYAN_TCSR_LOGICAL_GROUPS            8U
 #define DAYAN_KERNEL_RESOURCE_LOCKED_TASK   (1U << 0)
 #define DAYAN_KERNEL_RESOURCE_FLAGS_ALL DAYAN_KERNEL_RESOURCE_LOCKED_TASK
 
@@ -24,15 +25,32 @@ register void *shared __asm__("gp");
 typedef struct dayan_kernel_resource_desc {
     uint32_t version;
     uint32_t size;
-    uint16_t max_child_procs;
+    uint16_t max_child_threads;
     uint16_t max_tasks_per_core;
     uint32_t flags;
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
+    uint32_t reserved;
     uint64_t atomic_cache_size;
     uint64_t uram_size;
 } dayan_kernel_resource_desc_t;
 #endif
 
-typedef void (*dayan_proc_entry_t)(void *argument);
+typedef void (*dayan_thread_entry_t)(void *argument);
+
+#define DAYAN_THREAD_RESOURCES_VERSION 1U
+
+typedef struct dayan_thread_resources {
+    uint32_t version;
+    uint32_t size;
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
+    uint32_t reserved;
+} dayan_thread_resources_t;
 
 /* Zero-initialized storage in the allocation rooted at shared. */
 typedef struct dayan_cluster_barrier {
@@ -80,14 +98,16 @@ extern "C" {
 #endif
 
 DAYAN_API void dayan_yield(void);
-/* Name must be nonempty, NUL-terminated, and fit in DAYAN_PROC_NAME_SIZE. */
-/* Creates a child on the same physical Core and returns its positive ID. */
-DAYAN_API int dayan_create_proc(const char *name, dayan_proc_entry_t entry,
-                                void *argument);
-/* Only direct children can be joined. result may be null. */
-DAYAN_API int dayan_join(uint32_t proc_id, int64_t *result);
-DAYAN_API int dayan_join_all(void);
-DAYAN_API DAYAN_NORETURN void dayan_proc_exit(int64_t result);
+DAYAN_API void dayan_thread_resources_init(dayan_thread_resources_t *resources);
+/* Name must be nonempty, NUL-terminated, and fit in DAYAN_THREAD_NAME_SIZE. */
+/* Creates a child Thread on the same Hart and returns its positive ID. */
+DAYAN_API int dayan_create_thread(const char *name, dayan_thread_entry_t entry,
+                                  void *argument,
+                                  const dayan_thread_resources_t *resources);
+/* Only direct child Threads can be joined. result may be null. */
+DAYAN_API int dayan_thread_join(uint32_t thread_id, int64_t *result);
+DAYAN_API int dayan_thread_join_all(void);
+DAYAN_API DAYAN_NORETURN void dayan_thread_exit(int64_t result);
 /* The returned range belongs to the current resident kernel instance. */
 DAYAN_API void *dayan_uram_base(void);
 DAYAN_API size_t dayan_uram_size(void);
@@ -98,7 +118,7 @@ DAYAN_API int dayan_cluster_barrier(uint32_t participants,
 DAYAN_API uint32_t dayan_task_id(uint32_t axis);
 DAYAN_API uint32_t dayan_task_dim(uint32_t axis);
 DAYAN_API uint32_t dayan_task_mode(void);
-/* Called from a proc; each function waits for earlier work on that unit. */
+/* Called from a Proc or child Thread; waits for earlier work on that unit. */
 DAYAN_API void dayan_wait_lsu(void);
 DAYAN_API void dayan_wait_mat(void);
 DAYAN_API void dayan_wait_vec(void);

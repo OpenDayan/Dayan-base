@@ -266,7 +266,7 @@ python3 ./scripts/run_testcluster_operator.py \
 指定时，该值限制采样时长，但工具仍会等待算子退出。一个 Server 同时只允许一个
 profile owner；重复启动第二个 `dyperf` 会得到 `-EBUSY`，不会影响已运行的算子。
 不启动子命令而持续观察 Server 时使用 `--follow`，按 Ctrl-C 结束。采样开始后新创建的
-root/child Proc 也会产生带 16-byte 名称的 `WAIT_START` 事件；Trace Viewer 以 proc ID
+root Proc/child Thread 也会产生带 16-byte 名称的 `WAIT_START` 事件；Trace Viewer 以 proc ID
 作为 tid、Proc 名称作为 `thread_name`。时间轴按 `1 cycle = 1 ns` 显示。
 
 ### 4.5 runner 日志
@@ -517,7 +517,18 @@ dd if="$NPU_DEVICE_PREFIX/xdma0_c2h_0" \
 
 地址不要求固定为 `0x80c00000`，但必须位于合法 DRAM region 且 4 MiB 对齐。
 
-### 6.3 四核 URAM 与数据广播
+### 6.3 单 Hart 的 Proc 共驻
+
+激活和 Element-wise 算子不需要先拆成多个子 Thread。更简单的方式是将输出
+分成多个 Task 坐标，用 `DAYAN_KERNEL_TASK_DESC(..., 4, 0, ...)` 允许每个 Hart
+最多共驻四个根 Proc。每个 Proc 在自己的分片循环中顺序执行
+`Load -> 计算 -> Store`，并在 `dayan_wait_*` 处让出 Hart。其它 Proc 可以继续
+向不同执行单元发射工作，从而用 Context 隔离的 Proc 交错执行提高利用率。
+
+四个是入场上限，Server 仍会同时检查 proc slot、URAM 和四类 TCSR。如果单 Proc
+的资源较大，实际共驻数会自然低于四。
+
+### 6.4 四核 URAM 与数据广播
 
 每个 Core 的 URAM window 从 `0x00800000` 起，Core 间 stride 为 2 MiB：
 
@@ -530,7 +541,8 @@ Core 3: 0x00e00000
 
 `matmul_bf16_4c` 在四个 Core 间共享 coherent resource 状态，并通过远端 URAM window
 广播 A/B tile。Cluster barrier 和 shared resource 使用硬件 AMO，不使用不受支持的
-LR/SC。
+LR/SC。这类需要核间广播和显式生产者/消费者流水的矩阵乘，才适合在
+每个 Core 内继续创建 loader、remote-copy、MAT 和 store Thread。
 
 ## 7. 如何判断一次运行成功
 

@@ -78,13 +78,13 @@ if ! $objdump --disassemble --no-show-raw-insn \
 fi
 
 bl1_dump=$($objdump --disassemble --no-show-raw-insn "$build/bl1/bl1.o")
-grep -Eq 'csrw[[:space:]]+mie, zero' <<<"$bl1_dump" ||
-    fail "BL1 must mask functional interrupts"
+grep -Eq 'csrw[[:space:]]+mie, t0' <<<"$bl1_dump" ||
+    fail "BL1 must replace mie with the tensor MEIE mask"
 mie_writes=$($objdump --disassemble --no-show-raw-insn "$elf" | \
     grep -Ec '[[:space:]](csrw|csrs|csrc|csrrw|csrrs|csrrc)[[:space:]].*mie')
 [ "$mie_writes" -eq 1 ] ||
     fail "firmware must never reconfigure mie after BL1"
-grep -Eq 'csrc[[:space:]]+mstatus,.*' <<<"$bl1_dump" &&
+grep -Eq 'csrs[[:space:]]+mstatus,.*' <<<"$bl1_dump" &&
     grep -Eq 'csrw[[:space:]]+mscratch,.*' <<<"$bl1_dump" &&
     grep -Eq 'csrw[[:space:]]+mtvec,.*' <<<"$bl1_dump" ||
     fail "BL1 trap and interrupt state is incomplete"

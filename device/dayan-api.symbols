@@ -10,10 +10,11 @@ dayan_resource_produce
 dayan_resource_wait_free
 dayan_resource_wait_ready
 dayan_cluster_barrier
-dayan_create_proc
-dayan_join
-dayan_join_all
-dayan_proc_exit
+dayan_thread_resources_init
+dayan_create_thread
+dayan_thread_join
+dayan_thread_join_all
+dayan_thread_exit
 dayan_shared_resource_alloc
 dayan_shared_resource_consume
 dayan_shared_resource_init

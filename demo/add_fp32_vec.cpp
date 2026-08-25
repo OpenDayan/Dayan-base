@@ -10,7 +10,7 @@
 enum : uint64_t {
     kAddElements = 64,
     kAddBytes = kAddElements * sizeof(float),
-    kAddUramBytes = 1024,
+    kAddUramBytes = 32 * 1024,
 };
 
 enum VecTcsr : long {
@@ -99,7 +99,8 @@ __kernel__ void add_fp32_vec(const float *a, const float *b, float *c)
     dayan_wait_lsu();
 }
 
-DAYAN_KERNEL_LOCKED_TASK_DESC(add_fp32_vec, 0, 0, kAddUramBytes);
+DAYAN_KERNEL_LOCKED_TASK_DESC(add_fp32_vec, 0, 0, kAddUramBytes,
+                              1, 0, 1, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

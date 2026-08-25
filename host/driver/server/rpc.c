@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "trap.h"
+#include "tensor_interrupt.h"
 
 #define NPU_MAX_PRINT_BYTES (1024U * 1024U)
 #define NPU_RPC_IRQ_WAIT_TIMEOUT_MS 100U
@@ -273,6 +274,25 @@ static int service_trap(npu_service_device_t *device, npu_hal_core_t core,
     return 0;
 }
 
+static int service_tensor_interrupt(npu_service_device_t *device,
+                                    npu_hal_core_t core, uint64_t argument)
+{
+    struct tensor_interrupt_record record;
+    int status;
+
+    status = copy_from_device(device, core, &record, argument,
+                              sizeof(record));
+    if (status < 0)
+        return status;
+    if (record.version != TENSOR_INTERRUPT_RECORD_VERSION ||
+        record.size != sizeof(record) || record.hart_id != core.core ||
+        record.recent_count > TENSOR_INTERRUPT_RECENT_COUNT)
+        return -EPROTO;
+    device->options.tensor_interrupt(device->options.callback_context,
+                                     core.cluster, core.core, &record);
+    return 0;
+}
+
 static int service_proc_exit(npu_service_device_t *device,
                              npu_hal_core_t core, uint64_t argument)
 {
@@ -376,6 +396,8 @@ int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
         return service_heap_release(device, core, argument);
     case RPC_TRAP_REPORT:
         return service_trap(device, core, argument);
+    case RPC_TENSOR_INTERRUPT_REPORT:
+        return service_tensor_interrupt(device, core, argument);
     case RPC_PROC_EXIT:
         return service_proc_exit(device, core, argument);
     case RPC_PROFILE_FLUSH:

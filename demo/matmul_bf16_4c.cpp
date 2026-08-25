@@ -55,8 +55,8 @@ namespace matmul_bf16_4c_detail {
 struct Constants {
     enum : int {
         kDramLoad = 0,
-        kRemoteCopy = 1,
-        kCStore = 3,
+        kRemoteCopy = 0,
+        kCStore = 0,
         kTileM = MatmulBf16Shape::kTileM,
         kTileN = MatmulBf16Shape::kTileN,
         kTileK = MatmulBf16Shape::kTileK,
@@ -399,7 +399,7 @@ static inline void decode_generation(const MatmulState *state,
 static inline void require_status(int status)
 {
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 }
 
 template <bool ProducerLoadsA>
@@ -1030,23 +1030,27 @@ static void mat_worker(void *argument)
         if (active) {
             switch (job.slice) {
             case 0:
+                configure_mat_group<ProducerLoadsA, 0, 0>();
                 execute_mat_job<ProducerLoadsA, 0, 0>(
                     state, job, worker);
                 break;
             case 1:
-                execute_mat_job<ProducerLoadsA, 4, 1>(
+                configure_mat_group<ProducerLoadsA, 0, 1>();
+                execute_mat_job<ProducerLoadsA, 0, 1>(
                     state, job, worker);
                 break;
             case 2:
-                execute_mat_job<ProducerLoadsA, 2, 2>(
+                configure_mat_group<ProducerLoadsA, 0, 2>();
+                execute_mat_job<ProducerLoadsA, 0, 2>(
                     state, job, worker);
                 break;
             case 3:
-                execute_mat_job<ProducerLoadsA, 1, 3>(
+                configure_mat_group<ProducerLoadsA, 0, 3>();
+                execute_mat_job<ProducerLoadsA, 0, 3>(
                     state, job, worker);
                 break;
             default:
-                dayan_proc_exit(-22);
+                dayan_thread_exit(-22);
             }
         } else {
             pass_mat_turn(state, worker);
@@ -1100,6 +1104,8 @@ template <bool ProducerLoadsA>
 static void c_store_worker(void *argument)
 {
     MatmulState *state = (MatmulState *)argument;
+    state->store_config =
+        configure_c_store<ProducerLoadsA, Constants::kCStore>(state);
     const uint64_t output_count =
         (uint64_t)state->count_m * (uint64_t)state->count_n;
 
@@ -1253,34 +1259,37 @@ static int run_pipeline(const MatmulBf16Config *config,
     if (status < 0)
         return status;
 
-    configure_mat_group<ProducerLoadsA, 0, 0>();
-    configure_mat_group<ProducerLoadsA, 4, 1>();
-    configure_mat_group<ProducerLoadsA, 2, 2>();
-    configure_mat_group<ProducerLoadsA, 1, 3>();
-    state.store_config =
-        configure_c_store<ProducerLoadsA, Constants::kCStore>(&state);
     MatWorkerArgs mat_args[2] = {
         {&state, 0U},
         {&state, 1U},
     };
-    status = dayan_create_proc("dram-load", dram_loader<ProducerLoadsA>,
-                               &state);
+    dayan_thread_resources_t resources;
+    dayan_thread_resources_init(&resources);
+    resources.lsu_tcsr_count = 1;
+    status = dayan_create_thread("dram-load", dram_loader<ProducerLoadsA>,
+                                 &state, &resources);
     if (status >= 0)
-        status = dayan_create_proc("remote-copy",
-                                   remote_copy<ProducerLoadsA>, &state);
+        status = dayan_create_thread("remote-copy",
+                                     remote_copy<ProducerLoadsA>, &state,
+                                     &resources);
+    resources.lsu_tcsr_count = 0;
+    resources.mat_tcsr_count = 1;
     if (status >= 0)
-        status = dayan_create_proc("mat-0", mat_worker<ProducerLoadsA>,
-                                   &mat_args[0]);
+        status = dayan_create_thread("mat-0", mat_worker<ProducerLoadsA>,
+                                     &mat_args[0], &resources);
     if (status >= 0)
-        status = dayan_create_proc("mat-1", mat_worker<ProducerLoadsA>,
-                                   &mat_args[1]);
+        status = dayan_create_thread("mat-1", mat_worker<ProducerLoadsA>,
+                                     &mat_args[1], &resources);
+    resources.mat_tcsr_count = 0;
+    resources.lsu_tcsr_count = 1;
     if (status >= 0)
-        status = dayan_create_proc("c-store",
-                                   c_store_worker<ProducerLoadsA>, &state);
+        status = dayan_create_thread("c-store",
+                                     c_store_worker<ProducerLoadsA>, &state,
+                                     &resources);
     if (status < 0)
         return status;
 
-    return dayan_join_all();
+    return dayan_thread_join_all();
 }
 
 } // namespace matmul_bf16_4c_detail
@@ -1300,7 +1309,7 @@ __kernel__ void matmul_bf16_4c(const MatmulBf16Config *config,
         dayan_task_dim(DAYAN_TASK_X) != 4U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
         dayan_task_dim(DAYAN_TASK_Z) != 1U || lane >= 4U || !shared)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     void *uram = dayan_uram_base();
     const bool producer_loads_a = config->m < config->n;
@@ -1308,7 +1317,7 @@ __kernel__ void matmul_bf16_4c(const MatmulBf16Config *config,
         producer_loads_a ? AProducerLayout::total_bytes()
                          : BProducerLayout::total_bytes();
     if (!uram || dayan_uram_size() < required_uram)
-        dayan_proc_exit(-12);
+        dayan_thread_exit(-12);
 
     const uint64_t physical_uram = (uint64_t)(uintptr_t)uram;
     const uint64_t expected_window =
@@ -1317,18 +1326,18 @@ __kernel__ void matmul_bf16_4c(const MatmulBf16Config *config,
     if (physical_uram < expected_window ||
         physical_uram - expected_window >
             Constants::kUramWindowStride - required_uram)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     const int status = producer_loads_a
         ? run_pipeline<true>(config, a, bt, c, lane, physical_uram)
         : run_pipeline<false>(config, a, bt, c, lane, physical_uram);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 }
 
 DAYAN_KERNEL_DESC(matmul_bf16_4c, MatmulBf16Shape::kWorkers,
                   MatmulBf16Shape::kAtomicBytes,
-                  MatmulBf16Shape::kUramBytes);
+                  MatmulBf16Shape::kUramBytes, 3, 2, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

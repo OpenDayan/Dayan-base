@@ -165,7 +165,7 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
   API & 含义 \\
   \code{NPU_PROFILE_PROC_RUNNING} / \code{NPU_PROFILE_PROC_READY} & Proc 正在执行或位于调度器的就绪队列。 \\
   \code{NPU_PROFILE_PROC_WAIT_POLL} / \code{NPU_PROFILE_PROC_WAIT_EVENT} & Proc 等待轮询条件或事件唤醒。 \\
-  \code{NPU_PROFILE_PROC_WAIT_START} / \code{NPU_PROFILE_PROC_WAIT_EXIT} & Proc 等待启动或等待子 Proc 退出。 \\
+  \code{NPU_PROFILE_PROC_WAIT_START} / \code{NPU_PROFILE_PROC_WAIT_EXIT} & Proc/Thread 等待启动，或父执行对象等待子 Thread 退出。 \\
   \code{NPU_PROFILE_PROC_WAIT_PRODUCE} & Proc 等待异步执行单元完成工作。 \\
   \code{NPU_PROFILE_PROC_KILL_WAIT_PRODUCE} & Proc 已被终止，但资源槽必须等异步工作完成后才能释放。 \\
 \end{dayantable}
@@ -181,7 +181,7 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
 
 \begin{dayantable}{Package API}{tab:api-runtime-package}{X[36,l] X[64,l]}
   API & 行为 \\
-  \code{npu_package_build} & 把 RISC-V ET\_REL 映像、算子描述、参数和同步资源编码成版本 4 程序包。 \\
+  \code{npu_package_build} & 把 RISC-V ET\_REL 映像、算子描述、参数和同步资源编码成版本 5 程序包。 \\
   \code{npu_package_free} & 释放程序包构造函数返回的 Host 内存。 \\
 \end{dayantable}
 
@@ -204,12 +204,13 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
 
 \begin{dayantable}{Package 格式常量}{tab:api-runtime-package-constants}{X[49,l] X[51,l]}
   API & 含义 \\
-  \code{NPU_PACKAGE_MAGIC} / \code{NPU_PACKAGE_VERSION} / \code{NPU_PACKAGE_HEADER_SIZE} & 当前程序包格式的魔数、版本 4 和 128 字节头部。 \\
-  \code{NPU_PACKAGE_KERNEL_VERSION} / \code{NPU_PACKAGE_MAX_KERNELS} & 算子记录版本为 4；一个程序包最多包含 4096 个算子。 \\
+  \code{NPU_PACKAGE_MAGIC} / \code{NPU_PACKAGE_VERSION} / \code{NPU_PACKAGE_HEADER_SIZE} & 当前程序包格式的魔数、版本 5 和 128 字节头部。 \\
+  \code{NPU_PACKAGE_KERNEL_VERSION} / \code{NPU_PACKAGE_MAX_KERNELS} & 算子记录版本为 5；一个程序包最多包含 4096 个算子。 \\
   \code{NPU_PACKAGE_MAX_ARGS} & 一个算子最多有 8 个参数。 \\
-  \code{NPU_PACKAGE_HART_MAX_PROCS} / \code{NPU_PACKAGE_MAX_CHILD_PROCS} & 每个 Hart 有 16 个用户 Proc 资源槽，根 Proc 最多声明 15 个子 Proc。 \\
+  \code{NPU_PACKAGE_HART_MAX_PROCS} / \code{NPU_PACKAGE_MAX_CHILD_THREADS} & 每个 Hart 有 16 个用户 Proc 资源槽，根 Proc 最多声明 15 个子 Thread。 \\
   \code{NPU_PACKAGE_PROC_MIN_STACK_SIZE} / \code{NPU_PACKAGE_PROC_STACK_SIZE} & Proc 栈最小为 1 KiB，当前固定大小和上限均为 64 KiB。 \\
-  \code{NPU_PACKAGE_PROC_PRINTF_SIZE} / \code{NPU_PACKAGE_URAM_GRANULE} & 默认输出缓冲区为 4 KiB，URAM 分配粒度为 1 KiB。 \\
+  \code{NPU_PACKAGE_PROC_PRINTF_SIZE} / \code{NPU_PACKAGE_URAM_GRANULE} & 默认输出缓冲区为 4 KiB，URAM 分配粒度为 32 KiB。 \\
+  \code{NPU_PACKAGE_TCSR_MAX_COUNT} & LSU、MAT、VEC、MACRO 每类最多声明 8 个逻辑 TCSR 组。 \\
   \code{NPU_PACKAGE_ISA_RV64_DAYAN} & Device object 必须声明的 Dayan RV64 ISA 字符串。 \\
   \code{NPU_PACKAGE_IMMUTABLE_MODULE} & Package object 在 Module 生命周期内不可变。 \\
   \code{NPU_PACKAGE_TASK_MODE_SINGLE_CORE} / \code{NPU_PACKAGE_TASK_MODE_FOUR_CORE} / \code{NPU_PACKAGE_TASK_MODE_ALL} & 算子支持的执行模式位图。 \\
@@ -224,14 +225,15 @@ dycc 包装层公开不透明的 \code{npu_kernel_descriptor_t} 和版本化的
 设置 \code{NPU_KERNEL_LAUNCH_ASYNC} 后，启动接口立即返回尚未完成的 Event；否则包装层
 等待并销毁内部 Event。Host 与 Device 共同使用 \code{dayan_kernel_resource_desc_t}、
 \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION}、\code{DAYAN_HART_MAX_PROCS}、
-\code{DAYAN_KERNEL_MAX_CHILD_PROCS}、\code{DAYAN_URAM_ALLOCATION_GRANULE}、
+\code{DAYAN_KERNEL_MAX_CHILD_THREADS}、\code{DAYAN_URAM_ALLOCATION_GRANULE}、
+\code{DAYAN_TCSR_LOGICAL_GROUPS}、
 \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} 和 \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} 保持
 资源描述一致。
 
 每个 \code{__kernel__} 函数必须使用 \code{DAYAN_KERNEL_DESC}、
 \code{DAYAN_KERNEL_TASK_DESC} 或 \code{DAYAN_KERNEL_LOCKED_TASK_DESC} 声明静态资源。
 最后一个宏仅支持单 Core 模式，用于依赖未保存和恢复的 Hart 配置寄存器的算子；该属性
-不改变真实子 Proc 资源计数。dycc 识别 \code{__host__}、\code{__device__}、
+不改变真实子 Thread 资源计数。dycc 识别 \code{__host__}、\code{__device__}、
 \code{__kernel__} 源码标注并生成 Host 包装代码；这些标注只影响编译
 切分，不增加 Runtime 二进制 ABI 字段。
 

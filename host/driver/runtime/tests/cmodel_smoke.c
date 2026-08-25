@@ -16,8 +16,8 @@
 #include "backend/xdma/npu_hal_xdma.h"
 #include "server_internal.h"
 
-#define LOCK_TEST_CHILD_PROCS 2U
-#define LOCK_TEST_STARTED_MASK ((UINT64_C(1) << LOCK_TEST_CHILD_PROCS) - 1U)
+#define LOCK_TEST_CHILD_THREADS 2U
+#define LOCK_TEST_STARTED_MASK ((UINT64_C(1) << LOCK_TEST_CHILD_THREADS) - 1U)
 #define CONSECUTIVE_LAUNCHES_PER_CORE 4U
 #define MAX_CONSECUTIVE_LAUNCHES 16U
 
@@ -25,8 +25,8 @@ struct lock_test_results {
     uint64_t release;
     uint64_t release_padding[7];
     uint64_t root_begin;
-    uint64_t child_begin[LOCK_TEST_CHILD_PROCS];
-    uint64_t child_end[LOCK_TEST_CHILD_PROCS];
+    uint64_t child_begin[LOCK_TEST_CHILD_THREADS];
+    uint64_t child_end[LOCK_TEST_CHILD_THREADS];
     uint64_t started_mask;
     uint64_t family_end;
     uint64_t normal_begin;
@@ -511,7 +511,7 @@ static int run_locked_task_test(npu_stream_t *locked_stream,
         !results.family_end || !results.normal_begin ||
         results.normal_begin < results.family_end)
         status = -EIO;
-    for (attempt = 0; status == 0 && attempt < LOCK_TEST_CHILD_PROCS;
+    for (attempt = 0; status == 0 && attempt < LOCK_TEST_CHILD_THREADS;
          ++attempt) {
         if (results.child_begin[attempt] < results.root_begin ||
             results.child_end[attempt] < results.child_begin[attempt] ||
@@ -718,7 +718,7 @@ int main(int argc, char **argv)
     kernel_desc[0].entry_symbol = "grid_kernel";
     kernel_desc[0].supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
     kernel_desc[0].max_tasks_per_core = 1;
-    kernel_desc[0].max_child_procs = NPU_PACKAGE_MAX_CHILD_PROCS;
+    kernel_desc[0].max_child_threads = NPU_PACKAGE_MAX_CHILD_THREADS;
     kernel_desc[0].atomic_cache_size = 64;
     kernel_desc[0].uram_size = 0x180000;
     kernel_desc[0].arguments = arguments;
@@ -726,13 +726,13 @@ int main(int argc, char **argv)
     kernel_desc[1] = kernel_desc[0];
     kernel_desc[1].name = "kill_kernel";
     kernel_desc[1].entry_symbol = "kill_kernel";
-    kernel_desc[1].max_child_procs = 0;
+    kernel_desc[1].max_child_threads = 0;
     kernel_desc[2].name = "locked_kernel";
     kernel_desc[2].entry_symbol = "locked_kernel";
     kernel_desc[2].supported_task_modes =
         NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
     kernel_desc[2].max_tasks_per_core = 1;
-    kernel_desc[2].max_child_procs = LOCK_TEST_CHILD_PROCS;
+    kernel_desc[2].max_child_threads = LOCK_TEST_CHILD_THREADS;
     kernel_desc[2].flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
     kernel_desc[2].arguments = &arguments[2];
     kernel_desc[2].argument_count = 1;
@@ -740,7 +740,7 @@ int main(int argc, char **argv)
     kernel_desc[3].name = "normal_kernel";
     kernel_desc[3].entry_symbol = "normal_kernel";
     kernel_desc[3].max_tasks_per_core = 4;
-    kernel_desc[3].max_child_procs = 0;
+    kernel_desc[3].max_child_threads = 0;
     kernel_desc[3].flags = 0;
     kernel_desc[4].name = "sequence_kernel";
     kernel_desc[4].entry_symbol = "sequence_kernel";

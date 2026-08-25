@@ -67,8 +67,8 @@ WRITE 和 CLEAR 的 request 都是 24-byte \code{rpc_print_request}：
   16 & \code{data_size} & \code{uint64_t} & WRITE 数据长度；CLEAR 为 0。 \\
 \end{dayantable}
 
-Host 按 Cluster/Core/Host-root-proc 区分输出流；子 proc 的独立 Device printf buffer
-也归并到所属 root ID，因而无需向 Host发布子 proc 生命周期。当前 Service 将单次 WRITE 限制为 1 MiB，并在读取前
+Host 按 Cluster/Core/Host-root-proc 区分输出流；子 Thread 的独立 Device printf buffer
+也归并到所属 root ID，因而无需向 Host 发布子 Thread 生命周期。当前 Service 将单次 WRITE 限制为 1 MiB，并在读取前
 检查整个数据范围位于 Device RAM。Server 根据正在执行的 proc 将数据放入对应 Runtime
 Session 的队列；Runtime 在 Event 查询、等待或 Stream 同步后通过
 \code{NPU_IPC_OUTPUT_READ} 取回数据，并在应用线程调用 output callback。因此算子输出
@@ -94,7 +94,7 @@ CSR 和 32 个整数寄存器。Host 校验版本、大小与来源 hart 后调�
 
 \subsection{创建 proc}
 
-Host 把 224-byte v4 \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
+Host 把 232-byte v5 \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
 \code{EXITED} 或 \code{FAILED}：
 
 \begin{dayantable}{proc create 描述符}{tab:kernel-064}{X[26,l] X[18,l] X[56,l]}
@@ -104,8 +104,9 @@ Host 把 224-byte v4 \code{rpc_proc_create_request} 放在普通 Device RAM，�
   arguments & 56--127 & argc、reserved 和 8 个 64-bit 参数槽。 \\
   result & 128--151 & status、proc ID、hart ID、cookie。 \\
   logical task & 152--183 & 三维 task ID、三维 task dim、task mode 和 reserved。 \\
-  kernel resources & 184--207 & 最大子 proc 数、reserved、URAM base 和 size。 \\
-  proc name & 208--223 & 固定 16-byte root proc 名称。 \\
+  kernel resources & 184--207 & 最大子 Thread 数、reserved、URAM base 和 size。 \\
+  tensor Context & 208--215 & 压缩的 64-bit URAM/TCSR Context。 \\
+  proc name & 216--231 & 固定 16-byte root proc 名称。 \\
 \end{dayantable}
 
 Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot 池取得 root，把状态改为
@@ -113,23 +114,29 @@ Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot
 不表示 kernel 已退出。scheduler cleanup 最后写入 \code{EXITED} 或 \code{FAILED}。
 
 stack size 范围为 1--64 KiB，printf buffer 不超过 4 KiB，参数数量不超过 8。
-root 与最多 15 个子 proc 共用 16 个算子 slot；init、RPC 与 profile proc 不计入。
+root 与最多 15 个子 Thread 共用 16 个算子 slot；init、RPC 与 profile proc 不计入。
 名称必须非空且在 16-byte 字段内以 NUL 结尾，所以有效名称最多为 15 bytes。
 shared 区域为空时 base/size 同时为 0；非空时必须位于 coherent window 且 16-byte 对齐。
 URAM 区域为空时 base/size 同时为 0；非空时必须落在请求来源 hart 的 URAM window，
-base 和 size 都按 1 KiB 对齐。最大子 proc 数当前不超过 15。
+base 和 size 都按 32 KiB 对齐。描述符还携带 64-bit Tensor Context；最大子 Thread 数
+当前不超过 15。
 
 \subsection{退出通知与管理 RPC}
 
 每个 proc 退出都会先尝试 WRITE 剩余输出并发送 CLEAR。只有
-\code{RPC_PROC_CREATE} 创建的 root 再发送 opcode 6；40-byte
+\code{RPC_PROC_CREATE} 创建的 root 再发送 opcode 7；40-byte
 \code{rpc_proc_exit_request} 含 version/size、hart/proc ID、必须为 0 的 parent ID、
 root flag、\code{int64_t result} 和 launch cookie。Service 的 proc-exit callback 用
-Cluster/Core/proc/cookie 定位 Host 资源。子 proc 的创建和退出完全在 Device family
+Cluster/Core/proc/cookie 定位 Host 资源。子 Thread 的创建和退出完全在 Device family
 内完成，不发送该 RPC。
 
-\code{RPC_PROC_PS} 的参数指向 1568-byte v2 快照。48-byte header 含 hart、record 数、
-全局空闲 slot、reserved slot 和 status，后接最多 19 条 80-byte record：三个系统
+张量机器外部中断使用 opcode 6（\code{RPC_TENSOR_INTERRUPT_REPORT}）。command argument
+直接指向 184-byte \code{tensor_interrupt_record}，包含 Hart/Thread、当前 Tensor
+Context、中断控制值、累计计数、最近 16 条记录和软件丢弃计数。Service 校验版本、大小、
+来源 Hart 与 recent count 后调用 tensor-interrupt callback；该报告不改变 Proc 生命周期。
+
+\code{RPC_PROC_PS} 的参数指向 1872-byte v3 快照。48-byte header 含 hart、record 数、
+全局空闲 slot、reserved slot 和 status，后接最多 19 条 96-byte record：三个系统
 proc（receive、send、profile）加最多 16 个算子 proc。record 包含 proc/parent ID、thread state、root/child/zombie/
 kill-wait flags、直属子计数、slot、Host root ID、logical task、返回值、PC 和 cookie。Host Service 通过
 \code{npu_service_rpc_ps(device,target,...)} 显式指定 Cluster/Core。

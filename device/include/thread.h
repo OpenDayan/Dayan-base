@@ -36,6 +36,7 @@ struct thread {
     struct cpu *cpu;
     uintptr_t sp;
     uintptr_t pc;
+    uint64_t tensor_context;
     uint32_t type;
     uint8_t profile_slot;
     uint8_t profile_defined;
@@ -48,12 +49,15 @@ _Static_assert(offsetof(struct thread, sp) == THREAD_SP_OFFSET,
                "thread.sp offset");
 _Static_assert(offsetof(struct thread, pc) == THREAD_PC_OFFSET,
                "thread.pc offset");
-_Static_assert(offsetof(struct thread, type) == 32, "thread.type offset");
-_Static_assert(offsetof(struct thread, profile_slot) == 36,
+_Static_assert(offsetof(struct thread, tensor_context) ==
+                   THREAD_TENSOR_CONTEXT_OFFSET,
+               "thread.tensor_context offset");
+_Static_assert(offsetof(struct thread, type) == 40, "thread.type offset");
+_Static_assert(offsetof(struct thread, profile_slot) == 44,
                "thread.profile_slot offset");
-_Static_assert(offsetof(struct thread, profile_defined) == 37,
+_Static_assert(offsetof(struct thread, profile_defined) == 45,
                "thread.profile_defined offset");
-_Static_assert(sizeof(struct thread) == 40, "thread layout must stay fixed");
+_Static_assert(sizeof(struct thread) == 48, "thread layout must stay fixed");
 
 int thread_init(struct thread *thread, uint32_t type);
 void switch_context(struct thread *prev, struct thread *next);

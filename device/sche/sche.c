@@ -13,6 +13,8 @@
 #include "sche.h"
 #include "stdlib.h"
 #include "string.h"
+#include "tensor_context.h"
+#include "tensor_interrupt.h"
 
 extern void proc_bootstrap(void);
 
@@ -23,13 +25,18 @@ struct proc_family {
     struct proc_slot *slots;
     struct proc_slot *free_slots;
     struct proc_family *free_next;
-    uint32_t max_child_procs;
-    uint32_t active_child_procs;
+    uint32_t max_child_threads;
+    uint32_t active_child_threads;
     uint32_t reserved_proc_slots;
     uint32_t killed;
     uint32_t pending_produce;
     size_t child_stack_size;
     size_t child_printf_size;
+    struct dayan_context_fields root_context;
+    uint8_t lsu_tcsr_used;
+    uint8_t mat_tcsr_used;
+    uint8_t vec_tcsr_used;
+    uint8_t macro_tcsr_used;
 };
 
 struct proc_slot {
@@ -78,8 +85,8 @@ _Static_assert(CONFIG_PROC_STACK_SIZE == RPC_PROC_MAX_STACK_SIZE,
                "static proc stack capacity must match RPC validation");
 _Static_assert(CONFIG_PROC_PRINTF_SIZE == RPC_PROC_MAX_PRINTF_SIZE,
                "static proc printf capacity must match RPC validation");
-_Static_assert(PROC_NAME_SIZE == DAYAN_PROC_NAME_SIZE,
-               "scheduler and public proc name sizes must match");
+_Static_assert(PROC_NAME_SIZE == DAYAN_THREAD_NAME_SIZE,
+               "scheduler and public Thread name sizes must match");
 _Static_assert(PROC_NAME_SIZE == RPC_PROC_NAME_SIZE,
                "scheduler and RPC proc name sizes must match");
 _Static_assert(CONFIG_PROC_SLOT_COUNT + RPC_PROFILE_SLOT_USER_BASE ==
@@ -269,6 +276,7 @@ int thread_init(struct thread *thread, uint32_t type)
     thread->cpu = cpu;
     thread->sp = 0;
     thread->pc = 0;
+    thread->tensor_context = 0;
     thread->type = type;
     thread->state = THREAD_WAIT_START;
     thread->profile_defined = 0;
@@ -366,7 +374,7 @@ int proc_init_args(struct proc *proc, const char *name, proc_fn entry,
     INIT_LIST_HEAD(&proc->wait_children);
     proc->live_children = 0;
     proc->join_kind = 0;
-    proc->join_proc_id = 0;
+    proc->join_thread_id = 0;
     proc->host_proc_id = 0;
     proc->cookie = 0;
     proc->shared_base = shared_base;
@@ -449,7 +457,7 @@ int proc_set_task(struct proc *proc, const uint32_t task_id[3],
     return 0;
 }
 
-int proc_family_create(struct proc *owner, uint32_t max_child_procs,
+int proc_family_create(struct proc *owner, uint32_t max_child_threads,
                        size_t child_stack_size,
                        size_t child_printf_size,
                        struct proc_family **family_out)
@@ -461,7 +469,7 @@ int proc_family_create(struct proc *owner, uint32_t max_child_procs,
     uint32_t reservation;
 
     if (!owner || !family_out ||
-        max_child_procs > DAYAN_KERNEL_MAX_CHILD_PROCS ||
+        max_child_threads > DAYAN_KERNEL_MAX_CHILD_THREADS ||
         child_stack_size < sizeof(struct proc_frame) ||
         child_stack_size > CONFIG_PROC_STACK_SIZE ||
         child_printf_size > CONFIG_PROC_PRINTF_SIZE)
@@ -472,8 +480,8 @@ int proc_family_create(struct proc *owner, uint32_t max_child_procs,
         root_slot->cpu != cpu_self())
         return -EPERM;
     sche = &root_slot->cpu->sche;
-    reservation = max_child_procs + 1U;
-    if (sche->free_proc_slot_count < max_child_procs ||
+    reservation = max_child_threads + 1U;
+    if (sche->free_proc_slot_count < max_child_threads ||
         !sche->free_proc_families || !sche->free_proc_family_count ||
         sche->reserved_proc_slot_count > CONFIG_PROC_SLOT_COUNT ||
         reservation > CONFIG_PROC_SLOT_COUNT -
@@ -486,12 +494,12 @@ int proc_family_create(struct proc *owner, uint32_t max_child_procs,
     sche->reserved_proc_slot_count += reservation;
     family->owner = owner;
     family->cpu = root_slot->cpu;
-    family->max_child_procs = max_child_procs;
+    family->max_child_threads = max_child_threads;
     family->reserved_proc_slots = reservation;
     family->child_stack_size = child_stack_size;
     family->child_printf_size = child_printf_size;
     root_slot->family_owner = family;
-    for (child_index = 0; child_index < max_child_procs; ++child_index) {
+    for (child_index = 0; child_index < max_child_threads; ++child_index) {
         struct proc_slot *child_slot = global_slot_pop(root_slot->cpu);
 
         if (!child_slot)
@@ -514,7 +522,7 @@ static void proc_family_return(struct proc_family *family)
     struct sche_state *sche;
     struct proc_slot *slot;
 
-    if (family->active_child_procs || !family->cpu ||
+    if (family->active_child_threads || !family->cpu ||
         family->cpu != cpu_self() ||
         family->pending_produce)
         platform_halt();
@@ -568,9 +576,12 @@ void proc_family_destroy(struct proc_family *family)
 
 int proc_set_resources(struct proc *proc, struct proc_family *family,
                        size_t shared_size, void *uram_base,
-                       size_t uram_size)
+                       size_t uram_size, uint64_t tensor_context)
 {
+    struct dayan_context_fields fields = dayan_context_unpack(tensor_context);
     uintptr_t uram_address = (uintptr_t)uram_base;
+    uintptr_t uram_offset = uram_address &
+                            (DAYAN_CONTEXT_URAM_WINDOW - 1U);
 
     if (!proc || !family || proc->thread.cpu != cpu_self() ||
         proc->thread.type != THREAD_TYPE_PROC ||
@@ -578,17 +589,88 @@ int proc_set_resources(struct proc *proc, struct proc_family *family,
         family->owner != proc || family->cpu != proc->thread.cpu ||
         (!proc->shared_base != !shared_size) ||
         (!uram_base != !uram_size) ||
+        (tensor_context >> 56) || !dayan_context_fields_valid(&fields) ||
         (uram_size &&
          ((uram_address & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
           (uram_size & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
-          uram_size > UINTPTR_MAX - uram_address)))
+          uram_size > UINTPTR_MAX - uram_address)) ||
+        fields.uram_lo != uram_offset / DAYAN_CONTEXT_URAM_GRANULE ||
+        fields.uram_hi != (uram_offset + uram_size) /
+                              DAYAN_CONTEXT_URAM_GRANULE)
         return -EINVAL;
     proc->family = family;
     family->root = proc;
+    family->root_context = fields;
     proc->shared_size = shared_size;
     proc->uram_base = uram_base;
     proc->uram_size = uram_size;
+    proc->thread.tensor_context = tensor_context;
     return 0;
+}
+
+static int child_tcsr_reserve(uint8_t *used, struct dayan_tcsr_range parent,
+                              uint8_t count, struct dayan_tcsr_range *child)
+{
+    uint8_t base;
+
+    child->base = 0;
+    child->count = 0;
+    if (!count)
+        return 0;
+    if (count > parent.count)
+        return -ENOMEM;
+    for (base = 0; base <= parent.count - count; ++base) {
+        uint8_t mask = (uint8_t)(((1U << count) - 1U) << base);
+
+        if (*used & mask)
+            continue;
+        *used |= mask;
+        child->base = (uint8_t)(parent.base + base);
+        child->count = count;
+        return 0;
+    }
+    return -ENOMEM;
+}
+
+static void child_tcsr_release(uint8_t *used,
+                               struct dayan_tcsr_range parent,
+                               struct dayan_tcsr_range child)
+{
+    uint8_t logical_base;
+    uint8_t mask;
+
+    if (!child.count)
+        return;
+    if (child.base < parent.base ||
+        child.base + child.count > parent.base + parent.count)
+        platform_halt();
+    logical_base = (uint8_t)(child.base - parent.base);
+    mask = (uint8_t)(((1U << child.count) - 1U) << logical_base);
+    *used &= (uint8_t)~mask;
+}
+
+static void child_resources_release(struct proc *child)
+{
+    struct proc_family *family;
+    struct dayan_context_fields fields;
+
+    if (!child || !child->family)
+        return;
+    family = child->family;
+    fields = dayan_context_unpack(child->thread.tensor_context);
+    child_tcsr_release(&family->lsu_tcsr_used, family->root_context.lsu,
+                       fields.lsu);
+    child_tcsr_release(&family->mat_tcsr_used, family->root_context.mat,
+                       fields.mat);
+    child_tcsr_release(&family->vec_tcsr_used, family->root_context.vec,
+                       fields.vec);
+    child_tcsr_release(&family->macro_tcsr_used, family->root_context.macro,
+                       fields.macro);
+    fields.lsu.count = 0;
+    fields.mat.count = 0;
+    fields.vec.count = 0;
+    fields.macro.count = 0;
+    child->thread.tensor_context = dayan_context_pack(&fields);
 }
 
 static struct proc_slot *family_slot_acquire(struct proc_family *family)
@@ -645,59 +727,112 @@ static struct proc_slot *find_direct_child(struct proc *parent,
     return 0;
 }
 
-static void child_proc_cleanup(struct proc *proc, void *arg)
+static void child_thread_cleanup(struct proc *proc, void *arg)
 {
     struct proc_family *family = proc->family;
     struct proc *parent = proc->parent;
     struct proc_slot *slot = container_of(proc, struct proc_slot, proc);
 
     (void)arg;
-    if (!family || !parent || !family->active_child_procs ||
+    if (!family || !parent || !family->active_child_threads ||
         !parent->live_children || slot->state != PROC_SLOT_CHILD ||
         slot->family_owner != family)
         platform_halt();
-    --family->active_child_procs;
+    child_resources_release(proc);
+    --family->active_child_threads;
     --parent->live_children;
     slot->state = PROC_SLOT_ZOMBIE;
     if (proc->exit_status < 0 && parent->exit_status == 0)
         parent->exit_status = proc->exit_status;
     if ((parent->join_kind == 1U &&
-         parent->join_proc_id == proc->thread.id) ||
+         parent->join_thread_id == proc->thread.id) ||
         (parent->join_kind == 2U && !parent->live_children))
         (void)proc_event_wake_all(&parent->wait_children);
 }
 
-int proc_create_child(struct proc *parent, const char *name, proc_fn entry,
-                      void *argument, uint32_t *proc_id_out)
+int thread_create_child(struct proc *parent, const char *name, proc_fn entry,
+                        void *argument,
+                        const dayan_thread_resources_t *resources,
+                        uint32_t *thread_id_out)
 {
     struct proc_family *family;
     struct proc_slot *child_slot;
     struct proc *child;
+    struct dayan_context_fields child_context;
+    dayan_thread_resources_t empty_resources;
     uintptr_t args[1];
     int status;
 
-    if (!parent || parent != proc_self() || !name || !entry || !proc_id_out)
+    if (!parent || parent != proc_self() || !name || !entry || !thread_id_out)
+        return -EINVAL;
+    if (!resources) {
+        memset(&empty_resources, 0, sizeof(empty_resources));
+        empty_resources.version = DAYAN_THREAD_RESOURCES_VERSION;
+        empty_resources.size = sizeof(empty_resources);
+        resources = &empty_resources;
+    }
+    if (resources->version != DAYAN_THREAD_RESOURCES_VERSION ||
+        resources->size != sizeof(*resources) || resources->reserved ||
+        resources->lsu_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->mat_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->vec_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->macro_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS)
         return -EINVAL;
     family = parent->family;
     if (!family || family->root->thread.cpu != cpu_self())
         return -EPERM;
-    if (family->active_child_procs >= family->max_child_procs ||
+    if (family->active_child_threads >= family->max_child_threads ||
         !family->free_slots)
         return -ENOMEM;
     child_slot = family_slot_acquire(family);
     if (!child_slot)
         return -ENOMEM;
     child = &child_slot->proc;
+    child_context = family->root_context;
+    child_context.lsu.count = 0;
+    child_context.mat.count = 0;
+    child_context.vec.count = 0;
+    child_context.macro.count = 0;
+    status = child_tcsr_reserve(&family->lsu_tcsr_used,
+                                family->root_context.lsu,
+                                resources->lsu_tcsr_count,
+                                &child_context.lsu);
+    if (status == 0)
+        status = child_tcsr_reserve(&family->mat_tcsr_used,
+                                    family->root_context.mat,
+                                    resources->mat_tcsr_count,
+                                    &child_context.mat);
+    if (status == 0)
+        status = child_tcsr_reserve(&family->vec_tcsr_used,
+                                    family->root_context.vec,
+                                    resources->vec_tcsr_count,
+                                    &child_context.vec);
+    if (status == 0)
+        status = child_tcsr_reserve(&family->macro_tcsr_used,
+                                    family->root_context.macro,
+                                    resources->macro_tcsr_count,
+                                    &child_context.macro);
+    if (status < 0) {
+        child->family = family;
+        child->thread.tensor_context = dayan_context_pack(&child_context);
+        child_resources_release(child);
+        family_slot_release(child_slot);
+        return status;
+    }
     args[0] = (uintptr_t)argument;
     status = proc_slot_init_args(child, name, entry, parent->shared_base, 1,
                                  args);
     if (status < 0) {
+        child->family = family;
+        child->thread.tensor_context = dayan_context_pack(&child_context);
+        child_resources_release(child);
         family_slot_release(child_slot);
         return status;
     }
     child->parent = parent;
     child->parent_id = parent->thread.id;
     child->family = family;
+    child->thread.tensor_context = dayan_context_pack(&child_context);
     child->shared_size = parent->shared_size;
     child->uram_base = parent->uram_base;
     child->uram_size = parent->uram_size;
@@ -707,34 +842,34 @@ int proc_create_child(struct proc *parent, const char *name, proc_fn entry,
                            parent->task_mode);
     if (status < 0)
         platform_halt();
-    status = proc_set_cleanup(child, child_proc_cleanup, 0);
+    status = proc_set_cleanup(child, child_thread_cleanup, 0);
     if (status < 0)
         platform_halt();
     ++parent->live_children;
-    ++family->active_child_procs;
-    *proc_id_out = child->thread.id;
+    ++family->active_child_threads;
+    *thread_id_out = child->thread.id;
     return 0;
 }
 
-int proc_join(uint32_t proc_id, int64_t *result)
+int thread_join(uint32_t thread_id, int64_t *result)
 {
     struct proc *parent = proc_self();
     struct proc_slot *slot;
 
     if (!parent || !parent->family)
         return -EPERM;
-    if (!proc_id || proc_id == parent->thread.id)
+    if (!thread_id || thread_id == parent->thread.id)
         return -ECHILD;
-    slot = find_direct_child(parent, proc_id);
+    slot = find_direct_child(parent, thread_id);
     if (!slot)
         return -ECHILD;
     while (slot->state != PROC_SLOT_ZOMBIE) {
         parent->join_kind = 1U;
-        parent->join_proc_id = proc_id;
+        parent->join_thread_id = thread_id;
         proc_wait_event(&parent->wait_children);
         parent->join_kind = 0;
-        parent->join_proc_id = 0;
-        slot = find_direct_child(parent, proc_id);
+        parent->join_thread_id = 0;
+        slot = find_direct_child(parent, thread_id);
         if (!slot)
             return -ECHILD;
     }
@@ -744,7 +879,7 @@ int proc_join(uint32_t proc_id, int64_t *result)
     return 0;
 }
 
-int proc_join_all(void)
+int thread_join_all(void)
 {
     struct proc *parent = proc_self();
     struct proc_slot *slot;
@@ -753,7 +888,7 @@ int proc_join_all(void)
         return -EPERM;
     while (parent->live_children) {
         parent->join_kind = 2U;
-        parent->join_proc_id = 0;
+        parent->join_thread_id = 0;
         proc_wait_event(&parent->wait_children);
         parent->join_kind = 0;
     }
@@ -908,7 +1043,7 @@ static void kill_mark_slot(struct proc_family *family,
     proc->exit_status = -ECANCELED;
     proc->live_children = 0;
     proc->join_kind = 0;
-    proc->join_proc_id = 0;
+    proc->join_thread_id = 0;
     if (proc->parent_id)
         proc->cleanup = 0;
     proc->cleanup_arg = proc->parent_id ? 0 : proc->cleanup_arg;
@@ -920,9 +1055,10 @@ static void kill_mark_slot(struct proc_family *family,
         proc_state_set(proc, THREAD_WAIT_EXIT);
         slot->state = PROC_SLOT_KILLED;
         if (proc->parent_id) {
-            if (!family->active_child_procs)
+            if (!family->active_child_threads)
                 platform_halt();
-            --family->active_child_procs;
+            child_resources_release(proc);
+            --family->active_child_threads;
         }
     }
 }
@@ -1046,7 +1182,7 @@ static void kill_release_ready_slots(struct proc_family *family,
         }
     }
     if (!family->pending_produce) {
-        if (family->active_child_procs || family->root || family->slots)
+        if (family->active_child_threads || family->root || family->slots)
             platform_halt();
         proc_family_return(family);
     }
@@ -1138,9 +1274,10 @@ static void kill_complete_produce(struct proc *proc)
     proc_state_set(proc, THREAD_WAIT_EXIT);
     --family->pending_produce;
     if (child) {
-        if (!family->active_child_procs)
+        if (!family->active_child_threads)
             platform_halt();
-        --family->active_child_procs;
+        child_resources_release(proc);
+        --family->active_child_threads;
     }
     if (family->killed == 1)
         return;
@@ -1149,7 +1286,7 @@ static void kill_complete_produce(struct proc *proc)
     else
         kill_release_root_slot(family);
     if (!family->pending_produce) {
-        if (family->active_child_procs || family->root || family->slots)
+        if (family->active_child_threads || family->root || family->slots)
             platform_halt();
         proc_family_return(family);
     }
@@ -1281,7 +1418,7 @@ _Noreturn void proc_exit_status(int64_t status)
         /* Preserve a failure already propagated by a completed child. */
         if (status < 0 || proc->exit_status >= 0)
             proc->exit_status = status;
-        if (proc->family && proc_join_all() < 0 && proc->exit_status >= 0)
+        if (proc->family && thread_join_all() < 0 && proc->exit_status >= 0)
             proc->exit_status = -EIO;
         if (proc->printf_size)
             (void)rpc_write(proc->printf_buffer, proc->printf_size);
@@ -1362,6 +1499,7 @@ _Noreturn void scheduler(void)
     struct sche_state *sche = &init->cpu->sche;
 
     for (;;) {
+        tensor_interrupt_drain();
         struct list_head *node;
         struct list_head *next;
 

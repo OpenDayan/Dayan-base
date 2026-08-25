@@ -3,8 +3,8 @@ set -euo pipefail
 
 demo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$demo_dir/.." && pwd)
-cmodel_dir=${RVTNG_CMODEL_DIR:-/workspace/rvtng-cmodel}
-qemu=${RVTNG_QEMU:-/workspace/npu-qemu/build/dl-riscv64}
+cmodel_dir=${RVTNG_CMODEL_DIR:-/home/wangzhe/rvtng-cmodel}
+qemu=${RVTNG_QEMU:-"$repo_dir/deps/npu-qemu/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-1}
 socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-matmul-demo-$$.sock}

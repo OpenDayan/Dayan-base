@@ -9,6 +9,7 @@
 #include "rbtree.h"
 #include "rpc_internal.h"
 #include "thread.h"
+#include "tensor_interrupt.h"
 #include "trap.h"
 
 struct proc_slot;
@@ -42,6 +43,7 @@ struct cpu {
     struct mem_state mem;
     struct rpc_state rpc;
     struct trap_state trap;
+    struct tensor_interrupt_state tensor_interrupt;
 };
 
 _Static_assert(offsetof(struct cpu, sche) == 0,

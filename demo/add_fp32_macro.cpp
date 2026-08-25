@@ -10,7 +10,7 @@
 enum : uint64_t {
     kAddElements = 64,
     kAddBytes = kAddElements * sizeof(float),
-    kAddUramBytes = 1024,
+    kAddUramBytes = 32 * 1024,
 };
 
 __kernel__ void add_fp32_macro(const float *a, const float *b, float *c)
@@ -25,7 +25,7 @@ __kernel__ void add_fp32_macro(const float *a, const float *b, float *c)
         dayan_task_dim(DAYAN_TASK_X) != 1U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
         dayan_task_dim(DAYAN_TASK_Z) != 1U)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     /* LSU group 0: one contiguous 256-byte row. */
     __tx_lsu_tcsr_write<LSU_BLOCK>(0);
@@ -84,7 +84,8 @@ __kernel__ void add_fp32_macro(const float *a, const float *b, float *c)
     dayan_wait_lsu();
 }
 
-DAYAN_KERNEL_LOCKED_TASK_DESC(add_fp32_macro, 0, 0, kAddUramBytes);
+DAYAN_KERNEL_LOCKED_TASK_DESC(add_fp32_macro, 0, 0, kAddUramBytes,
+                              1, 0, 0, 1);
 
 #if !defined(__DAYAN_DEVICE__)
 

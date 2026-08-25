@@ -35,7 +35,7 @@ __kernel__ void printf_grid_kernel(uint64_t arg0, uint64_t arg1,
     // }
 }
 
-DAYAN_KERNEL_DESC(printf_grid_kernel, 0, 0, 0);
+DAYAN_KERNEL_DESC(printf_grid_kernel, 0, 0, 0, 0, 0, 0, 0);
 
 __host__ static __attribute__((unused)) void usage(const char *program)
 {

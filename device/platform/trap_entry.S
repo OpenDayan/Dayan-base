@@ -58,6 +58,8 @@ trap_entry:
     ld      t0, TRAP_FRAME_MCAUSE(sp)
     li      t1, 0x8000000000000003
     beq     t0, t1, .Ltrap_resume_msip
+    li      t1, 0x800000000000000b
+    beq     t0, t1, .Ltrap_resume_tensor
 
     /* Rearm the dedicated stack before C switches away from this proc. */
     addi    t0, sp, TRAP_FRAME_SIZE
@@ -76,7 +78,12 @@ trap_entry:
     /* mret copies MPIE to MIE, so clear both bits before resuming. */
     li      t0, 0x88
     csrc    mstatus, t0
+    j       .Ltrap_restore
 
+.Ltrap_resume_tensor:
+    call    tensor_interrupt_handle
+
+.Ltrap_restore:
     ld      ra, TRAP_FRAME_X1(sp)
     ld      gp, TRAP_FRAME_X3(sp)
     ld      tp, TRAP_FRAME_X4(sp)

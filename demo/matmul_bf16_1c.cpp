@@ -45,8 +45,8 @@ namespace matmul_bf16_1c_detail {
 struct Constants {
     enum : int {
         kLsuLocal = 0,
-        kLsuShared = 1,
-        kLsuCStore = 3,
+        kLsuShared = 0,
+        kLsuCStore = 1,
         kTileM = 128,
         kTileN = 384,
         kTileK = 256,
@@ -571,13 +571,13 @@ static void consumer_0(void *argument)
 template <bool ProducerLoadsA>
 static void consumer_1(void *argument)
 {
-    consume_slice<ProducerLoadsA, 4, 1>((MatmulState *)argument);
+    consume_slice<ProducerLoadsA, 0, 1>((MatmulState *)argument);
 }
 
 template <bool ProducerLoadsA>
 static void consumer_2(void *argument)
 {
-    consume_slice<ProducerLoadsA, 2, 2>((MatmulState *)argument);
+    consume_slice<ProducerLoadsA, 0, 2>((MatmulState *)argument);
 }
 #endif
 
@@ -658,6 +658,21 @@ static int produce_shared(MatmulState *state)
 }
 
 template <bool ProducerLoadsA>
+static void producer_thread(void *argument)
+{
+    MatmulState *state = (MatmulState *)argument;
+
+    while (!state->start)
+        dayan_yield();
+    if (!state->abort) {
+        const int status = produce_shared<ProducerLoadsA>(state);
+
+        if (status < 0)
+            remember_error(state, status);
+    }
+}
+
+template <bool ProducerLoadsA>
 static int run_pipeline(const MatmulBf16Config *config,
                         const uint16_t *a, const uint16_t *bt, float *c,
                         uint64_t uram_base, uint64_t *pipeline_begin)
@@ -695,31 +710,39 @@ static int run_pipeline(const MatmulBf16Config *config,
             state.uram_base + Layout::shared_base(index);
     }
 
-    int status = dayan_create_proc("consumer-0", consumer_0<ProducerLoadsA>,
-                                   &state);
+    dayan_thread_resources_t resources;
+    dayan_thread_resources_init(&resources);
+    resources.lsu_tcsr_count = 1;
+    int status = dayan_create_thread("producer",
+                                     producer_thread<ProducerLoadsA>, &state,
+                                     &resources);
+    resources.lsu_tcsr_count = 2;
+    resources.mat_tcsr_count = 1;
+    if (status >= 0)
+        status = dayan_create_thread("consumer-0",
+                                     consumer_0<ProducerLoadsA>, &state,
+                                     &resources);
 #if MATMUL_BF16_1C_SLICES == 3
     if (status >= 0)
-        status = dayan_create_proc("consumer-1",
-                                   consumer_1<ProducerLoadsA>, &state);
+        status = dayan_create_thread("consumer-1",
+                                     consumer_1<ProducerLoadsA>, &state,
+                                     &resources);
     if (status >= 0)
-        status = dayan_create_proc("consumer-2",
-                                   consumer_2<ProducerLoadsA>, &state);
+        status = dayan_create_thread("consumer-2",
+                                     consumer_2<ProducerLoadsA>, &state,
+                                     &resources);
 #endif
     if (status < 0) {
         state.status = status;
         state.abort = 1;
         state.start = 1;
-        (void)dayan_join_all();
+        (void)dayan_thread_join_all();
         return status;
     }
 
     *pipeline_begin = read_cycle();
     state.start = 1;
-    status = produce_shared<ProducerLoadsA>(&state);
-    if (status < 0)
-        state.status = status;
-
-    status = dayan_join_all();
+    status = dayan_thread_join_all();
     if (status < 0 && state.status == 0)
         state.status = status;
     return state.status;
@@ -761,7 +784,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         dayan_task_dim(DAYAN_TASK_X) != 1U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
         dayan_task_dim(DAYAN_TASK_Z) != 1U) {
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
     }
 
     void *uram = dayan_uram_base();
@@ -770,7 +793,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         producer_loads_a ? AProducerLayout::total_bytes()
                          : BProducerLayout::total_bytes();
     if (!uram || dayan_uram_size() < required_uram)
-        dayan_proc_exit(-12);
+        dayan_thread_exit(-12);
 
     const uint64_t uram_base = (uint64_t)(uintptr_t)uram &
                                (Constants::kUramWindowStride - 1U);
@@ -779,7 +802,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         ? run_pipeline<true>(config, a, bt, c, uram_base, &pipeline_begin)
         : run_pipeline<false>(config, a, bt, c, uram_base, &pipeline_begin);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
     const uint64_t pipeline_end = read_cycle();
     const uint64_t kernel_end = read_cycle();
@@ -792,8 +815,11 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
     perf->pipeline_cycles = pipeline_end - pipeline_begin;
 }
 
-DAYAN_KERNEL_LOCKED_TASK_DESC(matmul_bf16_1c, MATMUL_BF16_1C_SLICES, 0,
-                              MATMUL_BF16_1C_URAM_BYTES);
+DAYAN_KERNEL_LOCKED_TASK_DESC(matmul_bf16_1c,
+                              MATMUL_BF16_1C_SLICES + 1, 0,
+                              MATMUL_BF16_1C_URAM_BYTES,
+                              2 * MATMUL_BF16_1C_SLICES + 1,
+                              MATMUL_BF16_1C_SLICES, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

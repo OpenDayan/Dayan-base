@@ -5,6 +5,7 @@
 #include "config.h"
 #include "errno.h"
 #include "sche.h"
+#include "string.h"
 
 _Static_assert(sizeof(dayan_resource_t) == 64,
                "dayan resource ABI must stay fixed");
@@ -17,16 +18,20 @@ _Static_assert(offsetof(dayan_shared_resource_t, counts) == 0 &&
                "dayan shared resource ABI layout changed");
 _Static_assert(sizeof(dayan_cluster_barrier_t) == 16,
                "dayan cluster barrier ABI must stay fixed");
-_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
+_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 40,
                "dayan kernel resource descriptor ABI must stay fixed");
-_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_child_procs) == 8 &&
+_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_child_threads) == 8 &&
                    offsetof(dayan_kernel_resource_desc_t,
                             max_tasks_per_core) == 10 &&
                    offsetof(dayan_kernel_resource_desc_t, flags) == 12 &&
                    offsetof(dayan_kernel_resource_desc_t,
-                            atomic_cache_size) == 16 &&
-                   offsetof(dayan_kernel_resource_desc_t, uram_size) == 24,
+                            lsu_tcsr_count) == 16 &&
+                   offsetof(dayan_kernel_resource_desc_t,
+                            atomic_cache_size) == 24 &&
+                   offsetof(dayan_kernel_resource_desc_t, uram_size) == 32,
                "dayan kernel resource descriptor layout changed");
+_Static_assert(sizeof(dayan_thread_resources_t) == 16,
+               "dayan Thread resource ABI must stay fixed");
 
 /*
  * BASE Produce/Bar uses unit 0.  Produce reads tp (x4) directly;
@@ -172,30 +177,40 @@ void dayan_yield(void)
     proc_yield();
 }
 
-int dayan_create_proc(const char *name, dayan_proc_entry_t entry,
-                      void *argument)
+void dayan_thread_resources_init(dayan_thread_resources_t *resources)
 {
-    uint32_t proc_id;
+    if (!resources)
+        return;
+    memset(resources, 0, sizeof(*resources));
+    resources->version = DAYAN_THREAD_RESOURCES_VERSION;
+    resources->size = sizeof(*resources);
+}
+
+int dayan_create_thread(const char *name, dayan_thread_entry_t entry,
+                        void *argument,
+                        const dayan_thread_resources_t *resources)
+{
+    uint32_t thread_id;
     int status;
 
     if (!name || !entry)
         return -EINVAL;
-    status = proc_create_child(proc_self(), name, (proc_fn)entry, argument,
-                               &proc_id);
-    return status < 0 ? status : (int)proc_id;
+    status = thread_create_child(proc_self(), name, (proc_fn)entry, argument,
+                                 resources, &thread_id);
+    return status < 0 ? status : (int)thread_id;
 }
 
-int dayan_join(uint32_t proc_id, int64_t *result)
+int dayan_thread_join(uint32_t thread_id, int64_t *result)
 {
-    return proc_join(proc_id, result);
+    return thread_join(thread_id, result);
 }
 
-int dayan_join_all(void)
+int dayan_thread_join_all(void)
 {
-    return proc_join_all();
+    return thread_join_all();
 }
 
-DAYAN_NORETURN void dayan_proc_exit(int64_t result)
+DAYAN_NORETURN void dayan_thread_exit(int64_t result)
 {
     proc_exit_status(result);
 }

@@ -8,6 +8,7 @@
 
 struct proc;
 struct proc_family;
+struct dayan_thread_resources;
 struct rpc_proc_ps_snapshot;
 struct rpc_proc_kill_result;
 
@@ -41,7 +42,7 @@ struct proc {
     struct list_head wait_children;
     uint32_t live_children;
     uint32_t join_kind;
-    uint32_t join_proc_id;
+    uint32_t join_thread_id;
     uint32_t host_proc_id;
     uint64_t cookie;
     void *shared_base;
@@ -77,18 +78,20 @@ int proc_slot_init_args(struct proc *proc, const char *name, proc_fn entry,
                         void *shared_base, size_t argc,
                         const uintptr_t *args);
 void proc_slot_release(struct proc *proc);
-int proc_family_create(struct proc *owner, uint32_t max_child_procs,
+int proc_family_create(struct proc *owner, uint32_t max_child_threads,
                        size_t child_stack_size,
                        size_t child_printf_size,
                        struct proc_family **family_out);
 void proc_family_destroy(struct proc_family *family);
 int proc_set_resources(struct proc *proc, struct proc_family *family,
                        size_t shared_size, void *uram_base,
-                       size_t uram_size);
-int proc_create_child(struct proc *parent, const char *name, proc_fn entry,
-                      void *argument, uint32_t *proc_id_out);
-int proc_join(uint32_t proc_id, int64_t *result);
-int proc_join_all(void);
+                       size_t uram_size, uint64_t tensor_context);
+int thread_create_child(struct proc *parent, const char *name, proc_fn entry,
+                        void *argument,
+                        const struct dayan_thread_resources *resources,
+                        uint32_t *thread_id_out);
+int thread_join(uint32_t thread_id, int64_t *result);
+int thread_join_all(void);
 int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot);
 /* Emits a slot definition and initial state for every existing proc. */
 void proc_profile_snapshot(void);

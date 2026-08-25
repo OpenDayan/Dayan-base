@@ -192,9 +192,11 @@ int rpc_init(void)
 
     rpc->initialized = 0;
     rpc->trap_pending = 0;
+    rpc->tensor_interrupt_pending = 0;
     INIT_LIST_HEAD(&rpc->send_queue);
     INIT_LIST_HEAD(&rpc->send_event);
     rpc_transaction_init(&rpc->trap, 0, 0, 0);
+    rpc_transaction_init(&rpc->tensor_interrupt, 0, 0, 0);
     platform_rpc_init();
 
     rpc->receive.thread.profile_slot = RPC_PROFILE_SLOT_RPC_RECEIVE;
@@ -420,5 +422,42 @@ int rpc_report_trap(const void *record, size_t size)
     status = rpc_transaction_submit(&rpc->trap);
     if (status < 0)
         rpc->trap_pending = 0;
+    return status;
+}
+
+static void rpc_tensor_interrupt_cleanup(
+    struct rpc_transaction *transaction, void *arg)
+{
+    struct rpc_state *rpc = arg;
+
+    (void)transaction;
+    rpc->tensor_interrupt_pending = 0;
+}
+
+int rpc_report_tensor_interrupt(const struct tensor_interrupt_record *record)
+{
+    struct rpc_state *rpc = &cpu_self()->rpc;
+    uintptr_t addr;
+    int status;
+
+    if (!record || record->version != TENSOR_INTERRUPT_RECORD_VERSION ||
+        record->size != sizeof(*record))
+        return -EINVAL;
+    if (!rpc->initialized)
+        return -ENOSYS;
+    if (rpc->tensor_interrupt_pending || current == &rpc->send.thread)
+        return -EBUSY;
+    memcpy(&rpc->tensor_interrupt_record, record, sizeof(*record));
+    addr = (uintptr_t)&rpc->tensor_interrupt_record;
+    if ((uint64_t)addr & ~RPC_COMMAND_ARG_MASK)
+        return -EOVERFLOW;
+    platform_cache_flush(&rpc->tensor_interrupt_record, sizeof(*record));
+    rpc_transaction_init(&rpc->tensor_interrupt,
+                         rpc_command_pack(RPC_TENSOR_INTERRUPT_REPORT, addr),
+                         rpc_tensor_interrupt_cleanup, rpc);
+    rpc->tensor_interrupt_pending = 1;
+    status = rpc_transaction_submit(&rpc->tensor_interrupt);
+    if (status < 0)
+        rpc->tensor_interrupt_pending = 0;
     return status;
 }

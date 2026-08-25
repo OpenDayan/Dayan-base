@@ -48,7 +48,7 @@ __kernel__ void demo_kernel(uint64_t count)
     dayan_yield();
 }
 
-DAYAN_KERNEL_DESC(demo_kernel, 1, 1024, 2048);
+DAYAN_KERNEL_DESC(demo_kernel, 1, 1024, 32768, 0, 0, 0, 0);
 \end{dayancode}
 
 \code{main} 和只使用 Host 库的辅助函数应标为 \code{__host__}。同一条逗号声明中的
@@ -83,22 +83,50 @@ Device module 则按 Context 缓存。首次调用通过
 \code{npu_kernel_descriptor_create} 完成描述符创建，后续调用走原子快路径。
 
 每个 kernel 还必须定义
-\code{DAYAN_KERNEL_DESC(kernel, child\_procs, atomic\_bytes, uram\_bytes)}。
+\code{DAYAN_KERNEL_DESC(kernel, child\_threads, atomic\_bytes, uram\_bytes,
+lsu\_tcsr, mat\_tcsr, vec\_tcsr, macro\_tcsr)}。
 dycc 在 Device object 中保留外部 C 符号 \code{<kernel>\_\_desc}，并把相同常量写入
-Host Package。三个资源值分别表示一个实例允许同时存活的子 proc 上限、由
-\code{shared/gp} 寻址的 atomic-cache allocation 和本 Core 私有 URAM；URAM 大小
-必须是 1 KiB 的整数倍。子 proc 上限为 15；root 也占一个 proc slot，Runtime 保证
-同一 Hart 上所有 resident invocation 的 \code{1 + child\_procs} 总和不超过 16。
+Host Package。资源值表示一个实例允许同时存活的子 Thread 上限、由
+\code{shared/gp} 寻址的 atomic-cache allocation、本 Core 私有 URAM，以及四类 TCSR
+池大小；URAM 必须是 32 KiB 的整数倍。子 Thread 上限为 15；root 也占一个 proc slot，
+Runtime 保证同一 Hart 上所有 resident invocation 的 \code{1 + child\_threads} 总和不
+超过 16，并静态分配 TCSR 物理范围。
 
 允许最多 1--4 个 Task 共驻同一 Hart 时使用
-\code{DAYAN_KERNEL_TASK_DESC(kernel, tasks\_per\_core, child\_procs,
-atomic\_bytes, uram\_bytes)}。如果 single-Core kernel 会修改并依赖当前没有上下文
-保存/恢复机制的 Hart 配置寄存器，则必须使用
-\code{DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child\_procs, atomic\_bytes,
-uram\_bytes)}。一个带锁 logical Task 只能进入空 Hart；在其整个 Proc family 结束前，
+\code{DAYAN_KERNEL_TASK_DESC(kernel, tasks\_per\_core, child\_threads,
+atomic\_bytes, uram\_bytes, lsu\_tcsr, mat\_tcsr, vec\_tcsr, macro\_tcsr)}。
+TCSR 已由 Context 保存和映射；如果 single-Core kernel 还依赖其它未保存的 Hart 状态，
+则必须使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC} 的同类资源参数。一个带锁 logical Task
+只能进入空 Hart；在其整个 Proc family 结束前，
 其它 logical Task（包括同一 grid 的下一 Task）不能进入该 Hart，而该 Task 自己的 child
-Proc 仍可在声明的 slot 内运行。锁定属性独立于 Proc 数量，不应通过虚报
-\code{child\_procs=15} 代替。
+Thread 仍可在声明的 slot 内运行。锁定属性独立于 Thread 数量，不应通过虚报
+\code{child\_threads=15} 代替。
+
+\subsection{算子分片与 Proc 共驻}
+
+激活、Element-wise 以及其它分片间没有依赖的算子，默认应采用无子 Thread
+的顺序 Proc 模型。Host 先把输出坐标集合分成足够多的逻辑分片，每个 Task
+坐标对应一个根 Proc。Proc 根据 \code{dayan\_task\_id/dim} 计算自己的分片范围，
+然后在本地循环中顺序执行
+\code{Load tile -> compute -> Store tile}。每个阶段只需在相应执行单元上完成后
+调用 \code{dayan\_wait\_*}，不需要为 Load、计算和 Store 分别创建 Thread。
+
+这类 kernel 通常使用
+\code{DAYAN\_KERNEL\_TASK\_DESC(kernel, 4, 0, \ldots)}，把每 Hart 最大共驻数声明为
+4。描述符中的 URAM 和 LSU/MAT/VEC/MACRO TCSR 是单个 Proc 的最坏资源；
+Server 只在 proc slot、URAM 和四类 TCSR 都能静态满足时才实际共驻四个 Proc。
+这是入场上限而不是固定绑核承诺；当某类资源不足时，Scheduler 自然降低实际
+并发数。
+
+当一个 Proc 在 LSU、MAT、VEC 或 MACRO 完成点等待时，协作式 Scheduler 会运行
+同 Hart 上其它就绪 Proc。因此多个顺序 Proc 的 Load、计算和 Store 可在不同
+执行单元上交错推进，用较小的软件复杂度提高利用率。每个 Proc 有独立 Context，
+所以仍应优先使用逻辑 TCSR 组 0。
+
+子 Thread 只用于数据复用或同步需求明确超过上述模型的算子。典型场景是四核矩阵乘：
+\code{kFourCore} 的四个 Proc 通过 coherent shared 状态协作，在 Core 间广播 A/B tile，
+并在每个 Core 内创建 loader、remote-copy、MAT 或 store Thread 组成生产者/消费者
+流水。只有这类收益经验证的特殊算子才应承担 Thread、resource 和 join 的额外开销。
 
 \subsection{启动 kernel}\label{sec:kernel-023}
 
@@ -169,7 +197,7 @@ Stream 是有序命令队列。同一 Stream 的传输、launch、wait 和 Event
 
 Module 是已加载的 Kernel Package，Kernel 是其中一个可启动入口。Package 元信息包含
 目标 ISA、参数布局、支持的 task mode、每 Core 最大 task 数、resident memory、
-子 proc/atomic cache/URAM 上限和同步资源声明。不可变代码和只读数据允许跨 Context
+子 Thread/atomic cache/URAM/TCSR 上限和同步资源声明。不可变代码和只读数据允许跨 Context
 共享；可写数据、BSS 和 Context 相关
 重定位结果保持隔离。同步资源只描述类型、数量和初始参数，地址由 Service/HAL 分配。
 
@@ -205,8 +233,9 @@ struct layout *data = (struct layout *)shared;
 同一布局。\code{shared} 绑定 \code{gp}，只读其值，不要给该变量赋值。
 
 URAM 是每 Core 私有空间。kernel 用 \code{dayan\_uram\_base/size} 读取本实例范围；
-默认容量为 1.5 MiB、Core 地址窗口 stride 为 2 MiB，分配粒度为 1 KiB。子 proc
-继承父 proc 的 shared 与 URAM 范围，不能跨 Core 访问其它实例的 URAM。
+默认容量为 1.5 MiB、Core 地址窗口 stride 为 2 MiB，分配粒度为 32 KiB。子 Thread
+继承根 Proc 的 shared 与 URAM 范围，不能跨 Core 访问其它实例的 URAM；TCSR 必须在
+创建 Thread 时显式声明，并通过独立 Context 从逻辑组 0 开始映射。
 
 每 hart 私有堆供 \code{malloc} 使用。初始 region 不足时，Dayan OS 通过 Host RPC
 扩展；私有堆地址不能跨 hart 释放，也不能用于跨核共享。

@@ -143,13 +143,17 @@ int npu_package_view_init(struct npu_package_view *view,
                  NPU_PACKAGE_TASK_MODE_SINGLE_CORE) ||
             ((kernel->flags & NPU_PACKAGE_KERNEL_LOCKED_TASK) &&
              kernel->max_tasks_per_core != 1U) ||
-            kernel->reserved0 || kernel->reserved[0] ||
+            kernel->reserved0 || kernel->reserved1 ||
             !npu_package_string(view, kernel->name_offset) ||
             !npu_package_string(view, kernel->entry_offset) ||
             !kernel->supported_task_modes ||
             (kernel->supported_task_modes & ~NPU_PACKAGE_TASK_MODE_ALL) ||
             !kernel->max_tasks_per_core ||
-            kernel->max_child_procs > NPU_PACKAGE_MAX_CHILD_PROCS ||
+            kernel->max_child_threads > NPU_PACKAGE_MAX_CHILD_THREADS ||
+            kernel->lsu_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->mat_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->vec_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->macro_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
             (kernel->stack_size &&
              kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
             kernel->stack_size > NPU_PACKAGE_PROC_STACK_SIZE ||

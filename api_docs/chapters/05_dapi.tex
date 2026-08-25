@@ -4,7 +4,7 @@
 
 \section{dapi API}\label{sec:api-dapi}
 
-dapi 是算子和 Device 子 Proc 可以直接调用的稳定接口。公开面由
+dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接口。公开面由
 \code{device/include/api} 下的头文件定义，动态链接允许的函数集合由
 \code{device/dayan-api.symbols} 固定。本章逐项记录这 63 个可链接符号，并列出公开
 类型、常量与编译属性；BL1 调度器、Proc 和资源实现细节不属于 dapi。
@@ -32,15 +32,18 @@ dapi 是算子和 Device 子 Proc 可以直接调用的稳定接口。公开面�
 \begin{dayantable}{Kernel 环境 API}{tab:api-dapi-environment}{X[43,l] X[57,l]}
   API & 含义 \\
   \code{shared} & 绑定到 \code{gp} 的一致性共享区基址。该内存由 Host 分配，算子可以在所指区间保存跨 Hart 状态。 \\
-  \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION} & 当前静态 kernel 资源描述版本 2。 \\
+  \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION} & 当前静态 kernel 资源描述版本 3。 \\
   \code{DAYAN_HART_MAX_PROCS} & 每个 Hart 最多有 16 个用户 Proc 资源槽。 \\
-  \code{DAYAN_KERNEL_MAX_CHILD_PROCS} & root Proc 最多声明 15 个子 Proc。 \\
-  \code{DAYAN_PROC_NAME_SIZE} & Proc 名称存储为 16 B。 \\
-  \code{DAYAN_URAM_ALLOCATION_GRANULE} & URAM 资源以 1024 B 对齐和分配。 \\
+  \code{DAYAN_KERNEL_MAX_CHILD_THREADS} & root Proc 最多声明 15 个子 Thread。 \\
+  \code{DAYAN_THREAD_NAME_SIZE} & Thread 名称存储为 16 B。 \\
+  \code{DAYAN_URAM_ALLOCATION_GRANULE} & URAM 资源以 32 KiB 对齐和分配。 \\
+  \code{DAYAN_TCSR_LOGICAL_GROUPS} & 每类 TCSR 最多声明 8 个逻辑组。 \\
+  \code{DAYAN_THREAD_RESOURCES_VERSION} & 当前子 Thread TCSR 资源描述版本为 1。 \\
   \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} & 表示单 Core Task 需要独占一个 Hart。 \\
   \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} & 当前允许的算子资源标志掩码。 \\
-  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 32 字节版本化常量，描述最大子 Proc 数、每 Core 共驻数、标志、Atomic Cache 字节数和 URAM 字节数。 \\
-  \code{dayan_proc_entry_t} & 子 Proc 入口类型 \code{void (*)(void *)}。 \\
+  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 40 字节版本化常量，描述最大子 Thread 数、每 Core 共驻数、标志、四类 TCSR 数量、Atomic Cache 字节数和 URAM 字节数。 \\
+  \code{dayan_thread_entry_t} & 子 Thread 入口类型 \code{void (*)(void *)}。 \\
+  \code{dayan_thread_resources_t} & 16 字节的版本化描述符；创建子 Thread 时显式声明 LSU/MAT/VEC/MACRO TCSR 数量，空指针表示不占用 TCSR。 \\
   \code{dayan_cluster_barrier_t} & 四 Core 屏障使用的 16 字节共享存储，使用前必须清零。 \\
   \code{dayan_resource_state} & \code{DAYAN_RESOURCE_FREE}、\code{DAYAN_RESOURCE_BUSY}、\code{DAYAN_RESOURCE_READY} 三态资源状态机。 \\
   \code{dayan_task_axis} & \code{DAYAN_TASK_X}、\code{DAYAN_TASK_Y}、\code{DAYAN_TASK_Z} 三个逻辑任务坐标轴。 \\
@@ -51,23 +54,28 @@ dapi 是算子和 Device 子 Proc 可以直接调用的稳定接口。公开面�
 
 算子使用 \code{DAYAN_KERNEL_DESC}（见 Runtime 章节）生成一个
 \code{dayan_kernel_resource_desc_t} 常量。Atomic Cache 和 URAM 在 Host 启动算子前
-一次性分配，子 Proc 资源槽在根 Proc 建立时一次性预留。会修改未做上下文保存和恢复的
-Hart 配置寄存器的单 Core 算子必须使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}；该标志
-不会改变实际的子 Proc 数量上限。
+一次性分配，子 Thread 资源槽在根 Proc 建立时一次性预留。TCSR 由 Context 保存和
+映射；只有其它未做上下文保存和恢复的 Hart 状态才需要
+\code{DAYAN_KERNEL_LOCKED_TASK_DESC}。该标志不会改变实际的子 Thread 数量上限。
 
-\subsection{Proc 生命周期}
+\subsection{Thread 生命周期}
 
-\begin{dayantable}{Proc dapi}{tab:api-dapi-proc}{X[39,l] X[61,l]}
+\begin{dayantable}{Thread dapi}{tab:api-dapi-proc}{X[39,l] X[61,l]}
   API & 行为 \\
   \code{dayan_yield} & 当前 Proc 主动让出调度机会。 \\
-  \code{dayan_create_proc} & 在同一物理 Core 的预留资源槽中创建具名直接子 Proc；成功时返回正 Proc ID。名称必须非空、以空字符结尾且能放入 16 字节。 \\
-  \code{dayan_join} & 等待指定的直接子 Proc，按需返回其 64 位结果，并回收已退出 Proc。 \\
-  \code{dayan_join_all} & 等待并回收当前 Proc 的全部直接子 Proc。 \\
-  \code{dayan_proc_exit} & 以 64 位结果结束当前 Proc，不返回。 \\
+  \code{dayan_thread_resources_init} & 初始化子 Thread 的显式 TCSR 资源声明。 \\
+  \code{dayan_create_thread} & 在同一物理 Core 的预留资源槽中创建具名直接子 Thread；成功时返回正 Thread ID。 \\
+  \code{dayan_thread_join} & 等待指定的直接子 Thread，按需返回其 64 位结果，并回收已退出 Thread。 \\
+  \code{dayan_thread_join_all} & 等待并回收当前执行对象的全部直接子 Thread。 \\
+  \code{dayan_thread_exit} & 以 64 位结果结束当前执行对象，不返回。 \\
 \end{dayantable}
 
-父 Proc 退出前必须等待其子 Proc；根 Proc 退出时 BL1 将结果通知 Host。子 Proc 的创建、
+父执行对象退出前必须等待其子 Thread；根 Proc 退出时 BL1 将结果通知 Host。子 Thread 的创建、
 退出和资源槽回收完全在 Device 内完成，不产生 Host 侧的创建或退出 RPC。
+普通激活和 Element-wise 算子应优先用
+\code{DAYAN\_KERNEL\_TASK\_DESC} 启动多个无子 Thread 的分片 Proc，并在各自循环中
+顺序执行 Load、计算和 Store。子 Thread 主要服务于核间广播、远程 URAM 复制或显式
+多阶段流水，不应用来包装每一个普通分片阶段。
 
 \subsection{任务信息、URAM 与 Cluster 同步}
 
@@ -170,7 +178,7 @@ Proc 的格式化输出缓冲区容量固定，写满时自动提交；Proc 结�
   \code{realloc} & 调整已有分配；返回值可能与原地址不同。 \\
   \code{free} & 释放分配；空指针可安全传入。 \\
   \code{abort} & 停止当前 Hart，不返回。 \\
-  \code{exit} & 当前实现忽略状态参数并停止 Hart，不返回；Proc 正常返回应使用 \code{dayan_proc_exit}。 \\
+  \code{exit} & 当前实现忽略状态参数并停止 Hart，不返回；算子正常退出应使用 \code{dayan_thread_exit}。 \\
 \end{dayantable}
 
 \subsection{Device 字符串与内存}

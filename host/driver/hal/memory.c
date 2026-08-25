@@ -11,7 +11,7 @@
 #define NPU_DEFAULT_URAM_BASE     UINT64_C(0x00800000)
 #define NPU_DEFAULT_URAM_SIZE     UINT64_C(0x00180000)
 #define NPU_DEFAULT_URAM_STRIDE   UINT64_C(0x00200000)
-#define NPU_URAM_GRANULE          UINT64_C(1024)
+#define NPU_URAM_GRANULE          UINT64_C(32768)
 
 static int power_of_two(uint64_t value)
 {

@@ -84,7 +84,7 @@ static inline void delay_cycles(uint64_t cycles)
 static inline void require_status(int status)
 {
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 }
 
 static int initialize_shared(ClusterShared *cluster, uint32_t lane)
@@ -195,7 +195,7 @@ __kernel__ void shared_notify_latency(uint64_t sample_count,
         dayan_task_dim(DAYAN_TASK_X) != kClusterCores ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
         dayan_task_dim(DAYAN_TASK_Z) != 1U)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     ClusterShared *cluster = (ClusterShared *)shared;
     require_status(initialize_shared(cluster, lane));
@@ -216,7 +216,7 @@ __kernel__ void shared_notify_latency(uint64_t sample_count,
                                          &cluster->finish.barrier));
 }
 
-DAYAN_KERNEL_DESC(shared_notify_latency, 0, 512, 0);
+DAYAN_KERNEL_DESC(shared_notify_latency, 0, 512, 0, 0, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

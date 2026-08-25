@@ -143,24 +143,24 @@ __kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
         dayan_task_dim(DAYAN_TASK_X) != kClusterCores ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
         dayan_task_dim(DAYAN_TASK_Z) != 1U)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     void *uram = dayan_uram_base();
     if (!uram || dayan_uram_size() < kUramBytes)
-        dayan_proc_exit(-12);
+        dayan_thread_exit(-12);
 
     const uint64_t physical_uram = (uint64_t)(uintptr_t)uram;
     const uint64_t expected_window =
         kUramWindowBase + (uint64_t)lane * kUramWindowStride;
     if (physical_uram < expected_window ||
         physical_uram - expected_window > kUramWindowStride - kUramBytes)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     ClusterShared *cluster = (ClusterShared *)shared;
     cluster->uram_base[lane] = physical_uram;
     int status = dayan_cluster_barrier(kClusterCores, &cluster->barrier);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
     const uint64_t local_uram =
         physical_uram & (kUramWindowStride - 1U);
@@ -184,7 +184,7 @@ __kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
 
     status = dayan_cluster_barrier(kClusterCores, &cluster->barrier);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 
     /* Copy the final URAM image out after timing so the Host can validate it. */
     if ((mode == kModeD2U && lane == 0U) ||
@@ -196,10 +196,10 @@ __kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
 
     status = dayan_cluster_barrier(kClusterCores, &cluster->barrier);
     if (status < 0)
-        dayan_proc_exit(status);
+        dayan_thread_exit(status);
 }
 
-DAYAN_KERNEL_DESC(lsu_bandwidth, 0, 1024, kUramBytes);
+DAYAN_KERNEL_DESC(lsu_bandwidth, 0, 1024, kUramBytes, 1, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

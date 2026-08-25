@@ -10,8 +10,8 @@
 extern "C" {
 #endif
 
-#define NPU_SERVICE_OPTIONS_VERSION 7U
-#define NPU_SERVICE_LAUNCH_DESC_VERSION 4U
+#define NPU_SERVICE_OPTIONS_VERSION 8U
+#define NPU_SERVICE_LAUNCH_DESC_VERSION 5U
 #define NPU_SERVICE_TIMEOUT_INFINITE UINT32_MAX
 #define NPU_SERVICE_LAUNCH_MAX_ARGS 8U
 #define NPU_SERVICE_PROC_NAME_SIZE 16U
@@ -28,6 +28,7 @@ extern "C" {
 typedef struct npu_service_device npu_service_device_t;
 typedef struct npu_service_launch npu_service_launch_t;
 struct trap_record;
+struct tensor_interrupt_record;
 
 typedef enum npu_service_launch_state {
     NPU_SERVICE_LAUNCH_SUBMITTED = 0,
@@ -46,6 +47,9 @@ typedef void (*npu_service_trap_fn)(void *context, uint32_t cluster,
 typedef void (*npu_service_proc_exit_fn)(void *context, uint32_t cluster,
                                          uint32_t core, uint32_t proc,
                                          int64_t result, uint64_t cookie);
+typedef void (*npu_service_tensor_interrupt_fn)(
+    void *context, uint32_t cluster, uint32_t core,
+    const struct tensor_interrupt_record *record);
 
 typedef int (*npu_service_profile_fn)(
     void *context, uint32_t cluster, uint32_t core,
@@ -58,6 +62,7 @@ typedef struct npu_service_options {
     uint32_t reserved;
     npu_service_output_fn output;
     npu_service_trap_fn trap;
+    npu_service_tensor_interrupt_fn tensor_interrupt;
     npu_service_proc_exit_fn proc_exit;
     npu_service_profile_fn profile;
     void *callback_context;
@@ -79,8 +84,9 @@ typedef struct npu_service_launch_desc {
     npu_hal_allocation_t *uram_allocation;
     uint64_t uram_offset;
     uint64_t uram_size;
-    uint32_t max_child_procs;
+    uint32_t max_child_threads;
     uint32_t resource_reserved;
+    uint64_t tensor_context;
     uint64_t printf_buffer_size;
     uint64_t args[NPU_SERVICE_LAUNCH_MAX_ARGS];
     const char *name;

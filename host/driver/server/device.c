@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "service_internal.h"
+#include "tensor_context.h"
+#include "tensor_interrupt.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -90,6 +92,50 @@ static void default_trap(void *context, uint32_t cluster, uint32_t core,
             (unsigned long long)(record ? record->mtval : 0));
 }
 
+static const char *tensor_interrupt_source_name(uint16_t source)
+{
+    static const char *const names[] = {
+        "neomat_uram_a_read_range", "neomat_uram_a_read_align",
+        "neomat_uram_b_read_range", "neomat_uram_b_read_align",
+        "neomat_uram_scale_read_range", "neomat_uram_scale_read_align",
+        "neomat_uram_c_read_range", "neomat_uram_c_read_align",
+        "neomat_uram_c_write_range", "neomat_uram_c_write_align",
+        "neomat_tcsr_access_error", "neomat_decode_error",
+        "neodma_tcsr_access_error", "neodma_uram_table_range",
+        "neodma_uram_table_align", "neodma_uram_read_range",
+        "neodma_uram_read_align", "neodma_uram_write_range",
+        "neodma_uram_write_align", "neodma_decode_error",
+        "flexvec_decode_error", "flexvec_uram_group_0_range",
+        "flexvec_uram_group_0_align", "flexvec_uram_group_1_range",
+        "flexvec_uram_group_1_align", "neovec_uram_lda_range",
+        "neovec_uram_lda_align", "neovec_uram_ldb_range",
+        "neovec_uram_ldb_align", "neovec_uram_store_range",
+        "neovec_uram_store_align", "neovec_tcsr_access_error",
+        "neovec_decode_error", "instruction_decode_error",
+    };
+
+    return source < sizeof(names) / sizeof(names[0]) ? names[source] :
+                                                       "unknown";
+}
+
+static void default_tensor_interrupt(
+    void *context, uint32_t cluster, uint32_t core,
+    const struct tensor_interrupt_record *record)
+{
+    uint64_t latest = record && record->recent_count ?
+        record->recent[record->recent_count - 1U] : 0;
+    uint16_t source = (uint16_t)(latest >> 32);
+
+    (void)context;
+    fprintf(stderr,
+            "dayan_server: tensor interrupt cluster=%u core=%u proc=%u "
+            "source=%u(%s) info=0x%08x context=0x%014llx count=%llu\n",
+            cluster, core, record ? record->thread_id : 0, source,
+            tensor_interrupt_source_name(source), (uint32_t)latest,
+            (unsigned long long)(record ? record->tensor_context : 0),
+            (unsigned long long)(record ? record->interrupt_count : 0));
+}
+
 static void default_proc_exit(void *context, uint32_t cluster,
                               uint32_t core, uint32_t proc,
                               int64_t result, uint64_t cookie)
@@ -123,6 +169,7 @@ void npu_service_options_init(npu_service_options_t *options)
     options->default_timeout_ms = NPU_DEFAULT_TIMEOUT_MS;
     options->output = default_output;
     options->trap = default_trap;
+    options->tensor_interrupt = default_tensor_interrupt;
     options->proc_exit = default_proc_exit;
     options->profile = default_profile;
 }
@@ -146,6 +193,7 @@ static int options_valid(const npu_service_options_t *options)
     return options && options->version == NPU_SERVICE_OPTIONS_VERSION &&
            options->rpc_poll_interval_us && options->default_timeout_ms &&
            !options->reserved && options->output && options->trap &&
+           options->tensor_interrupt &&
            options->proc_exit && options->profile;
 }
 
@@ -560,6 +608,13 @@ static int task_valid(const npu_service_launch_desc_t *desc)
             return 0;
     }
     return 1;
+}
+
+static int tensor_context_valid(uint64_t value)
+{
+    struct dayan_context_fields fields = dayan_context_unpack(value);
+
+    return !(value >> 56) && dayan_context_fields_valid(&fields);
 }
 
 static int proc_name_valid(const char *name)
@@ -984,8 +1039,8 @@ int npu_service_launch(npu_service_device_t *device,
         desc->stack_size < RPC_PROC_MIN_STACK_SIZE ||
         desc->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         desc->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
-        desc->max_child_procs > RPC_PROC_MAX_CHILD_PROCS ||
-        desc->resource_reserved ||
+        desc->max_child_threads > RPC_PROC_MAX_CHILD_THREADS ||
+        desc->resource_reserved || !tensor_context_valid(desc->tensor_context) ||
         !proc_name_valid(desc->name) ||
         !task_valid(desc) ||
         !npu_hal_address_valid(device->hal, desc->target, desc->entry, 2))
@@ -1026,9 +1081,10 @@ int npu_service_launch(npu_service_device_t *device,
     request.stack_size = desc->stack_size;
     request.shared_base = shared_base;
     request.shared_size = desc->shared_size;
-    request.max_child_procs = desc->max_child_procs;
+    request.max_child_threads = desc->max_child_threads;
     request.uram_base = uram_base;
     request.uram_size = desc->uram_size;
+    request.tensor_context = desc->tensor_context;
     request.printf_buffer_size = desc->printf_buffer_size;
     request.argc = desc->argc;
     memcpy(request.args, desc->args, desc->argc * sizeof(desc->args[0]));

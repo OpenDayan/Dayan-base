@@ -5,7 +5,7 @@
 \section{Dayan API}\label{sec:kernel-030}
 
 \code{dayan_sys.h} 声明 Device kernel 可调用的系统接口。除
-\code{dayan_create_proc} 成功返回正 proc ID 外，返回 \code{int} 的接口以 0 表示成功、
+\code{dayan_create_thread} 成功返回正 Thread ID 外，返回 \code{int} 的接口以 0 表示成功、
 负值表示参数或状态错误；公开头文件不导出具体 errno 名称。
 
 \subsection{调度与执行单元}
@@ -38,33 +38,41 @@ wait 接口把当前 \code{tp} 作为 Produce token 写入对应硬件队列，�
 \code{dayan_cache_invalidate} 再读取。它们只处理当前 Hart 的 D-cache 可见性，不等待
 LSU/MAT/VEC/MACRO，不刷新 I-cache，也不能替代跨 Hart 同步原语。
 
-\subsection{子 proc 与实例内存}
+\subsection{子 Thread 与实例内存}
 
 \begin{dayantable}{proc 与内存接口}{tab:kernel-030-proc}{X[38,l] X[62,l]}
   符号 & 行为 \\
-  \code{dayan_create_proc(name, entry, argument)} & 在当前 Core 创建带名称的子 proc；成功返回正的 proc ID，失败返回负值。 \\
-  \code{dayan_join} & 等待指定的直属子 proc，取得其 64-bit 返回值并回收 zombie slot。 \\
-  \code{dayan_join_all} & 等待并回收当前 proc 的全部直属子 proc。 \\
-  \code{dayan_proc_exit} & 以指定的 64-bit 返回值结束当前 proc；不返回。 \\
+  \code{dayan_thread_resources_init} & 初始化子 Thread 的 TCSR 资源声明。 \\
+  \code{dayan_create_thread(name, entry, argument, resources)} & 在当前 Core 创建带名称的子 Thread；成功返回正的 Thread ID，失败返回负值。 \\
+  \code{dayan_thread_join} & 等待指定的直属子 Thread，取得其 64-bit 返回值并回收 zombie slot。 \\
+  \code{dayan_thread_join_all} & 等待并回收当前执行对象的全部直属子 Thread。 \\
+  \code{dayan_thread_exit} & 以指定的 64-bit 返回值结束当前执行对象；不返回。 \\
   \code{dayan_uram_base} & 返回当前 kernel 实例的 Core-local URAM 基址；未申请时为空。 \\
   \code{dayan_uram_size} & 返回当前实例的 URAM 字节数；未申请时为 0。 \\
   \code{dayan_cluster_barrier} & 在四 Core mode 下等待四个 lane；barrier 必须位于当前 shared allocation。 \\
 \end{dayantable}
 
-子 proc 数由 \code{DAYAN_KERNEL_DESC} 声明；Host 创建 root 时一次性从该 Hart 专属
+子 Thread 数由 \code{DAYAN_KERNEL_DESC} 声明；Host 创建 root 时一次性从该 Hart 专属
 预留所有子 slot，达到 family 上限或尚未 join 的 zombie 占满预留 slot 后创建失败。
 名称必须非空、以 NUL 结尾并完整放入 16-byte 字段，因此有效名称最多为 15 bytes。
-子 proc 与父 proc 共享 logical task、shared 和 URAM 范围，但有独立栈与 printf buffer。
-\code{dayan_join} 只接受直属子 proc ID；子 proc 退出会减少父 proc 的未结束计数，只有
+子 Thread 与根 Proc 共享 logical task、shared 和 URAM 范围，但有独立栈、printf
+buffer 和 Context。空资源声明不占用 TCSR；显式 TCSR 资源从逻辑组 0 开始映射。
+\code{dayan_thread_join} 只接受直属子 Thread ID；子 Thread 退出会减少父执行对象的未结束计数，只有
 匹配的 join 或计数归零的 join-all 才会被唤醒。proc 正常返回等价于返回值为 0；退出前
 隐式执行 join-all，因此 Host 观察到 root 终态时整棵子树都已退出。每个 Hart 有 16 个
-算子 proc slot，root 计入、init/RPC/profile proc 不计入，所以描述符最多声明 15 个子 proc。
-URAM 基址和分配/释放均按 1 KiB 对齐。
+算子 proc slot，root 计入、init/RPC/profile proc 不计入，所以描述符最多声明 15 个子 Thread。
+URAM 基址和分配/释放均按 32 KiB 对齐。
 
 \code{DAYAN_KERNEL_LOCKED_TASK_DESC} 的 Hart 锁从 root 成功建立时开始，在上述 family
 终态后释放；Device launch 创建失败时 Host 回滚预留并立即释放。该锁不阻止同一
-family 的 child proc，因为它们由 Device scheduler 在已预留 slot 中创建，不经过 Host
+family 的 child Thread，因为它们由 Device scheduler 在已预留 slot 中创建，不经过 Host
 再次派发。
+
+子 Thread 不是普通分片算子的默认并发方式。激活和 Element-wise kernel 通常应把
+\code{child\_threads} 声明为 0，用 \code{DAYAN\_KERNEL\_TASK\_DESC} 允许每 Hart 最多共驻
+4 个根 Proc。每个 Proc 在自己的分片循环中顺序完成 Load、计算和 Store，并在
+\code{dayan\_wait\_*} 处让出 Hart。只有核间广播、远程 URAM 复制或多阶段流水等
+特殊场景才应创建子 Thread。
 
 cluster barrier 的参与者参数当前只能为 4，且 launch 必须为 mode 4。对象为零初始化的
 \code{dayan_cluster_barrier_t}，可以跨多轮复用；最后到达者以 release 语义推进

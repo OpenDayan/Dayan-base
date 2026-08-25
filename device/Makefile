@@ -4,7 +4,7 @@ OBJCOPY     ?= llvm-objcopy
 OBJDUMP     ?= llvm-objdump
 NM          ?= llvm-nm
 READELF     ?= llvm-readelf
-QEMU_SYSTEM_RISCV64 ?=
+QEMU_SYSTEM_RISCV64 ?= $(ROOT)/deps/npu-qemu/build/qemu-system-riscv64
 
 ROOT        := ..
 BUILD       ?= $(ROOT)/build/device

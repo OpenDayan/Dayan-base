@@ -208,10 +208,15 @@ int npu_kernel_get_info(npu_kernel_t *kernel, npu_kernel_info_t *info)
         return status;
     info->supported_task_modes = response.supported_task_modes;
     info->max_tasks_per_core = response.max_tasks_per_core;
-    info->max_child_procs = response.max_child_procs;
+    info->max_child_threads = response.max_child_threads;
     info->arg_count = response.argument_count;
     info->sync_resource_count = response.sync_resource_count;
     info->flags = response.flags;
+    info->lsu_tcsr_count = response.lsu_tcsr_count;
+    info->mat_tcsr_count = response.mat_tcsr_count;
+    info->vec_tcsr_count = response.vec_tcsr_count;
+    info->macro_tcsr_count = response.macro_tcsr_count;
+    info->reserved = 0;
     info->stack_size = response.stack_size;
     info->atomic_cache_size = response.atomic_cache_size;
     info->resident_memory = response.resident_memory;

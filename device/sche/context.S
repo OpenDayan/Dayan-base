@@ -28,6 +28,9 @@ switch_context:
     sd      t0, THREAD_PC_OFFSET(a0)
 
     ld      sp, THREAD_SP_OFFSET(a1)
+    ld      t0, THREAD_TENSOR_CONTEXT_OFFSET(a1)
+    /* BASE Context write: unit 0, address 0x10, source register t0 (x5). */
+    .insn   4, 0x0002028b
     ld      t0, THREAD_PC_OFFSET(a1)
     mv      tp, a1
     jr      t0
@@ -82,13 +85,6 @@ proc_bootstrap:
     ld      t0, PROC_FRAME_ENTRY(sp)
     ld      ra, PROC_FRAME_RA(sp)
     addi    sp, sp, PROC_FRAME_SIZE
-    /* FCSR dirties mstatus.FS; confirm it did not revive functional IRQs. */
-    li      t6, 0x8
-.Lbootstrap_mask_irqs:
-    csrc    mstatus, t6
-    csrr    t5, mstatus
-    andi    t5, t5, 0x8
-    bnez    t5, .Lbootstrap_mask_irqs
     jr      t0
 .size proc_bootstrap, . - proc_bootstrap
 .option pop

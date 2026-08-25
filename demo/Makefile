@@ -14,6 +14,8 @@ ADD_FP32_VEC_TARGET := $(BUILD)/add_fp32_vec
 CACHE_SEMANTICS_TARGET := $(BUILD)/cache_semantics
 NORMALIZATION_PROBE_TARGET := $(BUILD)/normalization_probe
 TASK_GRID_PROBE_TARGET := $(BUILD)/task_grid_probe
+CONTEXT_THREAD_PROBE_TARGET := $(BUILD)/context_thread_probe
+TENSOR_INTERRUPT_PROBE_TARGET := $(BUILD)/tensor_interrupt_probe
 LSU_BANDWIDTH_TARGET := $(BUILD)/lsu_bandwidth
 SCHEDULER_BENCH_TARGET := $(BUILD)/scheduler_yield_bench
 SHARED_NOTIFY_TARGET := $(BUILD)/shared_notify_latency
@@ -26,6 +28,8 @@ ADD_FP32_VEC_TEMPS := $(BUILD)/add_fp32_vec-temps
 CACHE_SEMANTICS_TEMPS := $(BUILD)/cache_semantics-temps
 NORMALIZATION_PROBE_TEMPS := $(BUILD)/normalization_probe-temps
 TASK_GRID_PROBE_TEMPS := $(BUILD)/task_grid_probe-temps
+CONTEXT_THREAD_PROBE_TEMPS := $(BUILD)/context_thread_probe-temps
+TENSOR_INTERRUPT_PROBE_TEMPS := $(BUILD)/tensor_interrupt_probe-temps
 LSU_BANDWIDTH_TEMPS := $(BUILD)/lsu_bandwidth-temps
 SCHEDULER_BENCH_TEMPS := $(BUILD)/scheduler_yield_bench-temps
 SHARED_NOTIFY_TEMPS := $(BUILD)/shared_notify_latency-temps
@@ -34,11 +38,14 @@ MATMUL_4C_TEMPS := $(BUILD)/matmul_bf16_4c-temps
 MATMUL_4C_BROADCAST_TEMPS := $(BUILD)/matmul_bf16_broadcast_4c-temps
 TARGETS := $(PRINT_TARGET) $(ADD_FP32_MACRO_TARGET) $(ADD_FP32_VEC_TARGET) \
 	$(CACHE_SEMANTICS_TARGET) $(NORMALIZATION_PROBE_TARGET) $(TASK_GRID_PROBE_TARGET) \
+	$(CONTEXT_THREAD_PROBE_TARGET) \
+	$(TENSOR_INTERRUPT_PROBE_TARGET) \
 	$(LSU_BANDWIDTH_TARGET) \
 	$(SCHEDULER_BENCH_TARGET) $(SHARED_NOTIFY_TARGET) \
 	$(MATMUL_1C_TARGET) $(MATMUL_4C_TARGET) \
 	$(MATMUL_4C_BROADCAST_TARGET)
-.PHONY: all check run run-matmul run-matmul-4c clean toolchain
+.PHONY: all check run run-context run-interrupt run-matmul run-matmul-4c \
+	clean toolchain
 
 all: $(TARGETS)
 
@@ -92,6 +99,24 @@ $(TASK_GRID_PROBE_TARGET): task_grid_probe.cpp $(DAYAN_API_HEADERS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(TASK_GRID_PROBE_TEMPS)/task_grid_probe.cpp.dycc.device.o
+
+$(CONTEXT_THREAD_PROBE_TARGET): context_thread_probe.cpp \
+		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
+		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(CONTEXT_THREAD_PROBE_TEMPS) \
+		-O2 -Wall -Wextra -Werror $< -o $@
+	bash $(DEVICE_ISA_CHECK) \
+		$(CONTEXT_THREAD_PROBE_TEMPS)/context_thread_probe.cpp.dycc.device.o
+
+$(TENSOR_INTERRUPT_PROBE_TARGET): tensor_interrupt_probe.cpp \
+		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
+		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(TENSOR_INTERRUPT_PROBE_TEMPS) \
+		-O2 -Wall -Wextra -Werror $< -o $@
+	bash $(DEVICE_ISA_CHECK) \
+		$(TENSOR_INTERRUPT_PROBE_TEMPS)/tensor_interrupt_probe.cpp.dycc.device.o
 
 $(LSU_BANDWIDTH_TARGET): lsu_bandwidth.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
@@ -154,6 +179,8 @@ check: all
 	$(CACHE_SEMANTICS_TARGET) --help >/dev/null
 	$(NORMALIZATION_PROBE_TARGET) --help >/dev/null
 	$(TASK_GRID_PROBE_TARGET) --help >/dev/null
+	$(CONTEXT_THREAD_PROBE_TARGET) --help >/dev/null
+	$(TENSOR_INTERRUPT_PROBE_TARGET) --help >/dev/null
 	$(LSU_BANDWIDTH_TARGET) --help >/dev/null
 	$(SCHEDULER_BENCH_TARGET) --help >/dev/null
 	$(SHARED_NOTIFY_TARGET) --help >/dev/null
@@ -163,6 +190,12 @@ check: all
 
 run: all
 	bash ./run_cmodel.sh
+
+run-context: all
+	DAYAN_DEMO_TEST=context bash ./run_cmodel.sh
+
+run-interrupt: all
+	DAYAN_DEMO_TEST=interrupt bash ./run_cmodel.sh
 
 run-matmul: all
 	bash ./run_matmul_cmodel.sh

@@ -71,18 +71,20 @@ host/dycc/dycc --save-temps=build/dycc-demo \
 - `__kernel__`：只在 Device 保留定义；Host 原位置生成同名 wrapper。kernel 必须返回
   `void`、具有外部链接、不是模板或可变参数函数，并且最多接收 8 个机器字参数。
 - 每个 `__kernel__` 必须有且只有一个同名资源描述符：
-  `DAYAN_KERNEL_DESC(kernel, child_procs, atomic_bytes, uram_bytes);`。
+  `DAYAN_KERNEL_DESC(kernel, child_threads, atomic_bytes, uram_bytes,
+  lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr);`。
   允许同一 Hart 共驻多个 logical Task 时使用
-  `DAYAN_KERNEL_TASK_DESC(kernel, tasks_per_core, child_procs, atomic_bytes,
-  uram_bytes);`。会修改且依赖未保存/恢复的 Hart 配置寄存器时，必须改用
-  `DAYAN_KERNEL_LOCKED_TASK_DESC(kernel, child_procs, atomic_bytes,
-  uram_bytes);`；它只支持 `kSingleCore`，并从 root 建立到整个 proc family
-  结束独占该 Hart，自己的 child proc 仍可运行。
-  `child_procs` 是该 kernel 实例最多同时存活的子 proc 数，上限为 15。root proc
-  也占一个 slot；Runtime 保证同一 Hart 的 `1 + child_procs` 总和不超过 16。
+  `DAYAN_KERNEL_TASK_DESC(kernel, tasks_per_core, child_threads, atomic_bytes,
+  uram_bytes, lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr);`。会修改且依赖未保存/
+  恢复的非 TCSR Hart 状态时，必须改用同参数形式的
+  `DAYAN_KERNEL_LOCKED_TASK_DESC`；它只支持 `kSingleCore`，并从 root 建立到整个
+  family 结束独占该 Hart，自己的 child Thread 仍可运行。
+  `child_threads` 是该 kernel 实例最多同时存活的子 Thread 数，上限为 15。root Proc
+  也占一个 slot；Runtime 保证同一 Hart 的 `1 + child_threads` 总和不超过 16。
   `atomic_bytes` 是由
   `shared/gp` 寻址的 coherent allocation 大小；`uram_bytes` 是当前 Core 的私有
-  URAM 大小，必须是 1 KiB 的整数倍。三项都填 0 表示不申请对应资源。
+  URAM 大小（必须是 32 KiB 的整数倍），以及 LSU、MAT、VEC、MACRO 四类 TCSR
+  组数。对应项填 0 表示不申请该资源。
 - `__device__`：函数或全局变量只进入 Device。
 - `__host__`：函数或全局变量只进入 Host。
 - 未标注的命名空间/文件作用域函数同时进入 Host 与 Device。
@@ -104,11 +106,23 @@ const npu_kernel_launch_attrs_t *launch_attrs
 wrapper 返回 `int` 状态。它包含每个 kernel 独立的 static descriptor、原子快路径和
 初始化自旋锁。首次调用使用嵌入的 `__kernel_obj__`、对象尺寸和准确的 C++ mangled
 entry 名以及资源声明创建描述符；后续调用直接复用。dycc 同时在 Device object 中保留
-外部 C 符号 `<kernel>__desc`，并把相同常量写入 Host Package。描述符版本为 2、固定
-32 bytes，包含 resource flags，当前最多声明 15 个子 proc。`locked_task` 是独立的
-调度约束，不改变 `child_procs` 的真实资源计数；不要用虚报 15 个 child 来替代它。
+外部 C 符号 `<kernel>__desc`，并把相同常量写入 Host Package。描述符版本为 3、固定
+40 bytes，包含 resource flags 和四类 TCSR 数量，当前最多声明 15 个子 Thread。
+  `locked_task` 是独立的调度约束，不改变 `child_threads` 的真实资源计数；不要用虚报
+  15 个 child 来替代它。
 实际 Device module 按 runtime 实例缓存，因此
 同一 Host `.o` 可用于多个 runtime。
+
+对激活、Element-wise 等分片独立算子，推荐使用
+`DAYAN_KERNEL_TASK_DESC(kernel, 4, 0, atomic_bytes, uram_bytes, ...)`：每个
+Task 坐标是一个无子 Thread 的 Proc，在内部循环中顺序完成自己分片的
+Load、计算和 Store。`tasks_per_core=4` 允许 Server 在资源充足时向一个
+Hart 放入最多四个 Proc；Proc 在 `dayan_wait_*` 时交替执行，不同执行单元可以
+自然重叠。这类算子不应为普通三阶段分别创建 Thread。
+
+只有需要核间广播、远程 URAM 复制或明确的紧耦合生产者/消费者流水时，
+才声明子 Thread 并使用 `dayan_create_thread`。典型场景是 `kFourCore` 矩阵乘在
+Core 间广播输入 tile；每个 Thread 仍从自己 Context 的逻辑 TCSR 组 0 开始编程。
 
 源文件可根据 `__DAYAN_DEVICE__` / `__DAYAN_HOST__` 条件包含单侧头文件。比如
 `dayan_sys.h` 只应在 Device 分支包含。

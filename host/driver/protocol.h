@@ -7,7 +7,7 @@
 #include "dataplane.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
-#define NPU_IPC_VERSION           9U
+#define NPU_IPC_VERSION           10U
 #define NPU_IPC_HEADER_SIZE       40U
 #define NPU_IPC_MAX_PAYLOAD       (64U * 1024U * 1024U)
 #define NPU_IPC_RESPONSE          (1U << 0)
@@ -179,10 +179,15 @@ typedef struct npu_ipc_kernel_launch {
 typedef struct npu_ipc_kernel_info {
     uint32_t supported_task_modes;
     uint32_t max_tasks_per_core;
-    uint32_t max_child_procs;
+    uint32_t max_child_threads;
     uint32_t argument_count;
     uint32_t sync_resource_count;
     uint32_t flags;
+    uint8_t lsu_tcsr_count;
+    uint8_t mat_tcsr_count;
+    uint8_t vec_tcsr_count;
+    uint8_t macro_tcsr_count;
+    uint32_t reserved;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t resident_memory;
@@ -245,7 +250,7 @@ static_assert(offsetof(npu_ipc_kernel_launch_t, task_name) == 60,
               "Dayan kernel launch name IPC offset");
 static_assert(offsetof(npu_ipc_kernel_launch_t, arguments) == 80,
               "Dayan kernel launch arguments IPC offset");
-static_assert(sizeof(npu_ipc_kernel_info_t) == 56,
+static_assert(sizeof(npu_ipc_kernel_info_t) == 64,
               "Dayan kernel info IPC ABI");
 static_assert(sizeof(npu_ipc_profile_start_t) == 16,
               "Dayan profile start IPC ABI");
@@ -266,7 +271,7 @@ _Static_assert(offsetof(npu_ipc_kernel_launch_t, task_name) == 60,
                "Dayan kernel launch name IPC offset");
 _Static_assert(offsetof(npu_ipc_kernel_launch_t, arguments) == 80,
                "Dayan kernel launch arguments IPC offset");
-_Static_assert(sizeof(npu_ipc_kernel_info_t) == 56,
+_Static_assert(sizeof(npu_ipc_kernel_info_t) == 64,
                "Dayan kernel info IPC ABI");
 _Static_assert(sizeof(npu_ipc_profile_start_t) == 16,
                "Dayan profile start IPC ABI");

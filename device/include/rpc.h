@@ -12,6 +12,7 @@ enum rpc_service {
     RPC_HEAP_ACQUIRE,
     RPC_HEAP_RELEASE,
     RPC_TRAP_REPORT,
+    RPC_TENSOR_INTERRUPT_REPORT,
     RPC_PROC_EXIT,
     RPC_PROFILE_FLUSH,
     RPC_PROC_CREATE = 0x0100,
@@ -122,15 +123,15 @@ struct rpc_proc_exit_request {
     uint64_t cookie;
 };
 
-#define RPC_PROC_CREATE_VERSION       4U
+#define RPC_PROC_CREATE_VERSION       5U
 #define RPC_PROC_MAX_ARGS             8U
 #define RPC_PROC_SLOTS_PER_HART       16U
 #define RPC_PROC_NAME_SIZE            16U
 #define RPC_PROC_MIN_STACK_SIZE       1024U
 #define RPC_PROC_MAX_STACK_SIZE       0x10000U
 #define RPC_PROC_MAX_PRINTF_SIZE      0x1000U
-#define RPC_PROC_MAX_CHILD_PROCS      (RPC_PROC_SLOTS_PER_HART - 1U)
-#define RPC_PROC_URAM_GRANULE         1024U
+#define RPC_PROC_MAX_CHILD_THREADS    (RPC_PROC_SLOTS_PER_HART - 1U)
+#define RPC_PROC_URAM_GRANULE         (32U * 1024U)
 #define RPC_PROC_PS_VERSION           3U
 #define RPC_PROC_KILL_ALL_VERSION     1U
 #define RPC_PROC_PS_SYSTEM_PROCS      3U
@@ -177,10 +178,11 @@ struct rpc_proc_create_request {
     uint32_t task_dim[3];
     uint32_t task_mode;
     uint32_t task_reserved;
-    uint32_t max_child_procs;
+    uint32_t max_child_threads;
     uint32_t resource_reserved;
     uint64_t uram_base;
     uint64_t uram_size;
+    uint64_t tensor_context;
     char name[RPC_PROC_NAME_SIZE];
 };
 
@@ -370,13 +372,15 @@ _Static_assert(offsetof(struct rpc_proc_create_request, task_dim) == 164,
                "Host proc task dimension offset");
 _Static_assert(offsetof(struct rpc_proc_create_request, task_mode) == 176,
                "Host proc task mode offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, max_child_procs) == 184,
+_Static_assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 184,
                "Host proc child resource offset");
 _Static_assert(offsetof(struct rpc_proc_create_request, uram_base) == 192,
                "Host proc URAM base offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, name) == 208,
+_Static_assert(offsetof(struct rpc_proc_create_request, tensor_context) == 208,
+               "Host proc tensor Context offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, name) == 216,
                "Host proc name offset");
-_Static_assert(sizeof(struct rpc_proc_create_request) == 224,
+_Static_assert(sizeof(struct rpc_proc_create_request) == 232,
                "Host proc create ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_proc_info, result) == 56,
                "Host proc info result offset");

@@ -70,7 +70,7 @@ __kernel__ void normalization_probe(const float *input, float *trace,
     if (!input || !trace || publish_mode > 4U || !uram ||
         dayan_uram_size() < 1024 ||
         dayan_task_mode() != 1U || !tasks || tasks > 4U || task >= tasks)
-        dayan_proc_exit(-22);
+        dayan_thread_exit(-22);
 
     task_trace = trace + (uint64_t)task * kTaskStride;
     set_lsu_matrix<0>(checksum, 1, kElements * sizeof(float),
@@ -132,8 +132,8 @@ __kernel__ void normalization_probe(const float *input, float *trace,
         inverse_address = (long)scalar;
     }
 
-    configure_macro<1>(1);
-    __tx_macro_sfu_rsqrt_fp32<1>(inverse_address, mean_address);
+    configure_macro<0>(1);
+    __tx_macro_sfu_rsqrt_fp32<0>(inverse_address, mean_address);
     dayan_wait_macro();
     dayan_cache_invalidate(scalar, 64);
     const float inverse = publish_mode >= 3U ? scalar[0] : scalar[2];
@@ -157,7 +157,8 @@ __kernel__ void normalization_probe(const float *input, float *trace,
     dayan_cache_flush(task_trace + kScalarOffset, 64);
 }
 
-DAYAN_KERNEL_LOCKED_TASK_DESC(normalization_probe, 0, 0, 1024);
+DAYAN_KERNEL_LOCKED_TASK_DESC(normalization_probe, 0, 0, 32 * 1024,
+                              1, 0, 0, 1);
 
 #if !defined(__DAYAN_DEVICE__)
 

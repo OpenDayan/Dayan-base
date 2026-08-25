@@ -17,6 +17,10 @@
 #define DAYAN_SERVER_BACKLOG 64U
 #define DAYAN_SERVER_DEFAULT_RESIDENT (64U * 1024U * 1024U)
 #define DAYAN_SERVER_DEFAULT_PROCS_PER_HART 16U
+#define DAYAN_SERVER_DEFAULT_LSU_TCSRS_PER_HART 16U
+#define DAYAN_SERVER_DEFAULT_MAT_TCSRS_PER_HART 16U
+#define DAYAN_SERVER_DEFAULT_VEC_TCSRS_PER_HART 4U
+#define DAYAN_SERVER_DEFAULT_MACRO_TCSRS_PER_HART 16U
 #define DAYAN_SERVER_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 #define DAYAN_SERVER_MAX_PROFILE_BYTES (64U * 1024U * 1024U)
 #define DAYAN_SERVER_SHUTDOWN_RPC_TIMEOUT_MS 1000U
@@ -362,6 +366,17 @@ static void server_device_trap(void *context, uint32_t cluster,
     }
 }
 
+static void server_device_tensor_interrupt(
+    void *context, uint32_t cluster, uint32_t core,
+    const struct tensor_interrupt_record *record)
+{
+    dayan_server_t *server = context;
+
+    if (server && server->service_tensor_interrupt)
+        server->service_tensor_interrupt(server->service_callback_context,
+                                         cluster, core, record);
+}
+
 static void server_device_proc_exit(void *context, uint32_t cluster,
                                     uint32_t core, uint32_t proc,
                                     int64_t result, uint64_t cookie)
@@ -434,6 +449,14 @@ void dayan_server_options_init(dayan_server_options_t *options)
     options->socket_path = NPU_DEFAULT_SERVER_SOCKET;
     options->resident_limit_per_core = DAYAN_SERVER_DEFAULT_RESIDENT;
     options->max_procs_per_hart = DAYAN_SERVER_DEFAULT_PROCS_PER_HART;
+    options->lsu_tcsr_count_per_hart =
+        DAYAN_SERVER_DEFAULT_LSU_TCSRS_PER_HART;
+    options->mat_tcsr_count_per_hart =
+        DAYAN_SERVER_DEFAULT_MAT_TCSRS_PER_HART;
+    options->vec_tcsr_count_per_hart =
+        DAYAN_SERVER_DEFAULT_VEC_TCSRS_PER_HART;
+    options->macro_tcsr_count_per_hart =
+        DAYAN_SERVER_DEFAULT_MACRO_TCSRS_PER_HART;
     npu_hal_options_init(&options->hal);
     npu_service_options_init(&options->service);
 }
@@ -647,6 +670,14 @@ int dayan_server_create(dayan_server_t **server_out,
     if (options->version != DAYAN_SERVER_OPTIONS_VERSION ||
         !options->max_procs_per_hart ||
         options->max_procs_per_hart > NPU_PACKAGE_HART_MAX_PROCS ||
+        !options->lsu_tcsr_count_per_hart ||
+        options->lsu_tcsr_count_per_hart > 64U ||
+        !options->mat_tcsr_count_per_hart ||
+        options->mat_tcsr_count_per_hart > 64U ||
+        !options->vec_tcsr_count_per_hart ||
+        options->vec_tcsr_count_per_hart > 64U ||
+        !options->macro_tcsr_count_per_hart ||
+        options->macro_tcsr_count_per_hart > 64U ||
         !options->socket_path ||
         !*options->socket_path)
         return -EINVAL;
@@ -656,11 +687,14 @@ int dayan_server_create(dayan_server_t **server_out,
     server->listen_fd = -1;
     server->options = *options;
     server->service_trap = options->service.trap;
+    server->service_tensor_interrupt = options->service.tensor_interrupt;
     server->service_proc_exit = options->service.proc_exit;
     server->service_profile = options->service.profile;
     server->service_callback_context = options->service.callback_context;
     server->options.service.output = server_device_output;
     server->options.service.trap = server_device_trap;
+    server->options.service.tensor_interrupt =
+        server_device_tensor_interrupt;
     server->options.service.proc_exit = server_device_proc_exit;
     server->options.service.profile = server_device_profile;
     server->options.service.callback_context = server;
@@ -1990,7 +2024,11 @@ static int dispatch_control(dayan_server_t *server,
             info->supported_task_modes =
                 kernel->metadata->supported_task_modes;
             info->max_tasks_per_core = kernel->metadata->max_tasks_per_core;
-            info->max_child_procs = kernel->metadata->max_child_procs;
+            info->max_child_threads = kernel->metadata->max_child_threads;
+            info->lsu_tcsr_count = kernel->metadata->lsu_tcsr_count;
+            info->mat_tcsr_count = kernel->metadata->mat_tcsr_count;
+            info->vec_tcsr_count = kernel->metadata->vec_tcsr_count;
+            info->macro_tcsr_count = kernel->metadata->macro_tcsr_count;
             info->argument_count = kernel->metadata->argument_count;
             info->sync_resource_count = kernel->metadata->sync_count;
             info->flags = kernel->metadata->flags;

@@ -17,6 +17,7 @@
 #include "package.h"
 #include "protocol.h"
 #include "server.h"
+#include "tensor_context.h"
 
 struct server_session;
 struct server_context;
@@ -51,6 +52,18 @@ struct server_core_slot {
     uint64_t atomic_cache_capacity;
     uint64_t uram_memory;
     uint64_t uram_capacity;
+    uint64_t lsu_tcsr_used;
+    uint64_t mat_tcsr_used;
+    uint64_t vec_tcsr_used;
+    uint64_t macro_tcsr_used;
+};
+
+struct server_proc_resources {
+    struct dayan_tcsr_range lsu;
+    struct dayan_tcsr_range mat;
+    struct dayan_tcsr_range vec;
+    struct dayan_tcsr_range macro;
+    uint64_t tensor_context;
 };
 
 struct server_package_cache {
@@ -117,6 +130,7 @@ struct server_kernel {
 struct server_invocation {
     npu_service_launch_t *launch;
     npu_hal_allocation_t *uram_allocation;
+    struct server_proc_resources resources;
     size_t slot_index;
     uint64_t resident;
     uint32_t proc_id;
@@ -249,6 +263,7 @@ struct dayan_server {
     struct server_session *sessions;
     struct server_package_cache *packages;
     npu_service_trap_fn service_trap;
+    npu_service_tensor_interrupt_fn service_tensor_interrupt;
     npu_service_proc_exit_fn service_proc_exit;
     npu_service_profile_fn service_profile;
     void *service_callback_context;
