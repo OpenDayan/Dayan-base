@@ -254,7 +254,6 @@ struct MatmulState {
     uint64_t uram_base;
     LocalBuffer a[Constants::kSlices];
     LocalBuffer b[Constants::kSlices];
-    dayan_resource_t load_issued[2];
     dayan_resource_t mat_turn[2];
     dayan_resource_t c[Constants::kSlices];
     uint64_t generation_count;
@@ -470,7 +469,6 @@ static inline void issue_dram_load(LocalBuffer *local,
                                    uint32_t local_consumers,
                                    bool remote_active, uint64_t dram,
                                    uint64_t major_bytes,
-                                   dayan_resource_t *load_issued,
                                    int *configured_dim0)
 {
     if (local_consumers)
@@ -479,8 +477,6 @@ static inline void issue_dram_load(LocalBuffer *local,
         begin_resource(&remote->resource, 1U);
 
     uint64_t uram = local->uram;
-    bool first_command = true;
-
     while (major_bytes) {
         uint64_t handled_bytes = major_bytes & ~0x3fULL;
         const uint64_t remaining_bytes = major_bytes & 0x3fULL;
@@ -501,9 +497,6 @@ static inline void issue_dram_load(LocalBuffer *local,
             LoadGroup * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(
                 request_size - 1U);
         __tx_lsu_dma_d2u<LoadGroup>((long)uram, (long)dram);
-        if (first_command && load_issued)
-            require_status(dayan_resource_produce(load_issued));
-        first_command = false;
         uram += handled_bytes;
         dram += handled_bytes;
         major_bytes -= handled_bytes;
@@ -540,13 +533,8 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
 {
     using Layout = UramLayout<ProducerLoadsA>;
 
-    const bool signal_copy =
-        generation_has_local_work<ProducerLoadsA>(state, tile_m, tile_n);
     const int real_k = k_for_tile(state, tile_k);
-    bool issued = false;
 
-    if (signal_copy)
-        begin_resource(&state->load_issued[generation & 1U], 1U);
     if (ProducerLoadsA) {
         const int real_rows = rows_for_tile(
             state, tile_m, state->row_lane);
@@ -576,7 +564,6 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
         issue_dram_load<LoadGroup>(
             local, shared_buffer, (uint32_t)local_users, peer_users > 0,
             a_dram, (uint64_t)real_k * sizeof(uint16_t),
-            signal_copy ? &state->load_issued[generation & 1U] : nullptr,
             &configured->dim0);
         return;
     }
@@ -606,16 +593,10 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
         const uint64_t a_dram =
             state->a_base + global_row * state->a_stride +
             (uint64_t)tile_k * Constants::kTileK * sizeof(uint16_t);
-        dayan_resource_t *load_issued =
-            !issued && signal_copy ?
-                &state->load_issued[generation & 1U] : nullptr;
-
         issue_dram_load<LoadGroup>(
             local, shared_buffer, local_active ? 1U : 0U, peer_active,
-            a_dram, (uint64_t)real_k * sizeof(uint16_t), load_issued,
+            a_dram, (uint64_t)real_k * sizeof(uint16_t),
             &configured->dim0);
-        if (load_issued)
-            issued = true;
     }
 }
 
@@ -626,13 +607,8 @@ static void dram_load_b(MatmulState *state, uint64_t generation,
 {
     using Layout = UramLayout<ProducerLoadsA>;
 
-    const bool signal_copy =
-        generation_has_local_work<ProducerLoadsA>(state, tile_m, tile_n);
     const int real_k = k_for_tile(state, tile_k);
-    bool issued = false;
 
-    if (signal_copy)
-        begin_resource(&state->load_issued[generation & 1U], 1U);
     if (ProducerLoadsA) {
         const int local_rows = rows_for_tile(
             state, tile_m, state->row_lane);
@@ -659,17 +635,11 @@ static void dram_load_b(MatmulState *state, uint64_t generation,
             const uint64_t bt_dram =
                 state->bt_base + global_column * state->bt_stride +
                 (uint64_t)tile_k * Constants::kTileK * sizeof(uint16_t);
-            dayan_resource_t *load_issued =
-                !issued && signal_copy ?
-                    &state->load_issued[generation & 1U] : nullptr;
-
             issue_dram_load<LoadGroup>(
                 local, shared_buffer, local_active ? 1U : 0U,
                 peer_active, bt_dram,
-                (uint64_t)real_k * sizeof(uint16_t), load_issued,
+                (uint64_t)real_k * sizeof(uint16_t),
                 &configured->dim0);
-            if (load_issued)
-                issued = true;
         }
         return;
     }
@@ -701,7 +671,6 @@ static void dram_load_b(MatmulState *state, uint64_t generation,
     issue_dram_load<LoadGroup>(
         local, shared_buffer, (uint32_t)local_users, peer_users > 0,
         bt_dram, (uint64_t)real_k * sizeof(uint16_t),
-        signal_copy ? &state->load_issued[generation & 1U] : nullptr,
         &configured->dim0);
 }
 
@@ -857,11 +826,6 @@ static void remote_copy(void *argument)
         if (!generation_has_local_work<ProducerLoadsA>(
                 state, tile_m, tile_n))
             continue;
-        dayan_resource_t *load_issued =
-            &state->load_issued[generation & 1U];
-
-        require_status(dayan_resource_wait_ready(load_issued));
-        require_status(dayan_resource_consume(load_issued));
         if (copies_a) {
             copy_a<ProducerLoadsA, Constants::kRemoteCopy>(
                 state, generation, tile_m, tile_n, &configured.dim1);
@@ -1226,9 +1190,6 @@ static int run_pipeline(const MatmulBf16Config *config,
         state.b[index].uram = state.uram_base + Layout::b_base(index);
     }
     for (int index = 0; index < 2; ++index) {
-        status = dayan_resource_init(&state.load_issued[index]);
-        if (status < 0)
-            return status;
         status = dayan_resource_init(&state.mat_turn[index]);
         if (status < 0)
             return status;
