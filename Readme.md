@@ -273,20 +273,20 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 有符号 status。当前 opcode 1–8 分别为字符串输出、清空输出缓冲、申请堆 region、
 归还堆 region、异常报告、张量中断报告、root proc 退出通知和 profile 满缓冲上报。
 异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
-稳定的 320-byte `struct trap_record`，后者直接指向 184-byte
+稳定的 312-byte `struct trap_record`，后者直接指向 176-byte
 `struct tensor_interrupt_record`。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
 
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
-232-byte v5 `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+224-byte `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
 0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
 base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
 回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_threads` 个静态 slot；
 子孙创建、退出与 join 不再经过 Host。每个 proc 退出都 flush/CLEAR 自己的输出；只有
-Host root 通过 40-byte `RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。随后
+Host root 通过 32-byte `RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。随后
 scheduler 在自己的栈上调用 cleanup，把描述符从 `RUNNING` 更新为 `EXITED` 或
 `FAILED`。因此 Host 必须保留描述符直到终态，不能只把 create response 当作执行完成。
 
@@ -307,7 +307,7 @@ Host 覆盖动态模块前，先通过 `RPC_DCACHE_FLUSH` (`0x0105`) 让所有�
 invalidate 并复制回调用者。Host-owned 控制描述符（proc create、PS、kill、profile
 config 和 D-cache flush）
 从 64-byte 对齐地址开始，allocation 大小也向上取整到 64-byte 粒度，避免与其它对象共享
-cache line；描述符的 wire `size` 仍是结构体实际字节数。Device 在解析前 invalidate，
+cache line；opcode 唯一确定描述符布局和长度。Device 在解析前 invalidate，
 请求字段在生命周期内保持只读，只在 RPC 响应或 proc family 终态写入结果和 state，并在
 通知 Host 前 clean。Host 读取到响应或终态后才能释放对应 allocation；提交前失败可立即
 释放，一旦尝试发布命令却未收到匹配响应，allocation 不再进入分配池，只在 HAL 关闭时

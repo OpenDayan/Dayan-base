@@ -9,8 +9,6 @@
 #include <stdint.h>
 
 struct alignas(64) TensorInterruptResult {
-    uint32_t version;
-    uint32_t size;
     uint32_t before;
     uint32_t after;
     uint64_t reserved[6];
@@ -24,8 +22,6 @@ __kernel__ void tensor_interrupt_probe(TensorInterruptResult *result)
     if (!result)
         dayan_thread_exit(-22);
 
-    result->version = 1;
-    result->size = sizeof(*result);
     result->before = 0x13579bdfU;
     dayan_cache_flush(result, sizeof(*result));
 
@@ -137,8 +133,7 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = download(stream, &result, buffer, sizeof(result));
     if (status == 0 &&
-        (result.version != 1U || result.size != sizeof(result) ||
-         result.before != 0x13579bdfU || result.after != 0x2468ace0U))
+        (result.before != 0x13579bdfU || result.after != 0x2468ace0U))
         status = -1;
 
     std::printf("[host] interrupt probe before=0x%08x after=0x%08x\n",

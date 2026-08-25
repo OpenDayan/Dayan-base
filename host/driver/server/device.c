@@ -918,9 +918,7 @@ queue_fail:
 static int launch_request_valid(const npu_service_launch_t *launch,
                                 const struct rpc_proc_create_request *request)
 {
-    return request->version == RPC_PROC_CREATE_VERSION &&
-           request->size == sizeof(*request) &&
-           request->hart_id == launch->target.core &&
+    return request->hart_id == launch->target.core &&
            request->cookie == launch->cookie &&
            request->task_mode == launch->task_mode &&
            !memcmp(request->task_id, launch->task_id,
@@ -971,12 +969,12 @@ static void submit_launch(npu_service_launch_t *launch)
     if (status == 0 && !launch_request_valid(launch, &request)) {
         fprintf(stderr,
                 "dayan_server: PROC_CREATE request mismatch: hart=%u "
-                "address=0x%llx version=%u size=%u request_hart=%u "
+                "address=0x%llx request_hart=%u "
                 "cookie=%llu expected_cookie=%llu state=%u name='%.*s' "
                 "expected_name='%s'\n",
                 launch->target.core,
                 (unsigned long long)launch->request_address,
-                request.version, request.size, request.hart_id,
+                request.hart_id,
                 (unsigned long long)request.cookie,
                 (unsigned long long)launch->cookie, request.state,
                 (int)sizeof(request.name), request.name, launch->name);
@@ -1074,8 +1072,6 @@ int npu_service_launch(npu_service_device_t *device,
         goto fail;
     }
     memset(&request, 0, sizeof(request));
-    request.version = RPC_PROC_CREATE_VERSION;
-    request.size = sizeof(request);
     request.state = RPC_PROC_SUBMITTED;
     request.entry = desc->entry;
     request.stack_size = desc->stack_size;
@@ -1355,8 +1351,6 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
         goto out;
     }
     memset(&snapshot, 0, sizeof(snapshot));
-    snapshot.version = RPC_PROC_PS_VERSION;
-    snapshot.size = sizeof(snapshot);
     snapshot.capacity = RPC_PROC_PS_MAX_RECORDS;
     snapshot.status = -EIO;
     status = npu_hal_memory_write(device->hal, allocation, target, 0,
@@ -1372,9 +1366,7 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
                                  0, sizeof(snapshot));
     if (status < 0)
         goto out;
-    if (snapshot.version != RPC_PROC_PS_VERSION ||
-        snapshot.size != sizeof(snapshot) ||
-        snapshot.capacity != RPC_PROC_PS_MAX_RECORDS || snapshot.flags ||
+    if (snapshot.capacity != RPC_PROC_PS_MAX_RECORDS || snapshot.flags ||
         snapshot.reserved || snapshot.hart_id != target.core ||
         snapshot.count > RPC_PROC_PS_MAX_RECORDS) {
         status = -EPROTO;
@@ -1440,8 +1432,6 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
         goto out;
     }
     memset(&result, 0, sizeof(result));
-    result.version = RPC_PROC_KILL_ALL_VERSION;
-    result.size = sizeof(result);
     result.status = -EIO;
     status = npu_hal_memory_write(device->hal, allocation, target, 0,
                                   &result, sizeof(result));
@@ -1456,8 +1446,7 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
                                  0, sizeof(result));
     if (status < 0)
         goto out;
-    if (result.version != RPC_PROC_KILL_ALL_VERSION ||
-        result.size != sizeof(result) || result.hart_id != target.core ||
+    if (result.hart_id != target.core ||
         result.flags || result.reserved) {
         status = -EPROTO;
         goto out;

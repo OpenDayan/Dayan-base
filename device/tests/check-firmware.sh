@@ -146,6 +146,10 @@ for encoding in 0000220b 0000420b 0000620b 0000820b; do
     grep -Fq "$encoding" <<<"$dapi_raw" ||
         fail "Produce instruction $encoding is missing"
 done
+for encoding in 0000250b 0000450b 0000650b 0000850b; do
+    grep -Fq "$encoding" <<<"$dapi_raw" ||
+        fail "encoded-token Produce instruction $encoding is missing"
+done
 grep -Fq '0000150b' <<<"$dapi_raw" ||
     fail "global Produce pop instruction encoding changed"
 if grep -Eq '(^|[[:space:]])fence([[:space:]]|$)' <<<"$dapi_dump" ||

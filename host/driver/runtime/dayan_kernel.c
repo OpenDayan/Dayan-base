@@ -65,8 +65,6 @@ int npu_kernel_descriptor_create(
     if (!object || !object_size || !entry_symbol || !*entry_symbol ||
         argument_count > NPU_PACKAGE_MAX_ARGS ||
         (argument_count && !arguments) || !resources ||
-        resources->version != DAYAN_KERNEL_RESOURCE_DESC_VERSION ||
-        resources->size != sizeof(*resources) ||
         resources->max_tasks_per_core > 4U ||
         resources->max_child_threads > DAYAN_KERNEL_MAX_CHILD_THREADS ||
         (resources->flags & ~DAYAN_KERNEL_RESOURCE_FLAGS_ALL) ||

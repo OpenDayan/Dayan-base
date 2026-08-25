@@ -4,12 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define TENSOR_INTERRUPT_RECORD_VERSION 1U
 #define TENSOR_INTERRUPT_RECENT_COUNT   16U
 
 struct tensor_interrupt_record {
-    uint32_t version;
-    uint32_t size;
     uint32_t hart_id;
     uint32_t thread_id;
     uint32_t thread_type;
@@ -28,7 +25,7 @@ struct tensor_interrupt_state {
     struct tensor_interrupt_record record;
 };
 
-_Static_assert(sizeof(struct tensor_interrupt_record) == 184,
+_Static_assert(sizeof(struct tensor_interrupt_record) == 176,
                "tensor interrupt report ABI");
 
 void tensor_interrupt_handle(void);

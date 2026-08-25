@@ -7,9 +7,6 @@
 #include "npu_package.h"
 #include "npu_runtime.h"
 
-#ifndef DAYAN_KERNEL_RESOURCE_DESC_VERSION
-#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 3U
-#endif
 #ifndef DAYAN_HART_MAX_PROCS
 #define DAYAN_HART_MAX_PROCS 16U
 #endif
@@ -30,8 +27,6 @@
 #ifndef DAYAN_KERNEL_RESOURCE_DESC_DEFINED
 #define DAYAN_KERNEL_RESOURCE_DESC_DEFINED
 typedef struct dayan_kernel_resource_desc {
-    uint32_t version;
-    uint32_t size;
     uint16_t max_child_threads;
     uint16_t max_tasks_per_core;
     uint32_t flags;
@@ -84,8 +79,6 @@ typedef struct dayan_kernel_resource_desc {
     DAYAN_KERNEL_DESC_LINKAGE __device__                                      \
     __attribute__((visibility("default"), section(".dayan.kernel_desc")))     \
     const dayan_kernel_resource_desc_t kernel##__desc = {                     \
-        DAYAN_KERNEL_RESOURCE_DESC_VERSION,                                   \
-        sizeof(dayan_kernel_resource_desc_t),                                 \
         (child_threads), (tasks), (resource_flags),                           \
         (lsu_tcsr), (mat_tcsr), (vec_tcsr), (macro_tcsr), 0U,                \
         (atomic_bytes), (uram_bytes)                                           \
@@ -172,11 +165,11 @@ static inline uint64_t npu_kernel_pack_f64(double value)
 }
 
 #ifdef __cplusplus
-static_assert(sizeof(dayan_kernel_resource_desc_t) == 40,
+static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
               "Dayan kernel resource descriptor ABI");
-static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 12,
+static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 4,
               "Dayan kernel resource flags offset");
-static_assert(offsetof(dayan_kernel_resource_desc_t, max_tasks_per_core) == 10,
+static_assert(offsetof(dayan_kernel_resource_desc_t, max_tasks_per_core) == 2,
               "Dayan kernel task residency offset");
 static_assert(sizeof(npu_kernel_launch_attrs_t) == 80,
               "Dayan kernel launch attributes ABI");
@@ -186,11 +179,11 @@ static_assert(offsetof(npu_kernel_launch_attrs_t, event_out) == 72,
               "Dayan kernel launch event offset");
 }
 #else
-_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 40,
+_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
                "Dayan kernel resource descriptor ABI");
-_Static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 12,
+_Static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 4,
                "Dayan kernel resource flags offset");
-_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_tasks_per_core) == 10,
+_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_tasks_per_core) == 2,
                "Dayan kernel task residency offset");
 _Static_assert(sizeof(npu_kernel_launch_attrs_t) == 80,
                "Dayan kernel launch attributes ABI");

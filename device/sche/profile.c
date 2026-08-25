@@ -154,8 +154,7 @@ static int profile_response_valid(
     const struct profile_state *state,
     const struct rpc_profile_flush_response *response)
 {
-    return response->version == RPC_PROFILE_VERSION &&
-           response->size == sizeof(*response) && !response->flags &&
+    return !response->flags &&
            response->status == 0 &&
            response->generation == state->generation &&
            response->continue_profile <= 1U;
@@ -180,16 +179,12 @@ static void profile_main(void)
         state->flushing = 1;
         platform_cache_flush(state->buffer, state->count);
         memset(&request, 0, sizeof(request));
-        request.version = RPC_PROFILE_VERSION;
-        request.size = sizeof(request);
         request.hart_id = (uint32_t)platform_hart_id();
         request.buffer_addr = (uintptr_t)state->buffer;
         request.count = state->count;
         request.capacity = state->capacity;
         request.generation = state->generation;
         memset(&response, 0, sizeof(response));
-        response.version = RPC_PROFILE_VERSION;
-        response.size = sizeof(response);
         response.generation = state->generation;
         response.status = -EIO;
         status = rpc_profile_flush(&request, &response);
@@ -262,9 +257,8 @@ int profile_configure(struct rpc_profile_config *config)
     struct profile_state *state = profile_self();
     int status;
 
-    if (!config || config->version != RPC_PROFILE_VERSION ||
-        config->size != sizeof(*config) || config->flags ||
-        config->hart_id != platform_hart_id() || config->reserved)
+    if (!config || config->flags || config->hart_id != platform_hart_id() ||
+        config->reserved)
         return -EINVAL;
     config->count = 0;
     if (config->command == RPC_PROFILE_START)

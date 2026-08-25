@@ -266,8 +266,7 @@ static int service_trap(npu_service_device_t *device, npu_hal_core_t core,
                               sizeof(record));
     if (status < 0)
         return status;
-    if (record.version != TRAP_RECORD_VERSION ||
-        record.size != sizeof(record) || record.hart_id != core.core)
+    if (record.hart_id != core.core)
         return -EPROTO;
     device->options.trap(device->options.callback_context, core.cluster,
                          core.core, &record);
@@ -284,8 +283,7 @@ static int service_tensor_interrupt(npu_service_device_t *device,
                               sizeof(record));
     if (status < 0)
         return status;
-    if (record.version != TENSOR_INTERRUPT_RECORD_VERSION ||
-        record.size != sizeof(record) || record.hart_id != core.core ||
+    if (record.hart_id != core.core ||
         record.recent_count > TENSOR_INTERRUPT_RECENT_COUNT)
         return -EPROTO;
     device->options.tensor_interrupt(device->options.callback_context,
@@ -311,8 +309,7 @@ static int service_proc_exit(npu_service_device_t *device,
                               sizeof(request));
     if (status < 0)
         goto finish;
-    if (request.version != RPC_PROC_EXIT_VERSION ||
-        request.size != sizeof(request) || request.hart_id != core.core ||
+    if (request.hart_id != core.core ||
         !request.proc_id || request.parent_proc_id ||
         request.flags != RPC_PROC_EXIT_ROOT) {
         status = -EPROTO;
@@ -350,8 +347,7 @@ static int service_profile_flush(npu_service_device_t *device,
                               sizeof(request));
     if (status < 0)
         goto finish;
-    if (request.version != RPC_PROFILE_VERSION ||
-        request.size != sizeof(request) || request.hart_id != core.core ||
+    if (request.hart_id != core.core ||
         request.flags || !request.count ||
         request.count > request.capacity || !request.generation) {
         status = -EPROTO;
@@ -359,8 +355,6 @@ static int service_profile_flush(npu_service_device_t *device,
     }
 
     memset(&response, 0, sizeof(response));
-    response.version = RPC_PROFILE_VERSION;
-    response.size = sizeof(response);
     response.generation = request.generation;
     response.status = npu_service_profile_copy(
         device, core, request.generation, request.buffer_addr,

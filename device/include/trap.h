@@ -41,8 +41,6 @@
 #define TRAP_FRAME_RESERVED  296
 #define TRAP_FRAME_SIZE      304
 
-#define TRAP_RECORD_VERSION 1
-
 #ifndef __ASSEMBLER__
 
 #include <stddef.h>
@@ -59,8 +57,6 @@ struct trap_frame {
 };
 
 struct trap_record {
-    uint32_t version;
-    uint32_t size;
     uint32_t hart_id;
     uint32_t thread_id;
     uint32_t thread_type;
@@ -91,13 +87,13 @@ _Static_assert(sizeof(struct trap_frame) == TRAP_FRAME_SIZE,
                "trap frame size");
 _Static_assert((TRAP_FRAME_SIZE & 15) == 0,
                "trap frame must preserve stack alignment");
-_Static_assert(sizeof(struct trap_record) == 320,
+_Static_assert(sizeof(struct trap_record) == 312,
                "Host trap record ABI must stay fixed");
-_Static_assert(offsetof(struct trap_record, hart_id) == 8,
+_Static_assert(offsetof(struct trap_record, hart_id) == 0,
                "trap record hart offset");
-_Static_assert(offsetof(struct trap_record, mstatus) == 24,
+_Static_assert(offsetof(struct trap_record, mstatus) == 16,
                "trap record CSR offset");
-_Static_assert(offsetof(struct trap_record, x) == 64,
+_Static_assert(offsetof(struct trap_record, x) == 56,
                "trap record GPR offset");
 
 _Noreturn void trap_handle(const struct trap_frame *frame);

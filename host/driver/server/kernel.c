@@ -1040,8 +1040,6 @@ static int flush_dcache_core(npu_service_device_t *runtime,
         goto out;
     }
     memset(&request, 0, sizeof(request));
-    request.version = RPC_DCACHE_FLUSH_VERSION;
-    request.size = sizeof(request);
     request.hart_id = core.core;
     request.address = address;
     request.length = length;
@@ -1059,8 +1057,7 @@ static int flush_dcache_core(npu_service_device_t *runtime,
                                  sizeof(request));
     if (status < 0)
         goto out;
-    if (request.version != RPC_DCACHE_FLUSH_VERSION ||
-        request.size != sizeof(request) || request.hart_id != core.core ||
+    if (request.hart_id != core.core ||
         request.flags || request.address != address ||
         request.length != length || request.reserved) {
         status = -EPROTO;

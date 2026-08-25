@@ -10,7 +10,6 @@
 /* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
 register void *shared __asm__("gp");
 
-#define DAYAN_KERNEL_RESOURCE_DESC_VERSION 3U
 #define DAYAN_HART_MAX_PROCS                16U
 #define DAYAN_KERNEL_MAX_CHILD_THREADS      (DAYAN_HART_MAX_PROCS - 1U)
 #define DAYAN_THREAD_NAME_SIZE              16U
@@ -23,8 +22,6 @@ register void *shared __asm__("gp");
 #define DAYAN_KERNEL_RESOURCE_DESC_DEFINED
 /* Constant Device symbol named <kernel>__desc; consumed by dycc/Runtime. */
 typedef struct dayan_kernel_resource_desc {
-    uint32_t version;
-    uint32_t size;
     uint16_t max_child_threads;
     uint16_t max_tasks_per_core;
     uint32_t flags;
@@ -40,11 +37,7 @@ typedef struct dayan_kernel_resource_desc {
 
 typedef void (*dayan_thread_entry_t)(void *argument);
 
-#define DAYAN_THREAD_RESOURCES_VERSION 1U
-
 typedef struct dayan_thread_resources {
-    uint32_t version;
-    uint32_t size;
     uint8_t lsu_tcsr_count;
     uint8_t mat_tcsr_count;
     uint8_t vec_tcsr_count;
@@ -139,6 +132,15 @@ DAYAN_API int dayan_resource_alloc(dayan_resource_t *resource,
                                    uint32_t consumer_count);
 DAYAN_API int dayan_resource_produce(dayan_resource_t *resource);
 DAYAN_API int dayan_resource_consume(dayan_resource_t *resource);
+/* Nonblocking: apply the resource transition when prior unit work completes. */
+DAYAN_API int dayan_resource_wait_lsu_produce(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_lsu_consume(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_mat_produce(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_mat_consume(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_vec_produce(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_vec_consume(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_macro_produce(dayan_resource_t *resource);
+DAYAN_API int dayan_resource_wait_macro_consume(dayan_resource_t *resource);
 DAYAN_API int dayan_resource_wait_ready(dayan_resource_t *resource);
 DAYAN_API int dayan_resource_wait_free(dayan_resource_t *resource);
 
@@ -149,6 +151,23 @@ DAYAN_API int dayan_shared_resource_alloc(dayan_shared_resource_t *resource,
                                           uint32_t consumer_count);
 DAYAN_API int dayan_shared_resource_produce(dayan_shared_resource_t *resource);
 DAYAN_API int dayan_shared_resource_consume(dayan_shared_resource_t *resource);
+/* The shared object must remain live until the deferred transition runs. */
+DAYAN_API int dayan_shared_resource_wait_lsu_produce(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_lsu_consume(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_mat_produce(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_mat_consume(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_vec_produce(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_vec_consume(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_macro_produce(
+    dayan_shared_resource_t *resource);
+DAYAN_API int dayan_shared_resource_wait_macro_consume(
+    dayan_shared_resource_t *resource);
 DAYAN_API int dayan_shared_resource_wait_ready(
     dayan_shared_resource_t *resource);
 DAYAN_API int dayan_shared_resource_wait_free(

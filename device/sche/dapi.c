@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "errno.h"
+#include "platform.h"
 #include "sche.h"
 #include "string.h"
 
@@ -18,19 +19,19 @@ _Static_assert(offsetof(dayan_shared_resource_t, counts) == 0 &&
                "dayan shared resource ABI layout changed");
 _Static_assert(sizeof(dayan_cluster_barrier_t) == 16,
                "dayan cluster barrier ABI must stay fixed");
-_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 40,
+_Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
                "dayan kernel resource descriptor ABI must stay fixed");
-_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_child_threads) == 8 &&
+_Static_assert(offsetof(dayan_kernel_resource_desc_t, max_child_threads) == 0 &&
                    offsetof(dayan_kernel_resource_desc_t,
-                            max_tasks_per_core) == 10 &&
-                   offsetof(dayan_kernel_resource_desc_t, flags) == 12 &&
+                            max_tasks_per_core) == 2 &&
+                   offsetof(dayan_kernel_resource_desc_t, flags) == 4 &&
                    offsetof(dayan_kernel_resource_desc_t,
-                            lsu_tcsr_count) == 16 &&
+                            lsu_tcsr_count) == 8 &&
                    offsetof(dayan_kernel_resource_desc_t,
-                            atomic_cache_size) == 24 &&
-                   offsetof(dayan_kernel_resource_desc_t, uram_size) == 32,
+                            atomic_cache_size) == 16 &&
+                   offsetof(dayan_kernel_resource_desc_t, uram_size) == 24,
                "dayan kernel resource descriptor layout changed");
-_Static_assert(sizeof(dayan_thread_resources_t) == 16,
+_Static_assert(sizeof(dayan_thread_resources_t) == 8,
                "dayan Thread resource ABI must stay fixed");
 
 /*
@@ -51,6 +52,58 @@ static inline uintptr_t produce_pop(void)
                      :
                      : "memory");
     return a0;
+}
+
+#define PRODUCE_TOKEN_ADDRESS_MASK 0x0000ffffffffffffULL
+#define PRODUCE_TOKEN_EVENT_SHIFT  48U
+
+enum produce_token_event {
+    PRODUCE_TOKEN_WAKE_THREAD = 0,
+    PRODUCE_TOKEN_RESOURCE_PRODUCE = 1,
+    PRODUCE_TOKEN_RESOURCE_CONSUME = 2,
+    PRODUCE_TOKEN_SHARED_RESOURCE_PRODUCE = 3,
+    PRODUCE_TOKEN_SHARED_RESOURCE_CONSUME = 4,
+};
+
+enum produce_unit {
+    PRODUCE_UNIT_LSU = 1,
+    PRODUCE_UNIT_MAT = 2,
+    PRODUCE_UNIT_VEC = 3,
+    PRODUCE_UNIT_MACRO = 4,
+};
+
+static inline void produce_push(uint32_t unit, uintptr_t token)
+{
+    register uintptr_t a0 __asm__("a0") = token;
+
+    switch (unit) {
+    case PRODUCE_UNIT_LSU:
+        __asm__ volatile(".insn 4, 0x0000250b"
+                         :
+                         : "r"(a0)
+                         : "memory");
+        break;
+    case PRODUCE_UNIT_MAT:
+        __asm__ volatile(".insn 4, 0x0000450b"
+                         :
+                         : "r"(a0)
+                         : "memory");
+        break;
+    case PRODUCE_UNIT_VEC:
+        __asm__ volatile(".insn 4, 0x0000650b"
+                         :
+                         : "r"(a0)
+                         : "memory");
+        break;
+    case PRODUCE_UNIT_MACRO:
+        __asm__ volatile(".insn 4, 0x0000850b"
+                         :
+                         : "r"(a0)
+                         : "memory");
+        break;
+    default:
+        platform_halt();
+    }
 }
 
 static inline void resource_lock(dayan_resource_t *resource)
@@ -160,6 +213,23 @@ static inline int shared_resource_valid(
                               _Alignof(dayan_shared_resource_t));
 }
 
+static int resource_wait_issue(void *resource, size_t alignment,
+                               uint16_t event, uint32_t unit,
+                               int shared_resource)
+{
+    uintptr_t address = (uintptr_t)resource;
+    uintptr_t token;
+
+    if (!resource || address & ~PRODUCE_TOKEN_ADDRESS_MASK ||
+        (!shared_resource && address & (alignment - 1U)) ||
+        (shared_resource &&
+         !shared_resource_valid((dayan_shared_resource_t *)resource)))
+        return -EINVAL;
+    token = address | ((uintptr_t)event << PRODUCE_TOKEN_EVENT_SHIFT);
+    produce_push(unit, token);
+    return 0;
+}
+
 static inline int shared_resource_ready(struct proc *proc, void *arg)
 {
     (void)proc;
@@ -182,8 +252,6 @@ void dayan_thread_resources_init(dayan_thread_resources_t *resources)
     if (!resources)
         return;
     memset(resources, 0, sizeof(*resources));
-    resources->version = DAYAN_THREAD_RESOURCES_VERSION;
-    resources->size = sizeof(*resources);
 }
 
 int dayan_create_thread(const char *name, dayan_thread_entry_t entry,
@@ -338,12 +406,79 @@ void dayan_wait_macro(void)
 
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));
 
-void proc_scan_produce(void)
+#define DEFINE_RESOURCE_WAIT_APIS(unit_name, unit_id)                         \
+    int dayan_resource_wait_##unit_name##_produce(                            \
+        dayan_resource_t *resource)                                           \
+    {                                                                         \
+        return resource_wait_issue(                                           \
+            resource, _Alignof(dayan_resource_t),                             \
+            PRODUCE_TOKEN_RESOURCE_PRODUCE, unit_id, 0);                      \
+    }                                                                         \
+                                                                              \
+    int dayan_resource_wait_##unit_name##_consume(                            \
+        dayan_resource_t *resource)                                           \
+    {                                                                         \
+        return resource_wait_issue(                                           \
+            resource, _Alignof(dayan_resource_t),                             \
+            PRODUCE_TOKEN_RESOURCE_CONSUME, unit_id, 0);                      \
+    }                                                                         \
+                                                                              \
+    int dayan_shared_resource_wait_##unit_name##_produce(                     \
+        dayan_shared_resource_t *resource)                                    \
+    {                                                                         \
+        return resource_wait_issue(                                           \
+            resource, _Alignof(dayan_shared_resource_t),                      \
+            PRODUCE_TOKEN_SHARED_RESOURCE_PRODUCE, unit_id, 1);               \
+    }                                                                         \
+                                                                              \
+    int dayan_shared_resource_wait_##unit_name##_consume(                     \
+        dayan_shared_resource_t *resource)                                    \
+    {                                                                         \
+        return resource_wait_issue(                                           \
+            resource, _Alignof(dayan_shared_resource_t),                      \
+            PRODUCE_TOKEN_SHARED_RESOURCE_CONSUME, unit_id, 1);               \
+    }
+
+DEFINE_RESOURCE_WAIT_APIS(lsu, PRODUCE_UNIT_LSU)
+DEFINE_RESOURCE_WAIT_APIS(mat, PRODUCE_UNIT_MAT)
+DEFINE_RESOURCE_WAIT_APIS(vec, PRODUCE_UNIT_VEC)
+DEFINE_RESOURCE_WAIT_APIS(macro, PRODUCE_UNIT_MACRO)
+
+#undef DEFINE_RESOURCE_WAIT_APIS
+
+void scheduler_scan_produce(void)
 {
     uintptr_t token;
 
-    while ((token = produce_pop()) != 0)
-        (void)proc_wake((struct proc *)token);
+    while ((token = produce_pop()) != 0) {
+        uint16_t event = (uint16_t)(token >> PRODUCE_TOKEN_EVENT_SHIFT);
+        void *object = (void *)(token & PRODUCE_TOKEN_ADDRESS_MASK);
+        int status;
+
+        switch (event) {
+        case PRODUCE_TOKEN_WAKE_THREAD:
+            status = proc_wake((struct proc *)object);
+            break;
+        case PRODUCE_TOKEN_RESOURCE_PRODUCE:
+            status = dayan_resource_produce((dayan_resource_t *)object);
+            break;
+        case PRODUCE_TOKEN_RESOURCE_CONSUME:
+            status = dayan_resource_consume((dayan_resource_t *)object);
+            break;
+        case PRODUCE_TOKEN_SHARED_RESOURCE_PRODUCE:
+            status = dayan_shared_resource_produce(
+                (dayan_shared_resource_t *)object);
+            break;
+        case PRODUCE_TOKEN_SHARED_RESOURCE_CONSUME:
+            status = dayan_shared_resource_consume(
+                (dayan_shared_resource_t *)object);
+            break;
+        default:
+            platform_halt();
+        }
+        if (status < 0)
+            platform_halt();
+    }
 }
 
 int dayan_resource_init(dayan_resource_t *resource)

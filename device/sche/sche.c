@@ -767,12 +767,9 @@ int thread_create_child(struct proc *parent, const char *name, proc_fn entry,
         return -EINVAL;
     if (!resources) {
         memset(&empty_resources, 0, sizeof(empty_resources));
-        empty_resources.version = DAYAN_THREAD_RESOURCES_VERSION;
-        empty_resources.size = sizeof(empty_resources);
         resources = &empty_resources;
     }
-    if (resources->version != DAYAN_THREAD_RESOURCES_VERSION ||
-        resources->size != sizeof(*resources) || resources->reserved ||
+    if (resources->reserved ||
         resources->lsu_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         resources->mat_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         resources->vec_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
@@ -953,8 +950,7 @@ int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot)
     uint32_t count = 0;
     uint32_t index;
 
-    if (!snapshot || snapshot->version != RPC_PROC_PS_VERSION ||
-        snapshot->size != sizeof(*snapshot) || snapshot->flags ||
+    if (!snapshot || snapshot->flags ||
         snapshot->capacity != RPC_PROC_PS_MAX_RECORDS ||
         snapshot->reserved)
         return -EINVAL;
@@ -1194,8 +1190,7 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
     uintptr_t hart = platform_hart_id();
     uint32_t index;
 
-    if (!result || result->version != RPC_PROC_KILL_ALL_VERSION ||
-        result->size != sizeof(*result) || result->flags ||
+    if (!result || result->flags ||
         result->reserved)
         return -EINVAL;
     result->hart_id = (uint32_t)hart;
@@ -1503,7 +1498,7 @@ _Noreturn void scheduler(void)
         struct list_head *node;
         struct list_head *next;
 
-        proc_scan_produce();
+        scheduler_scan_produce();
 
         list_for_each_safe(node, next, &sche->wait_poll) {
             struct proc *waiting = list_entry(node, struct proc, node);

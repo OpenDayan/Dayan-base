@@ -224,7 +224,7 @@ dycc 包装层公开不透明的 \code{npu_kernel_descriptor_t} 和版本化的
 \code{npu_kernel_launch_attrs_t}。后者使用 \code{NPU_KERNEL_LAUNCH_ATTRS_VERSION}（3）。
 设置 \code{NPU_KERNEL_LAUNCH_ASYNC} 后，启动接口立即返回尚未完成的 Event；否则包装层
 等待并销毁内部 Event。Host 与 Device 共同使用 \code{dayan_kernel_resource_desc_t}、
-\code{DAYAN_KERNEL_RESOURCE_DESC_VERSION}、\code{DAYAN_HART_MAX_PROCS}、
+\code{DAYAN_HART_MAX_PROCS}、
 \code{DAYAN_KERNEL_MAX_CHILD_THREADS}、\code{DAYAN_URAM_ALLOCATION_GRANULE}、
 \code{DAYAN_TCSR_LOGICAL_GROUPS}、
 \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} 和 \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} 保持

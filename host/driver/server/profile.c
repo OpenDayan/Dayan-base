@@ -34,8 +34,6 @@ static int profile_config_call(npu_service_device_t *device,
         goto out;
     }
     memset(&config, 0, sizeof(config));
-    config.version = RPC_PROFILE_VERSION;
-    config.size = sizeof(config);
     config.command = command;
     config.hart_id = core->target.core;
     config.capacity = core->capacity;
@@ -56,8 +54,7 @@ static int profile_config_call(npu_service_device_t *device,
                                  &config, 0, sizeof(config));
     if (status < 0)
         goto out;
-    if (config.version != RPC_PROFILE_VERSION ||
-        config.size != sizeof(config) || config.command != command ||
+    if (config.command != command ||
         config.flags || config.hart_id != core->target.core ||
         config.capacity != core->capacity ||
         config.buffer_addr != core->address ||

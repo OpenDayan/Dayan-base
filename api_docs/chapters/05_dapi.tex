@@ -32,18 +32,16 @@ dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接�
 \begin{dayantable}{Kernel 环境 API}{tab:api-dapi-environment}{X[43,l] X[57,l]}
   API & 含义 \\
   \code{shared} & 绑定到 \code{gp} 的一致性共享区基址。该内存由 Host 分配，算子可以在所指区间保存跨 Hart 状态。 \\
-  \code{DAYAN_KERNEL_RESOURCE_DESC_VERSION} & 当前静态 kernel 资源描述版本 3。 \\
   \code{DAYAN_HART_MAX_PROCS} & 每个 Hart 最多有 16 个用户 Proc 资源槽。 \\
   \code{DAYAN_KERNEL_MAX_CHILD_THREADS} & root Proc 最多声明 15 个子 Thread。 \\
   \code{DAYAN_THREAD_NAME_SIZE} & Thread 名称存储为 16 B。 \\
   \code{DAYAN_URAM_ALLOCATION_GRANULE} & URAM 资源以 32 KiB 对齐和分配。 \\
   \code{DAYAN_TCSR_LOGICAL_GROUPS} & 每类 TCSR 最多声明 8 个逻辑组。 \\
-  \code{DAYAN_THREAD_RESOURCES_VERSION} & 当前子 Thread TCSR 资源描述版本为 1。 \\
   \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} & 表示单 Core Task 需要独占一个 Hart。 \\
   \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} & 当前允许的算子资源标志掩码。 \\
-  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 40 字节版本化常量，描述最大子 Thread 数、每 Core 共驻数、标志、四类 TCSR 数量、Atomic Cache 字节数和 URAM 字节数。 \\
+  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 32 字节紧凑常量，描述最大子 Thread 数、每 Core 共驻数、标志、四类 TCSR 数量、Atomic Cache 字节数和 URAM 字节数。 \\
   \code{dayan_thread_entry_t} & 子 Thread 入口类型 \code{void (*)(void *)}。 \\
-  \code{dayan_thread_resources_t} & 16 字节的版本化描述符；创建子 Thread 时显式声明 LSU/MAT/VEC/MACRO TCSR 数量，空指针表示不占用 TCSR。 \\
+  \code{dayan_thread_resources_t} & 8 字节描述符；创建子 Thread 时显式声明 LSU/MAT/VEC/MACRO TCSR 数量，空指针表示不占用 TCSR。 \\
   \code{dayan_cluster_barrier_t} & 四 Core 屏障使用的 16 字节共享存储，使用前必须清零。 \\
   \code{dayan_resource_state} & \code{DAYAN_RESOURCE_FREE}、\code{DAYAN_RESOURCE_BUSY}、\code{DAYAN_RESOURCE_READY} 三态资源状态机。 \\
   \code{dayan_task_axis} & \code{DAYAN_TASK_X}、\code{DAYAN_TASK_Y}、\code{DAYAN_TASK_Z} 三个逻辑任务坐标轴。 \\

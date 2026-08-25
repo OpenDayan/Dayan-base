@@ -54,12 +54,13 @@ bootstrap 入口为 \code{proc_bootstrap + (8 - argc) * 4}，只执行所需的�
   \code{dayan_resource_t} & 64/8 & state/producer/consumer/lock 为 0/4/8/12，三条 list 为 16/32/48。 \\
   \code{dayan_shared_resource_t} & 16/8 & 打包 producer/consumer counts 位于 0，reserved 位于 8。 \\
   \code{dayan_cluster_barrier_t} & 16/4 & lock/count/generation/reserved 位于 0/4/8/12。 \\
-  \code{dayan_kernel_resource_desc_t} & 32/8 & version/size 为 0/4，16-bit max children/max tasks 为 8/10，32-bit flags 为 12，atomic cache/URAM size 为 16/24。 \\
+  \code{dayan_kernel_resource_desc_t} & 32/8 & 16-bit max children/max tasks 为 0/2，32-bit flags 为 4，四类 TCSR count 为 8--11，reserved 为 12，atomic cache/URAM size 为 16/24。 \\
+  \code{dayan_thread_resources_t} & 8/4 & 四类 TCSR count 为 0--3，reserved 为 4。 \\
 \end{dayantable}
 
 字段布局属于 ABI；resource 状态只能通过 DAPI 修改。
 
-Resource descriptor v2 的已知 flag 为
+Resource descriptor 的已知 flag 为
 \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK}。它只允许 max tasks 为 0 或 1，并在 Package
 中编码为 \code{NPU_PACKAGE_KERNEL_LOCKED_TASK}；带该位的 Package kernel 只声明
 single-Core task mode。Package/header 与 kernel record 当前均为 v4，Runtime/Server
@@ -69,7 +70,7 @@ socket 协议为 v9，Runtime options/handshake 为 v5；结构尺寸仍分别�
 每个 Hart 的算子 proc ABI 上限为 16 个 slot，root 占一个，因此
 \code{DAYAN\_KERNEL\_MAX\_CHILD\_PROCS} 为 15。init、RPC 与 profile proc 不从该池分配。
 
-proc profile v4 是紧密排列的变长字节流。普通记录为 8 bytes：低 48 bit counter、
+proc profile 是紧密排列的变长字节流。普通记录为 8 bytes：低 48 bit counter、
 8-bit slot 和 8-bit state；\code{SLOT_DEFINE} 记录为 24 bytes，在同一 header 后追加
 固定 16-byte proc 名称。名称必须在字段内以 NUL 结尾。状态编码与
 \code{THREAD_RUNNING--THREAD_KILL_WAIT_PRODUCE} 的 0--7 一致；Host 将一个 counter

@@ -179,7 +179,7 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
-create-proc ABI v5 使用 232-byte `rpc_proc_create_request`，包含 entry、栈、shared、
+create-proc ABI 使用 224-byte `rpc_proc_create_request`，包含 entry、栈、shared、
 printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
 最大子 Thread 数、URAM base/size、64-bit Tensor Context，以及固定 16-byte Proc 名称。Runtime launch 必须提供
 非空 Task 名称；名称最多 15 bytes，最后一 byte 留给 NUL。BL1 创建 root 时一次性专属
@@ -191,7 +191,7 @@ TCSR 资源由参数显式声明并形成独立 Context。
 flush/CLEAR 输出；只有 root 主动向 Host 上报返回值。最后由 scheduler 栈归还整组静态
 slot，并把描述符置为 `EXITED` 或 `FAILED`。
 
-`RPC_PROC_PS` v3 返回目标 Hart 的系统/算子 proc 快照，每条记录包含相同的 16-byte
+`RPC_PROC_PS` 返回目标 Hart 的系统/算子 proc 快照，每条记录包含相同的 16-byte
 名称。系统 Proc 分别命名为 `rpc-receive`、`rpc-send` 和 `profile-flush`。
 `RPC_PROC_KILL_ALL` 不碰 init 和
 三个系统 proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
@@ -210,8 +210,8 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 
 Device 发起的标量 RPC 将 packet、request 和 response 分别放入独占的 64-byte 对齐
 slot，Host 只写 response/status，Device 确认后 invalidate 并复制回调用者。Host-owned
-标量控制 descriptor 统一按 64-byte 对齐地址和 64-byte allocation 粒度分配，
-wire `size` 仍是结构体实际长度。Device 在解析前 invalidate，请求字段在生命周期内只读；
+标量控制 descriptor 统一按 64-byte 对齐地址和 64-byte allocation 粒度分配，opcode
+唯一确定结构体布局和长度。Device 在解析前 invalidate，请求字段在生命周期内只读；
 结果只在 RPC 响应或 Proc family 终态写入并 clean，Host 确认可见后再释放 allocation。
 提交前失败可立即释放；一旦尝试发布命令却未收到匹配响应，allocation 不重新分配，只在
 HAL 关闭时统一回收。
@@ -220,7 +220,7 @@ HAL 关闭时统一回收。
 
 profile 是设备级、单会话能力。`npu_profile_start()` 默认通过 HAL 分配 16 MiB 普通
 Device RAM；Service 根据已启动 Hart 数量把它均分为独立 FIFO，避免多个 Hart 写同一
-write index。profile v4 是紧密排列的变长字节流，容量、写入计数和 flush 计数都以
+write index。profile record 是紧密排列的变长字节流，容量、写入计数和 flush 计数都以
 byte 为单位。容量可通过 `npu_profile_options_t.buffer_size` 配置。
 
 普通状态记录固定 8 B：低 48 bit 是 Device counter，中间 8 bit 是 Hart 内 slot，最高

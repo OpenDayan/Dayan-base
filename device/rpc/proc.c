@@ -36,9 +36,7 @@ static int rpc_descriptor_address_valid(uint64_t address, size_t size)
 static int dcache_flush_request_valid(
     const struct rpc_dcache_flush_request *request)
 {
-    return request->version == RPC_DCACHE_FLUSH_VERSION &&
-           request->size == sizeof(*request) &&
-           request->hart_id == platform_hart_id() && !request->flags &&
+    return request->hart_id == platform_hart_id() && !request->flags &&
            !request->reserved && request->length &&
            host_normal_range_valid(request->address, request->length);
 }
@@ -55,9 +53,7 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
     int uram_valid;
     int context_uram_valid;
 
-    if (request->version != RPC_PROC_CREATE_VERSION ||
-        request->size != sizeof(*request) || request->flags ||
-        request->reserved || request->task_reserved ||
+    if (request->flags || request->reserved || request->task_reserved ||
         request->resource_reserved ||
         request->state != RPC_PROC_SUBMITTED ||
         request->argc > RPC_PROC_MAX_ARGS ||

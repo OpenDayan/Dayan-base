@@ -88,25 +88,25 @@ Host 把 ACQUIRE 大小向 64-byte 对齐，并返回不小于请求值的普通
 
 \subsection{异常报告}
 
-TRAP REPORT 不使用 \code{rpc_packet}；command argument 直接指向 320-byte
-\code{trap_record}。记录包含版本、大小、hart/thread 标识、thread 状态、五个 machine/F
-CSR 和 32 个整数寄存器。Host 校验版本、大小与来源 hart 后调用 trap callback。
+TRAP REPORT 不使用 \code{rpc_packet}；command argument 直接指向 312-byte
+\code{trap_record}。记录包含 hart/thread 标识、thread 状态、五个 machine/F CSR 和
+32 个整数寄存器。Host 校验来源 hart 后调用 trap callback。
 
 \subsection{创建 proc}
 
-Host 把 232-byte v5 \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
+Host 把 224-byte \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
 \code{EXITED} 或 \code{FAILED}：
 
 \begin{dayantable}{proc create 描述符}{tab:kernel-064}{X[26,l] X[18,l] X[56,l]}
   字段组 & offset & 含义 \\
-  header/state & 0--15 & version、size、state、flags。 \\
-  launch memory & 16--55 & entry、stack size、shared base/size、printf buffer size。 \\
-  arguments & 56--127 & argc、reserved 和 8 个 64-bit 参数槽。 \\
+  state & 0--7 & state 和 flags。 \\
+  launch memory & 8--47 & entry、stack size、shared base/size、printf buffer size。 \\
+  arguments & 48--119 & argc、reserved 和 8 个 64-bit 参数槽。 \\
+  task resources & 120--127 & task mode 和最大子 Thread 数。 \\
   result & 128--151 & status、proc ID、hart ID、cookie。 \\
-  logical task & 152--183 & 三维 task ID、三维 task dim、task mode 和 reserved。 \\
-  kernel resources & 184--207 & 最大子 Thread 数、reserved、URAM base 和 size。 \\
-  tensor Context & 208--215 & 压缩的 64-bit URAM/TCSR Context。 \\
-  proc name & 216--231 & 固定 16-byte root proc 名称。 \\
+  logical task & 152--183 & 三维 task ID、三维 task dim 和两个 reserved 字段。 \\
+  kernel resources & 184--207 & URAM base/size 和压缩的 64-bit URAM/TCSR Context。 \\
+  proc name & 208--223 & 固定 16-byte root proc 名称。 \\
 \end{dayantable}
 
 Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot 池取得 root，把状态改为
@@ -124,45 +124,45 @@ base 和 size 都按 32 KiB 对齐。描述符还携带 64-bit Tensor Context；
 \subsection{退出通知与管理 RPC}
 
 每个 proc 退出都会先尝试 WRITE 剩余输出并发送 CLEAR。只有
-\code{RPC_PROC_CREATE} 创建的 root 再发送 opcode 7；40-byte
-\code{rpc_proc_exit_request} 含 version/size、hart/proc ID、必须为 0 的 parent ID、
+\code{RPC_PROC_CREATE} 创建的 root 再发送 opcode 7；32-byte
+\code{rpc_proc_exit_request} 含 hart/proc ID、必须为 0 的 parent ID、
 root flag、\code{int64_t result} 和 launch cookie。Service 的 proc-exit callback 用
 Cluster/Core/proc/cookie 定位 Host 资源。子 Thread 的创建和退出完全在 Device family
 内完成，不发送该 RPC。
 
 张量机器外部中断使用 opcode 6（\code{RPC_TENSOR_INTERRUPT_REPORT}）。command argument
-直接指向 184-byte \code{tensor_interrupt_record}，包含 Hart/Thread、当前 Tensor
-Context、中断控制值、累计计数、最近 16 条记录和软件丢弃计数。Service 校验版本、大小、
+直接指向 176-byte \code{tensor_interrupt_record}，包含 Hart/Thread、当前 Tensor
+Context、中断控制值、累计计数、最近 16 条记录和软件丢弃计数。Service 校验
 来源 Hart 与 recent count 后调用 tensor-interrupt callback；该报告不改变 Proc 生命周期。
 
-\code{RPC_PROC_PS} 的参数指向 1872-byte v3 快照。48-byte header 含 hart、record 数、
+\code{RPC_PROC_PS} 的参数指向 1864-byte 快照。40-byte header 含 hart、record 数、
 全局空闲 slot、reserved slot 和 status，后接最多 19 条 96-byte record：三个系统
 proc（receive、send、profile）加最多 16 个算子 proc。record 包含 proc/parent ID、thread state、root/child/zombie/
 kill-wait flags、直属子计数、slot、Host root ID、logical task、返回值、PC 和 cookie。Host Service 通过
 \code{npu_service_rpc_ps(device,target,...)} 显式指定 Cluster/Core。
 
-\code{RPC_PROC_KILL_ALL} 使用 48-byte v1 result，返回 killed root/child 数、已经释放的
+\code{RPC_PROC_KILL_ALL} 使用 40-byte result，返回 killed root/child 数、已经释放的
 slot 数和仍处于 Produce 延迟回收的数量。系统 proc 永不被终止；每个被终止 root 以
 \code{-ECANCELED} 完成 Host 描述符并发送一次 root exit callback。Service 对应接口为
 \code{npu_service_rpc_kill_all(device,target,...)}。
 
 \subsection{proc profile 服务}
 
-Host 用 64-byte v4 \code{rpc_profile_config} 对每个目标 Hart START/STOP。描述符包含版本、
+Host 用 56-byte \code{rpc_profile_config} 对每个目标 Hart START/STOP。描述符包含
 command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返回未满尾批次的
 字节数。Service 默认分配一个 16 MiB 的 Device-scope allocation，并按已启动 Hart
 均分独立 FIFO slice，因此原始记录无需携带 Hart ID。每 Hart slice 至少容纳 19 组
 24-byte 定义和 8-byte 初始状态，保证 START 可报告三个系统 proc 和最多 16 个算子 proc。
 
-满缓冲请求为 40-byte \code{rpc_profile_flush_request}，包含 hart、地址、count、capacity
-和 generation；32-byte response 包含 status 与 \code{continue_profile}。Host 必须先
+满缓冲请求为 32-byte \code{rpc_profile_flush_request}，包含 hart、地址、count、capacity
+和 generation；24-byte response 包含 status 与 \code{continue_profile}。Host 必须先
 读取 FIFO，再写 response，最后完成 packet。回调或队列无法继续接收时应返回
 \code{continue_profile=0}，Device 随即关闭该 Hart 的记录。
 
 \subsection{发布新代码}
 
 普通 Device RAM 不与 Host 自动保持 D-cache 一致。Host 覆盖模块前，必须通过
-48-byte \code{rpc_dcache_flush_request} 向全部已启动 Hart 发布模块地址和长度，并等待
+40-byte \code{rpc_dcache_flush_request} 向全部已启动 Hart 发布模块地址和长度，并等待
 \code{RPC_DCACHE_FLUSH_RESPONSE}；Device 对描述符本身先 invalidate，再逐行失效目标范围。
 
 \code{fence.i} 只同步执行它的 hart。Host 完成新 text/rodata 写入后，必须
@@ -176,7 +176,7 @@ command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返�
 result 字段与 state 由 Device 更新。
 
 所有 Host-owned 标量控制 descriptor 从 64-byte 对齐地址开始，allocation 大小也按
-64-byte 向上取整，但 wire \code{size} 仍为结构体实际长度。Device 在解析前 invalidate，
+64-byte 向上取整，opcode 唯一确定结构体布局和长度。Device 在解析前 invalidate，
 请求字段保持只读；必须写入的结果和 state 在响应或 Proc family 终态完成，并在通知 Host
 前 clean。Host 确认响应或终态后才能释放 descriptor。
 

@@ -123,7 +123,7 @@ TCSR 位图。
 
 \subsection{proc profile}
 
-每 Hart 有一份 profile 状态和一段由 Host 指定的 FIFO slice。profile v4 普通状态记录
+每 Hart 有一份 profile 状态和一段由 Host 指定的 FIFO slice。profile 普通状态记录
 固定为 8 bytes：48-bit counter、8-bit slot 和 8-bit state；slot 绑定新 Thread 时先写
 一条带 16-byte proc 名称的 24-byte \code{SLOT_DEFINE}，其余状态切换不重复名称。状态
 编码与表~\ref{tab:kernel-051} 一致。START 先为 receive、send、profile 及所有现存算子
@@ -166,7 +166,7 @@ slot 回收，不再恢复其 kernel 代码。DMA 复用 LSU 路径。
 RVTNG 把 URAM 越界或未对齐、TCSR 逻辑组越界以及指令解码错误汇总为每 Hart 的
 机器外部中断。trap 入口保存通用寄存器和 machine/FCSR 状态后读取中断控制、48-bit
 累计计数与最近 16 条记录，连同当前 Thread ID、状态和 Tensor Context 写入
-184-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
+176-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
 原执行对象。错误指令是否继续以及采用何种降级结果由 RVTNG 定义。
 
 scheduler 随后用 \code{RPC_TENSOR_INTERRUPT_REPORT} 异步上报该快照。上一条报告尚未

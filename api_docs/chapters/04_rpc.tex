@@ -51,7 +51,7 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
   类型 & ABI / 用途 \\
   \code{rpc_packet} & 40 字节；包含请求区和响应区的地址与大小，以及由 Host 写回的 64 位状态。它独占一个 64 字节资源槽。 \\
   \code{RPC_DESCRIPTOR_GRANULE} & 双向标量 RPC 的描述符地址、资源槽和 Host 内存分配粒度均为 64 字节。 \\
-  \code{RPC_DCACHE_FLUSH_VERSION} / \code{rpc_dcache_flush_request} & 版本 1 的 48 字节 Host 描述符；指定 Hart 和待失效地址范围，并接收执行状态。 \\
+  \code{rpc_dcache_flush_request} & 40 字节 Host 描述符；指定 Hart 和待失效地址范围，并接收执行状态。 \\
   \code{rpc_print_request} & 24 B；Hart ID、Proc ID、Device 数据地址和字节数。 \\
   \code{rpc_heap_request} & 8 B；申请字节数。 \\
   \code{rpc_heap_response} & 16 B；Host 返回的 Device 地址和实际大小。 \\
@@ -65,7 +65,7 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
 64 字节。
 
 Host 到 Device 的 Proc 创建、查询、终止、性能采样配置和数据缓存失效描述符都从
-64 字节对齐地址开始，内存分配大小也向上取整到 64 字节；结构中的 \code{size} 仍记录
+64 字节对齐地址开始，内存分配大小也向上取整到 64 字节；opcode 唯一确定描述符布局和
 实际 ABI 长度。Device 解析前先失效缓存，之后保持请求字段只读，只在 RPC 响应或整个
 Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才释放内存。如果命令尚未发布
 就失败，可以立即释放；命令已经尝试发布但没有收到匹配响应时，该内存直到 HAL 关闭才
@@ -75,7 +75,6 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
 
 \begin{dayantable}{Proc ABI 常量}{tab:api-rpc-proc-constant}{X[44,l] X[56,l]}
   常量 & 含义 \\
-  \code{RPC_PROC_CREATE_VERSION} & 当前 Proc 创建描述符版本为 5。 \\
   \code{RPC_PROC_MAX_ARGS} & 一个 Proc 最多 8 个 64-bit 参数。 \\
   \code{RPC_PROC_SLOTS_PER_HART} & 每个 Hart 有 16 个用户 Proc 资源槽。 \\
   \code{RPC_PROC_MAX_CHILD_THREADS} & 一个根 Proc 最多预留 15 个子 Thread 资源槽。 \\
@@ -83,10 +82,7 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
   \code{RPC_PROC_MIN_STACK_SIZE} / \code{RPC_PROC_MAX_STACK_SIZE} & Proc stack 合法范围为 1024 B 到 64 KiB。 \\
   \code{RPC_PROC_MAX_PRINTF_SIZE} & 单个 Proc 的格式化输出缓冲区上限为 4 KiB。 \\
   \code{RPC_PROC_URAM_GRANULE} & URAM 资源以 32 KiB 为分配粒度。 \\
-  \code{RPC_PROC_EXIT_VERSION} & 当前退出通知版本 1。 \\
   \code{RPC_PROC_EXIT_ROOT} & 标记退出者为 Host 管理的 root Proc。 \\
-  \code{RPC_PROC_PS_VERSION} & 当前 Proc 快照版本为 3。 \\
-  \code{RPC_PROC_KILL_ALL_VERSION} & 当前 kill result 版本 1。 \\
   \code{RPC_PROC_PS_SYSTEM_PROCS} & Proc 快照为三个系统 Proc 预留记录。 \\
   \code{RPC_PROC_PS_MAX_RECORDS} & 16 个用户资源槽加三个系统 Proc，共 19 条记录。 \\
 \end{dayantable}
@@ -105,11 +101,11 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
 
 \begin{dayantable}{Proc 传输类型}{tab:api-rpc-proc-wire}{X[42,l] X[58,l]}
   类型 & ABI / 用途 \\
-  \code{rpc_proc_create_request} & 232 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、8 个参数、任务网格和模式、子 Thread 槽上限、URAM、64 位 Tensor Context、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
-  \code{rpc_proc_exit_request} & 40 字节；包含根 Proc 的 Hart 和 Proc ID、返回值、调用方标识及标志。 \\
+  \code{rpc_proc_create_request} & 224 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、8 个参数、任务网格和模式、子 Thread 槽上限、URAM、64 位 Tensor Context、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
+  \code{rpc_proc_exit_request} & 32 字节；包含根 Proc 的 Hart 和 Proc ID、返回值、调用方标识及标志。 \\
   \code{rpc_proc_info} & 96 字节；包含一个 Proc 的父子关系、状态、资源槽、任务坐标、结果、PC 和名称。 \\
-  \code{rpc_proc_ps_snapshot} & 1872 字节；由快照头和最多 19 条 \code{rpc_proc_info} 组成。 \\
-  \code{rpc_proc_kill_result} & 48 字节；记录终止状态、根 Proc 和子 Thread 数量、已释放资源槽及仍在等待异步完成的数量。 \\
+  \code{rpc_proc_ps_snapshot} & 1864 字节；由快照头和最多 19 条 \code{rpc_proc_info} 组成。 \\
+  \code{rpc_proc_kill_result} & 40 字节；记录终止状态、根 Proc 和子 Thread 数量、已释放资源槽及仍在等待异步完成的数量。 \\
 \end{dayantable}
 
 \code{rpc_proc_create_request.state} 由 Host 初始化为 SUBMITTED，BL1 开始执行后改为
@@ -120,14 +116,13 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
 
 \begin{dayantable}{性能采样传输类型}{tab:api-rpc-profile-wire}{X[41,l] X[59,l]}
   类型 & ABI / 用途 \\
-  \code{RPC_PROFILE_VERSION} & 当前性能采样传输 ABI 版本为 4。 \\
   \code{rpc_profile_proc_state} & RUNNING、READY、各类 WAIT 及 KILL\_WAIT\_PRODUCE 共八种采样状态。 \\
   \code{rpc_profile_command} & \code{RPC_PROFILE_START} 或 \code{RPC_PROFILE_STOP}。 \\
   \code{rpc_profile_record} & 8 字节；包含 48 位计数器、8 位资源槽编号和 8 位状态或标签。 \\
   \code{rpc_profile_slot_define} & 24 字节；由标签为 \code{SLOT_DEFINE} 的记录头和 16 字节 Proc 名称组成。 \\
-  \code{rpc_profile_config} & 64 字节的 Host 描述符；指定 Hart、缓冲区、字节容量、采样代次和开始或停止命令。 \\
-  \code{rpc_profile_flush_request} & 40 字节；Device 上报缓冲区地址、有效字节数、容量和采样代次。 \\
-  \code{rpc_profile_flush_response} & 32 字节；Host 返回是否继续采样、执行状态和采样代次。 \\
+  \code{rpc_profile_config} & 56 字节的 Host 描述符；指定 Hart、缓冲区、字节容量、采样代次和开始或停止命令。 \\
+  \code{rpc_profile_flush_request} & 32 字节；Device 上报缓冲区地址、有效字节数、容量和采样代次。 \\
+  \code{rpc_profile_flush_response} & 24 字节；Host 返回是否继续采样、执行状态和采样代次。 \\
 \end{dayantable}
 
 \begin{dayantable}{Profile 编码常量}{tab:api-rpc-profile-encoding}{X[49,l] X[51,l]}

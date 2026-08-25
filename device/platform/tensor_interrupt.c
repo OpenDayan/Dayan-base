@@ -51,8 +51,6 @@ void tensor_interrupt_handle(void)
     }
     record = &state->record;
     memset(record, 0, sizeof(*record));
-    record->version = TENSOR_INTERRUPT_RECORD_VERSION;
-    record->size = sizeof(*record);
     record->hart_id = (uint32_t)platform_hart_id();
     record->thread_id = current->id;
     record->thread_type = current->type;

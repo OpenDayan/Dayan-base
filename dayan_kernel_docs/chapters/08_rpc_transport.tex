@@ -92,7 +92,7 @@ Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块
 \end{dayantable}
 
 表中的 Host-owned 标量控制 descriptor 均从 64-byte 对齐地址开始，allocation 大小按
-64-byte 向上取整，而 wire \code{size} 仍是结构体实际长度。Device 在解析前 invalidate；
+64-byte 向上取整，opcode 唯一确定结构体布局和长度。Device 在解析前 invalidate；
 请求字段保持只读，只在响应或 Proc family 终态写结果并 clean。Host 确认结果可见后才释放。
 提交前失败可以立即释放；一旦尝试发布命令却未收到匹配响应，该 allocation 不重新进入
 分配池，只在 HAL 关闭时统一回收。

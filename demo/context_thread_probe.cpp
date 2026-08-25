@@ -9,14 +9,13 @@
 #include <stdint.h>
 
 struct alignas(64) ContextThreadResult {
-    uint32_t version;
-    uint32_t size;
     uint32_t observed_tcsr[2];
     uint32_t reused_tcsr;
     int32_t exhausted_status;
     int32_t join_status;
     uint32_t uram_match_mask;
     uint32_t uram_size;
+    uint32_t completion_mask;
     uint64_t root_uram;
     uint64_t reserved[2];
 };
@@ -29,7 +28,6 @@ static_assert(sizeof(ContextThreadResult) == 64,
 namespace context_thread_probe_detail {
 
 enum : uint32_t {
-    kResultVersion = 1,
     kFirstMarker = 17,
     kSecondMarker = 29,
     kReuseMarker = 41,
@@ -90,6 +88,45 @@ static void reused_tcsr_thread(void *argument)
     state->result->reused_tcsr = (uint32_t)observed;
 }
 
+static int test_deferred_resource_transitions(ContextThreadResult *result)
+{
+    dayan_resource_t local_resource;
+    dayan_shared_resource_t *shared_resource =
+        (dayan_shared_resource_t *)shared;
+    int status;
+
+    status = dayan_resource_init(&local_resource);
+    if (status == 0)
+        status = dayan_resource_alloc(&local_resource, 1U, 1U);
+    if (status == 0)
+        status = dayan_resource_wait_lsu_produce(&local_resource);
+    if (status == 0)
+        status = dayan_resource_wait_ready(&local_resource);
+    if (status == 0)
+        status = dayan_resource_wait_mat_consume(&local_resource);
+    if (status == 0)
+        status = dayan_resource_wait_free(&local_resource);
+    if (status < 0)
+        return status;
+    result->completion_mask |= 1U;
+
+    status = dayan_shared_resource_init(shared_resource);
+    if (status == 0)
+        status = dayan_shared_resource_alloc(shared_resource, 1U, 1U);
+    if (status == 0)
+        status = dayan_shared_resource_wait_vec_produce(shared_resource);
+    if (status == 0)
+        status = dayan_shared_resource_wait_ready(shared_resource);
+    if (status == 0)
+        status = dayan_shared_resource_wait_macro_consume(shared_resource);
+    if (status == 0)
+        status = dayan_shared_resource_wait_free(shared_resource);
+    if (status < 0)
+        return status;
+    result->completion_mask |= 2U;
+    return 0;
+}
+
 } // namespace context_thread_probe_detail
 
 #endif
@@ -106,8 +143,6 @@ __kernel__ void context_thread_probe(ContextThreadResult *result)
         dayan_thread_exit(-22);
 
     ContextThreadResult output = {};
-    output.version = kResultVersion;
-    output.size = sizeof(output);
     output.root_uram = (uint64_t)(uintptr_t)dayan_uram_base();
     output.uram_size = (uint32_t)dayan_uram_size();
     ProbeState state = {
@@ -149,12 +184,15 @@ __kernel__ void context_thread_probe(ContextThreadResult *result)
     output.join_status = dayan_thread_join((uint32_t)reused, nullptr);
     if (output.join_status < 0)
         dayan_thread_exit(output.join_status);
+    status = test_deferred_resource_transitions(&output);
+    if (status < 0)
+        dayan_thread_exit(status);
 
     *result = output;
     dayan_cache_flush(result, sizeof(*result));
 }
 
-DAYAN_KERNEL_DESC(context_thread_probe, 3, 0, 32 * 1024, 2, 0, 0, 0);
+DAYAN_KERNEL_DESC(context_thread_probe, 3, 64, 32 * 1024, 2, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 
@@ -251,19 +289,20 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = download(stream, &result, buffer, sizeof(result));
     if (status == 0 &&
-        (result.version != 1U || result.size != sizeof(result) ||
-         result.observed_tcsr[0] != 17U ||
+        (result.observed_tcsr[0] != 17U ||
          result.observed_tcsr[1] != 29U ||
          result.reused_tcsr != 41U || result.exhausted_status != -12 ||
          result.join_status != 0 || result.uram_match_mask != 0xfU ||
-         result.uram_size != 32U * 1024U || !result.root_uram))
+         result.uram_size != 32U * 1024U ||
+         result.completion_mask != 3U || !result.root_uram))
         status = -1;
 
     std::printf("[host] tcsr=(%u,%u) reused=%u exhausted=%d "
-                "uram_mask=0x%x uram_size=%u\n",
+                "uram_mask=0x%x uram_size=%u completion_mask=0x%x\n",
                 result.observed_tcsr[0], result.observed_tcsr[1],
                 result.reused_tcsr, result.exhausted_status,
-                result.uram_match_mask, result.uram_size);
+                result.uram_match_mask, result.uram_size,
+                result.completion_mask);
     if (status == 0)
         std::printf("[host] PASS: Thread Contexts isolate logical TCSR 0 and inherit URAM\n");
     else

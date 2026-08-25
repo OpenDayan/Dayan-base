@@ -106,7 +106,7 @@ void proc_wait_poll(proc_poll_fn poll, void *arg);
 /* A null event selects the scheduler's default externally-driven queue. */
 void proc_wait_event(struct list_head *event);
 void proc_wait_produce(void);
-void proc_scan_produce(void);
+void scheduler_scan_produce(void);
 _Noreturn void proc_exit(void);
 _Noreturn void proc_exit_status(int64_t status);
 _Noreturn void scheduler(void);

@@ -367,8 +367,6 @@ long rpc_proc_exit(uint32_t proc_id, uint32_t parent_proc_id,
 
     if (!proc_id || flags != RPC_PROC_EXIT_ROOT || parent_proc_id)
         return -EINVAL;
-    request.version = RPC_PROC_EXIT_VERSION;
-    request.size = sizeof(request);
     request.hart_id = (uint32_t)platform_hart_id();
     request.proc_id = proc_id;
     request.parent_proc_id = parent_proc_id;
@@ -440,8 +438,7 @@ int rpc_report_tensor_interrupt(const struct tensor_interrupt_record *record)
     uintptr_t addr;
     int status;
 
-    if (!record || record->version != TENSOR_INTERRUPT_RECORD_VERSION ||
-        record->size != sizeof(*record))
+    if (!record)
         return -EINVAL;
     if (!rpc->initialized)
         return -ENOSYS;

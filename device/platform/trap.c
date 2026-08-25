@@ -22,8 +22,6 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
         platform_halt();
     cpu->trap.active = 1;
     record = &cpu->trap.record;
-    record->version = TRAP_RECORD_VERSION;
-    record->size = sizeof(*record);
     record->hart_id = (uint32_t)platform_hart_id();
     record->thread_id = current->id;
     record->thread_type = current->type;

@@ -797,51 +797,51 @@ private:
         const auto *list = initializer ?
             llvm::dyn_cast<clang::InitListExpr>(
                 initializer->IgnoreParenImpCasts()) : nullptr;
-        uint64_t fields[12];
+        uint64_t fields[10];
         unsigned index;
 
         if (!decl->getType().isConstQualified() ||
-            context_.getTypeSizeInChars(decl->getType()).getQuantity() != 40 ||
+            context_.getTypeSizeInChars(decl->getType()).getQuantity() != 32 ||
             decl->getFormalLinkage() == clang::Linkage::Internal ||
             !decl->isInExternCContext()) {
-            diagnose(decl, "kernel resource descriptor must be a 40-byte "
+            diagnose(decl, "kernel resource descriptor must be a 32-byte "
                            "extern C const object");
             return false;
         }
         if (list && list->isSyntacticForm())
             list = list->getSemanticForm();
-        if (!list || list->getNumInits() != 12) {
-            diagnose(decl, "kernel resource descriptor requires twelve "
+        if (!list || list->getNumInits() != 10) {
+            diagnose(decl, "kernel resource descriptor requires ten "
                            "constant fields");
             return false;
         }
-        for (index = 0; index < 12; ++index) {
+        for (index = 0; index < 10; ++index) {
             if (!constant_uint64(list->getInit(index), fields[index])) {
                 diagnose(decl, "kernel resource descriptor fields must be "
                                "non-negative integer constants");
                 return false;
             }
         }
-        if (fields[0] != 3U || fields[1] != 40U || fields[2] > 15U ||
-            fields[3] > 4U || (fields[4] & ~UINT64_C(1)) ||
-            ((fields[4] & UINT64_C(1)) && fields[3] > 1U) ||
-            fields[5] > 8U || fields[6] > 8U || fields[7] > 8U ||
-            fields[8] > 8U || fields[9] || (fields[11] & 32767U)) {
-            diagnose(decl, "invalid kernel resources: expected version=3, "
-                           "size=40, child_threads<=15, tasks_per_core<=4, "
+        if (fields[0] > 15U || fields[1] > 4U ||
+            (fields[2] & ~UINT64_C(1)) ||
+            ((fields[2] & UINT64_C(1)) && fields[1] > 1U) ||
+            fields[3] > 8U || fields[4] > 8U || fields[5] > 8U ||
+            fields[6] > 8U || fields[7] || (fields[9] & 32767U)) {
+            diagnose(decl, "invalid kernel resources: expected "
+                           "child_threads<=15, tasks_per_core<=4, "
                            "known flags, locked_task tasks_per_core<=1 and "
                            "TCSR counts<=8 and 32 KiB-aligned URAM size");
             return false;
         }
-        resources.max_child_threads = static_cast<uint32_t>(fields[2]);
-        resources.max_tasks_per_core = static_cast<uint32_t>(fields[3]);
-        resources.flags = static_cast<uint32_t>(fields[4]);
-        resources.lsu_tcsr_count = static_cast<uint32_t>(fields[5]);
-        resources.mat_tcsr_count = static_cast<uint32_t>(fields[6]);
-        resources.vec_tcsr_count = static_cast<uint32_t>(fields[7]);
-        resources.macro_tcsr_count = static_cast<uint32_t>(fields[8]);
-        resources.atomic_cache_size = fields[10];
-        resources.uram_size = fields[11];
+        resources.max_child_threads = static_cast<uint32_t>(fields[0]);
+        resources.max_tasks_per_core = static_cast<uint32_t>(fields[1]);
+        resources.flags = static_cast<uint32_t>(fields[2]);
+        resources.lsu_tcsr_count = static_cast<uint32_t>(fields[3]);
+        resources.mat_tcsr_count = static_cast<uint32_t>(fields[4]);
+        resources.vec_tcsr_count = static_cast<uint32_t>(fields[5]);
+        resources.macro_tcsr_count = static_cast<uint32_t>(fields[6]);
+        resources.atomic_cache_size = fields[8];
+        resources.uram_size = fields[9];
         return true;
     }
 
@@ -933,9 +933,7 @@ private:
             << "    static unsigned char __dayan_init_lock = 0;\n"
             << "    static const ::dayan_kernel_resource_desc_t "
                "__dayan_resources = {\n"
-            << "        DAYAN_KERNEL_RESOURCE_DESC_VERSION, "
-               "sizeof(::dayan_kernel_resource_desc_t), "
-            << resources.max_child_threads << "U, "
+            << "        " << resources.max_child_threads << "U, "
             << resources.max_tasks_per_core << "U, "
             << resources.flags << "U, "
             << resources.lsu_tcsr_count << "U, "

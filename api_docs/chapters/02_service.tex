@@ -112,7 +112,7 @@ Service 会再次校验内存类别、可见范围和对齐。根 Proc 的子 Th
 \end{dayantable}
 
 同一时间只有一个调用方可以占用设备级性能采样功能。不同 Hart 写入各自的 FIFO 区域。
-Service 不解析版本 4 的采样记录，只通过回调交付 Device 写出的 8 字节状态记录或 24 字节
+Service 不解析采样记录，只通过回调交付 Device 写出的 8 字节状态记录或 24 字节
 名称定义记录。
 
 \subsection{Runtime Server}
