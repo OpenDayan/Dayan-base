@@ -177,7 +177,7 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
   在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
 - Host→Device：`RPC_PROC_CREATE`、`RPC_DCACHE_FLUSH`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS`、
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
-  `npu_service_rpc_ps/kill_all` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
+  `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
 create-proc ABI 使用 224-byte `rpc_proc_create_request`，包含 entry、栈、shared、
 printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
@@ -196,7 +196,8 @@ slot，并把描述符置为 `EXITED` 或 `FAILED`。
 `RPC_PROC_KILL_ALL` 不碰 init 和
 三个系统 proc；普通等待者先从对应队列摘除，非 Produce slot 立即释放，异步 Produce
 等待者标为 `KILL_WAIT_PRODUCE`，结果 token 到达后再释放。被 kill 的 root 以
-`-ECANCELED` 完成，子 Thread 不单独通知 Host。
+`-ECANCELED` 完成，子 Thread 不单独通知 Host。定向 family kill 复用同一 RPC
+描述符，按 root proc ID 选择 family，并用调用方提供的负错误码完成 root。
 Service 接受 create response 后已经快速进入终态仍是合法情况。
 
 Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-local URAM。

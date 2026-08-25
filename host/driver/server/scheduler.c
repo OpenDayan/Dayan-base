@@ -12,6 +12,7 @@
 #define SERVER_SHARED_ALIGNMENT     UINT64_C(64)
 #define SERVER_SHARED_RESOURCE_SIZE UINT64_C(16)
 #define SERVER_URAM_ALIGNMENT       DAYAN_CONTEXT_URAM_GRANULE
+#define SERVER_TRAP_KILL_TIMEOUT_MS 30000U
 
 static int calculate_shared_size(const struct server_command *command,
                                  uint64_t *size_out);
@@ -948,6 +949,7 @@ static struct dispatch_result dispatch_group(
         invocation->slot_index = slots[lane];
         invocation->uram_allocation = uram_allocation;
         invocation->resident = launch_resident_size(metadata);
+        invocation->cookie = desc.cookie;
         memcpy(invocation->task_id, desc.task_id,
                sizeof(invocation->task_id));
         invocation->group = group;
@@ -1287,13 +1289,43 @@ static int poll_invocation(dayan_server_t *server,
                            struct server_invocation *invocation)
 {
     npu_service_launch_info_t info;
+    npu_service_kill_result_t kill_result;
+    npu_hal_core_t target = server->slots[invocation->slot_index].target;
+    uint32_t root_proc_id = invocation->proc_id;
+    int64_t trap_status = invocation->trap_status;
+    int kill_attempted = trap_status < 0 && !invocation->trap_handled &&
+                         root_proc_id;
     int terminal = 0;
     int64_t completion = 0;
     int status;
 
     memset(&info, 0, sizeof(info));
+    memset(&kill_result, 0, sizeof(kill_result));
     pthread_mutex_unlock(&server->mutex);
-    status = npu_service_launch_query(invocation->launch, &info);
+    if (kill_attempted) {
+        status = npu_service_rpc_kill_family_timeout(
+            server->device, target, root_proc_id, trap_status,
+            SERVER_TRAP_KILL_TIMEOUT_MS,
+            &kill_result);
+        if (status < 0 && status != -ESRCH) {
+            int abandon_status;
+
+            fprintf(stderr,
+                    "dayan_server: failed to terminate trapped kernel "
+                    "cluster=%u core=%u root_proc=%u status=%d; "
+                    "failing Host launch\n",
+                    target.cluster, target.core, root_proc_id,
+                    status);
+            terminal = 1;
+            completion = trap_status;
+            abandon_status = npu_service_launch_abandon(invocation->launch);
+            if (abandon_status < 0)
+                completion = abandon_status;
+            status = abandon_status;
+        }
+    }
+    if (!terminal)
+        status = npu_service_launch_query(invocation->launch, &info);
     if (status == 0 &&
         (info.state == NPU_SERVICE_LAUNCH_EXITED ||
          info.state == NPU_SERVICE_LAUNCH_FAILED)) {
@@ -1314,6 +1346,8 @@ static int poll_invocation(dayan_server_t *server,
     pthread_mutex_lock(&server->mutex);
     command->dispatching = 0;
     invocation->polling = 0;
+    if (kill_attempted)
+        invocation->trap_handled = 1;
     if (status == 0 && info.proc_id) {
         invocation->proc_id = info.proc_id;
         server_route_pending_outputs_locked(server);

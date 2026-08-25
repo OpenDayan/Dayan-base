@@ -82,14 +82,51 @@ static void default_output(void *context, uint32_t cluster, uint32_t core,
 static void default_trap(void *context, uint32_t cluster, uint32_t core,
                          const struct trap_record *record)
 {
+    static const char *const gpr_names[32] = {
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+        "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+        "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    };
+    size_t i;
+    size_t j;
+
     (void)context;
+    flockfile(stderr);
+    if (!record) {
+        fprintf(stderr,
+                "dayan_server: trap cluster=%u core=%u context unavailable\n",
+                cluster, core);
+        fflush(stderr);
+        funlockfile(stderr);
+        return;
+    }
     fprintf(stderr,
-            "dayan_server: trap cluster=%u core=%u proc=%u cause=0x%llx "
-            "epc=0x%llx value=0x%llx\n",
-            cluster, core, record ? record->thread_id : 0,
-            (unsigned long long)(record ? record->mcause : 0),
-            (unsigned long long)(record ? record->mepc : 0),
-            (unsigned long long)(record ? record->mtval : 0));
+            "dayan_server: trap cluster=%u core=%u proc=%u type=%u "
+            "state=%u cause=0x%llx epc=0x%llx value=0x%llx "
+            "root_proc=%u parent_proc=%u cookie=%llu\n",
+            cluster, core, record->thread_id, record->thread_type,
+            record->thread_state, (unsigned long long)record->mcause,
+            (unsigned long long)record->mepc,
+            (unsigned long long)record->mtval, record->host_proc_id,
+            record->parent_proc_id, (unsigned long long)record->cookie);
+    fprintf(stderr,
+            "dayan_server: trap csr mstatus=0x%016llx mepc=0x%016llx "
+            "mcause=0x%016llx mtval=0x%016llx fcsr=0x%016llx\n",
+            (unsigned long long)record->mstatus,
+            (unsigned long long)record->mepc,
+            (unsigned long long)record->mcause,
+            (unsigned long long)record->mtval,
+            (unsigned long long)record->fcsr);
+    for (i = 0; i < 32; i += 4) {
+        fprintf(stderr, "dayan_server: trap gpr");
+        for (j = i; j < i + 4; ++j)
+            fprintf(stderr, " x%02zu/%-4s=0x%016llx", j, gpr_names[j],
+                    (unsigned long long)record->x[j]);
+        fputc('\n', stderr);
+    }
+    fflush(stderr);
+    funlockfile(stderr);
 }
 
 static const char *tensor_interrupt_source_name(uint16_t source)
@@ -1401,10 +1438,10 @@ out:
     return status;
 }
 
-int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
-                                     npu_hal_core_t target,
-                                     uint32_t timeout_ms,
-                                     npu_service_kill_result_t *result_out)
+static int npu_service_rpc_kill_timeout(
+    npu_service_device_t *device, npu_hal_core_t target,
+    uint32_t root_proc_id, int64_t failure_status, uint32_t timeout_ms,
+    npu_service_kill_result_t *result_out)
 {
     struct rpc_proc_kill_result result;
     npu_hal_allocation_t *allocation = 0;
@@ -1414,6 +1451,7 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
     int status;
 
     if (!device || !result_out || !timeout_ms ||
+        (!!root_proc_id != (failure_status < 0)) ||
         !npu_hal_core_valid(device->hal, target))
         return -EINVAL;
     pthread_mutex_lock(&device->mutex);
@@ -1432,7 +1470,11 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
         goto out;
     }
     memset(&result, 0, sizeof(result));
-    result.status = -EIO;
+    if (root_proc_id) {
+        result.flags = RPC_PROC_KILL_FAMILY;
+        result.status = failure_status;
+        result.reserved = root_proc_id;
+    }
     status = npu_hal_memory_write(device->hal, allocation, target, 0,
                                   &result, sizeof(result));
     if (status < 0)
@@ -1447,7 +1489,8 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
     if (status < 0)
         goto out;
     if (result.hart_id != target.core ||
-        result.flags || result.reserved) {
+        result.flags != (root_proc_id ? RPC_PROC_KILL_FAMILY : 0) ||
+        result.reserved != root_proc_id) {
         status = -EPROTO;
         goto out;
     }
@@ -1474,6 +1517,15 @@ out:
     return status;
 }
 
+int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
+                                     npu_hal_core_t target,
+                                     uint32_t timeout_ms,
+                                     npu_service_kill_result_t *result_out)
+{
+    return npu_service_rpc_kill_timeout(device, target, 0, 0, timeout_ms,
+                                        result_out);
+}
+
 int npu_service_rpc_kill_all(npu_service_device_t *device,
                              npu_hal_core_t target,
                              npu_service_kill_result_t *result_out)
@@ -1482,4 +1534,29 @@ int npu_service_rpc_kill_all(npu_service_device_t *device,
         return -EINVAL;
     return npu_service_rpc_kill_all_timeout(
         device, target, device->options.default_timeout_ms, result_out);
+}
+
+int npu_service_rpc_kill_family_timeout(npu_service_device_t *device,
+                                        npu_hal_core_t target,
+                                        uint32_t root_proc_id,
+                                        int64_t failure_status,
+                                        uint32_t timeout_ms,
+                                        npu_service_kill_result_t *result_out)
+{
+    return npu_service_rpc_kill_timeout(device, target, root_proc_id,
+                                        failure_status, timeout_ms,
+                                        result_out);
+}
+
+int npu_service_rpc_kill_family(npu_service_device_t *device,
+                                npu_hal_core_t target,
+                                uint32_t root_proc_id,
+                                int64_t failure_status,
+                                npu_service_kill_result_t *result_out)
+{
+    if (!device)
+        return -EINVAL;
+    return npu_service_rpc_kill_family_timeout(
+        device, target, root_proc_id, failure_status,
+        device->options.default_timeout_ms, result_out);
 }

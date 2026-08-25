@@ -100,8 +100,10 @@ typedef enum npu_event_state {
 
 /*
  * Device stdout is delivered when Runtime observes command progress through
- * Event query/wait or Stream synchronization.  The callback runs in the
- * calling application thread and may be null to discard Device output.
+ * Event query/wait or Stream synchronization.  Long waits poll output at a
+ * bounded interval, so Device fflush does not wait for kernel completion.
+ * The callback runs in the calling application thread and may be null to
+ * discard Device output.
  */
 typedef struct npu_runtime_options {
     uint32_t version;

@@ -4,7 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+#define RUNTIME_OUTPUT_POLL_MS 100U
 
 void npu_context_desc_init(npu_context_desc_t *desc)
 {
@@ -458,17 +461,60 @@ int npu_stream_destroy(npu_stream_t *stream)
     return 0;
 }
 
-int npu_stream_synchronize(npu_stream_t *stream, uint32_t timeout_ms)
+static uint64_t monotonic_milliseconds(void)
+{
+    struct timespec now;
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
+
+static int runtime_wait(npu_runtime_t *runtime, uint16_t opcode,
+                        uint64_t object_id, uint64_t event_id,
+                        uint32_t timeout_ms, void *response,
+                        size_t response_size)
 {
     npu_ipc_event_wait_t request;
+    uint64_t deadline = timeout_ms == NPU_TIMEOUT_INFINITE ? 0 :
+                        monotonic_milliseconds() + timeout_ms;
 
+    for (;;) {
+        uint32_t slice = timeout_ms;
+        int status;
+
+        if (timeout_ms == NPU_TIMEOUT_INFINITE) {
+            slice = RUNTIME_OUTPUT_POLL_MS;
+        } else if (timeout_ms) {
+            uint64_t now = monotonic_milliseconds();
+            uint64_t remaining;
+
+            if (now >= deadline)
+                return -ETIMEDOUT;
+            remaining = deadline - now;
+            slice = remaining < RUNTIME_OUTPUT_POLL_MS ?
+                    (uint32_t)remaining : RUNTIME_OUTPUT_POLL_MS;
+        }
+        memset(&request, 0, sizeof(request));
+        request.event_id = event_id;
+        request.timeout_ms = slice;
+        status = runtime_control_call(runtime, opcode, object_id,
+                                      &request, sizeof(request), response,
+                                      response_size, 0);
+        if (status != -ETIMEDOUT || !timeout_ms)
+            return status;
+        if (timeout_ms != NPU_TIMEOUT_INFINITE &&
+            monotonic_milliseconds() >= deadline)
+            return -ETIMEDOUT;
+    }
+}
+
+int npu_stream_synchronize(npu_stream_t *stream, uint32_t timeout_ms)
+{
     if (!runtime_stream_valid(stream))
         return -EINVAL;
-    memset(&request, 0, sizeof(request));
-    request.timeout_ms = timeout_ms;
-    return runtime_control_call(stream->context->runtime,
-                                NPU_IPC_STREAM_SYNCHRONIZE, stream->id,
-                                &request, sizeof(request), 0, 0, 0);
+    return runtime_wait(stream->context->runtime,
+                        NPU_IPC_STREAM_SYNCHRONIZE, stream->id, 0,
+                        timeout_ms, 0, 0);
 }
 
 int npu_stream_wait_event(npu_stream_t *stream, npu_event_t *event)
@@ -541,19 +587,14 @@ int npu_event_query(npu_event_t *event, npu_event_info_t *info)
 int npu_event_wait(npu_event_t *event, uint32_t timeout_ms,
                    npu_event_info_t *info)
 {
-    npu_ipc_event_wait_t request;
     npu_ipc_event_info_t response;
     int status;
 
     if (!event || !runtime_context_valid(event->context))
         return -EINVAL;
-    memset(&request, 0, sizeof(request));
-    request.event_id = event->id;
-    request.timeout_ms = timeout_ms;
-    status = runtime_control_call(event->context->runtime,
-                                  NPU_IPC_EVENT_WAIT, event->id,
-                                  &request, sizeof(request), &response,
-                                  sizeof(response), 0);
+    status = runtime_wait(event->context->runtime, NPU_IPC_EVENT_WAIT,
+                          event->id, event->id, timeout_ms, &response,
+                          sizeof(response));
     if (status < 0)
         return status;
     copy_event_info(&event->cached, &response);

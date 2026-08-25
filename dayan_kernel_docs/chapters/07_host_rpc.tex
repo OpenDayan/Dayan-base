@@ -88,9 +88,10 @@ Host 把 ACQUIRE 大小向 64-byte 对齐，并返回不小于请求值的普通
 
 \subsection{异常报告}
 
-TRAP REPORT 不使用 \code{rpc_packet}；command argument 直接指向 312-byte
-\code{trap_record}。记录包含 hart/thread 标识、thread 状态、五个 machine/F CSR 和
-32 个整数寄存器。Host 校验来源 hart 后调用 trap callback。
+TRAP REPORT 不使用 \code{rpc_packet}；command argument 直接指向 328-byte
+\code{trap_record}。记录包含 hart/thread 标识、thread 状态、五个 machine/F CSR、
+32 个整数寄存器，以及所属 Host root proc、parent proc 和 launch cookie。Host 校验
+来源 hart 后调用 trap callback。
 
 \subsection{创建 proc}
 

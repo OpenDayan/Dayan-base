@@ -214,6 +214,8 @@ struct rpc_proc_kill_result {
     uint64_t reserved;
 };
 
+#define RPC_PROC_KILL_FAMILY (1U << 0)
+
 #define RPC_PROFILE_RECORD_SIZE 8U
 #define RPC_PROFILE_SLOT_DEFINE_SIZE 24U
 #define RPC_PROFILE_COUNTER_BITS 48U

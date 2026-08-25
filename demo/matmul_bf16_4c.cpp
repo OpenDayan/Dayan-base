@@ -902,27 +902,6 @@ static inline void configure_mat_group()
         BaseNPUInstBuilder::DT_BF16);
 }
 
-template <bool ProducerLoadsA, long StoreGroup>
-static inline LsuConfig configure_c_store(const MatmulState *state)
-{
-    using Layout = UramLayout<ProducerLoadsA>;
-
-    constexpr int rows = Layout::max_rows(0);
-    constexpr int columns = Layout::max_cols(0);
-    long checksum = 0;
-    constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
-
-    set_lsu_matrix<StoreGroup>(
-        checksum, rows, columns * (int)sizeof(float),
-        columns * (int)sizeof(float), (long)state->c_stride);
-    __tx_lsu_tcsr_write<
-        StoreGroup * LSU_GROUPSZ + LSU_URAMREADSWIZZLEMBS>(swizzle);
-    return {
-        columns * (int)sizeof(float) / 64 - 1,
-        rows - 1,
-    };
-}
-
 static inline void pass_mat_turn(MatmulState *state, uint32_t worker)
 {
     dayan_resource_t *turn = &state->mat_turn[worker ^ 1U];
@@ -1058,38 +1037,6 @@ static void mat_worker(void *argument)
     }
 }
 
-template <bool ProducerLoadsA>
-static void issue_c_store(MatmulState *state, int tile_m, int tile_n,
-                          int slice)
-{
-    using Layout = UramLayout<ProducerLoadsA>;
-
-    const int real_rows = rows_for_slice<ProducerLoadsA>(
-        state, tile_m, state->row_lane, slice);
-    const int real_columns = cols_for_slice<ProducerLoadsA>(
-        state, tile_n, state->column_lane, slice);
-    require_status(dayan_resource_wait_ready(&state->c[slice]));
-    configure_lsu_tcsr<Constants::kCStore * LSU_GROUPSZ + LSU_DIM1>(
-        real_rows - 1, &state->store_config.dim1);
-    configure_lsu_tcsr<Constants::kCStore * LSU_GROUPSZ + LSU_DIM0>(
-        (int)((uint64_t)real_columns * sizeof(float) / 64U - 1U),
-        &state->store_config.dim0);
-    const uint64_t global_row =
-        (uint64_t)row_partition_begin(state, state->row_lane) +
-        (uint64_t)tile_m * Constants::kTileM +
-        (ProducerLoadsA ? 0U : (uint64_t)Layout::slice_offset(slice));
-    const uint64_t global_column =
-        (uint64_t)(tile_n * Constants::kClusterColumns +
-                   (int)state->column_lane) * Constants::kTileN +
-        (ProducerLoadsA ? (uint64_t)Layout::slice_offset(slice) : 0U);
-    const uint64_t c_uram = state->uram_base + Layout::c_base(slice);
-    const uint64_t c_dram =
-        state->c_base + global_row * state->c_stride +
-        global_column * sizeof(float);
-
-    __tx_lsu_dma_u2d<Constants::kCStore>((long)c_dram, (long)c_uram);
-}
-
 static inline void complete_c_store_batch(MatmulState *state,
                                           uint32_t active_mask)
 {
@@ -1103,9 +1050,24 @@ static inline void complete_c_store_batch(MatmulState *state,
 template <bool ProducerLoadsA>
 static void c_store_worker(void *argument)
 {
+    using Layout = UramLayout<ProducerLoadsA>;
+
     MatmulState *state = (MatmulState *)argument;
-    state->store_config =
-        configure_c_store<ProducerLoadsA, Constants::kCStore>(state);
+    constexpr int max_rows = Layout::max_rows(0);
+    constexpr int max_columns = Layout::max_cols(0);
+    constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
+    long checksum = 0;
+
+    set_lsu_matrix<Constants::kCStore>(
+        checksum, max_rows, max_columns * (int)sizeof(float),
+        max_columns * (int)sizeof(float), (long)state->c_stride);
+    __tx_lsu_tcsr_write<
+        Constants::kCStore * LSU_GROUPSZ + LSU_URAMREADSWIZZLEMBS>(
+        swizzle);
+    state->store_config = {
+        max_columns * (int)sizeof(float) / 64 - 1,
+        max_rows - 1,
+    };
     const uint64_t output_count =
         (uint64_t)state->count_m * (uint64_t)state->count_n;
 
@@ -1124,7 +1086,32 @@ static void c_store_worker(void *argument)
             if (!rows || !columns)
                 continue;
             active_mask |= 1U << slice;
-            issue_c_store<ProducerLoadsA>(state, tile_m, tile_n, slice);
+            require_status(dayan_resource_wait_ready(&state->c[slice]));
+            configure_lsu_tcsr<
+                Constants::kCStore * LSU_GROUPSZ + LSU_DIM1>(
+                rows - 1, &state->store_config.dim1);
+            configure_lsu_tcsr<
+                Constants::kCStore * LSU_GROUPSZ + LSU_DIM0>(
+                (int)((uint64_t)columns * sizeof(float) / 64U - 1U),
+                &state->store_config.dim0);
+            const uint64_t global_row =
+                (uint64_t)row_partition_begin(state, state->row_lane) +
+                (uint64_t)tile_m * Constants::kTileM +
+                (ProducerLoadsA ?
+                     0U : (uint64_t)Layout::slice_offset(slice));
+            const uint64_t global_column =
+                (uint64_t)(tile_n * Constants::kClusterColumns +
+                           (int)state->column_lane) * Constants::kTileN +
+                (ProducerLoadsA ?
+                     (uint64_t)Layout::slice_offset(slice) : 0U);
+            const uint64_t c_uram =
+                state->uram_base + Layout::c_base(slice);
+            const uint64_t c_dram =
+                state->c_base + global_row * state->c_stride +
+                global_column * sizeof(float);
+
+            __tx_lsu_dma_u2d<Constants::kCStore>(
+                (long)c_dram, (long)c_uram);
             if (++issued == 2) {
                 complete_c_store_batch(state, active_mask);
                 active_mask = 0;
@@ -1166,29 +1153,6 @@ static inline int initialize_shared_buffers(SharedBuffer *buffers, int count)
     return 0;
 }
 
-static int initialize_cluster_shared(ClusterShared &cluster, uint32_t lane,
-                                     uint64_t uram)
-{
-    int status = 0;
-
-    if (lane == 0U) {
-        cluster.init_status = 0;
-        status = initialize_shared_buffers(
-            &cluster.sliced[0][0],
-            Constants::kClusterRows * Constants::kSlices);
-        if (status == 0)
-            status = initialize_shared_buffers(
-                &cluster.buffered[0][0], Constants::kClusterRows * 2);
-        cluster.init_status = status;
-    }
-    cluster.uram_base[lane] = uram;
-    status = dayan_cluster_barrier(Constants::kClusterCores,
-                                   &cluster.barrier);
-    if (status < 0)
-        return status;
-    return cluster.init_status;
-}
-
 template <bool ProducerLoadsA>
 static int run_pipeline(const MatmulBf16Config *config,
                         const uint16_t *a, const uint16_t *bt, float *c,
@@ -1196,8 +1160,22 @@ static int run_pipeline(const MatmulBf16Config *config,
 {
     using Layout = UramLayout<ProducerLoadsA>;
 
-    int status = initialize_cluster_shared(
-        cluster_shared(), lane, physical_uram);
+    ClusterShared &cluster = cluster_shared();
+    int status = 0;
+
+    if (lane == 0U) {
+        cluster.init_status = initialize_shared_buffers(
+            &cluster.sliced[0][0],
+            Constants::kClusterRows * Constants::kSlices);
+        if (cluster.init_status == 0)
+            cluster.init_status = initialize_shared_buffers(
+                &cluster.buffered[0][0], Constants::kClusterRows * 2);
+    }
+    cluster.uram_base[lane] = physical_uram;
+    status = dayan_cluster_barrier(Constants::kClusterCores,
+                                   &cluster.barrier);
+    if (status == 0)
+        status = cluster.init_status;
     if (status < 0)
         return status;
 

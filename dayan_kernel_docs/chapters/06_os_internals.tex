@@ -158,8 +158,9 @@ DMA 复用 LSU 路径；未知事件或失败的资源状态迁移视为固件�
 \subsection{异常处理}
 
 同步异常先切到每 hart trap 栈，保存整数寄存器、\code{mstatus}、\code{mepc}、
-\code{mcause}、\code{mtval} 和 \code{fcsr}。C handler 加入 hart 与 thread 信息，
-生成稳定的 \code{trap_record}，再通过 RPC 发送给 Host。
+\code{mcause}、\code{mtval} 和 \code{fcsr}。C handler 加入 hart、thread、所属 Host
+root proc、parent proc 和 launch cookie，生成稳定的 \code{trap_record}，再通过 RPC
+发送给 Host。
 
 普通 proc 异常后以失败状态退出。init/scheduler 异常、嵌套异常、RPC send proc 异常或
 报告无法入队时，Dayan OS 停机；这些场景无法安全恢复或保证诊断送达。

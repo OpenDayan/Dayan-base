@@ -32,6 +32,7 @@ struct proc_family {
     uint32_t pending_produce;
     size_t child_stack_size;
     size_t child_printf_size;
+    int64_t kill_status;
     struct dayan_context_fields root_context;
     uint8_t lsu_tcsr_used;
     uint8_t mat_tcsr_used;
@@ -1028,7 +1029,7 @@ static void kill_mark_slot(struct proc_family *family,
 
     if (slot->state == PROC_SLOT_ZOMBIE) {
         slot->state = PROC_SLOT_KILLED;
-        proc->exit_status = -ECANCELED;
+        proc->exit_status = family->kill_status;
         return;
     }
     if (slot->state != PROC_SLOT_ROOT &&
@@ -1036,7 +1037,7 @@ static void kill_mark_slot(struct proc_family *family,
         platform_halt();
     waiting_produce = proc->thread.state == THREAD_WAIT_PRODUCE;
     kill_unlink_proc(proc);
-    proc->exit_status = -ECANCELED;
+    proc->exit_status = family->kill_status;
     proc->live_children = 0;
     proc->join_kind = 0;
     proc->join_thread_id = 0;
@@ -1149,7 +1150,7 @@ static void kill_complete_root(struct proc_family *family)
     if (!cleanup)
         platform_halt();
     cleanup(root, cleanup_arg);
-    (void)rpc_proc_exit(root->thread.id, 0, -ECANCELED, root->cookie,
+    (void)rpc_proc_exit(root->thread.id, 0, family->kill_status, root->cookie,
                         RPC_PROC_EXIT_ROOT);
 }
 
@@ -1188,10 +1189,19 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
 {
     struct cpu *cpu = cpu_self();
     uintptr_t hart = platform_hart_id();
+    uint64_t selector;
+    int64_t kill_status;
     uint32_t index;
 
-    if (!result || result->flags ||
-        result->reserved)
+    if (!result || (result->flags & ~RPC_PROC_KILL_FAMILY))
+        return -EINVAL;
+    selector = result->reserved;
+    if (!!(result->flags & RPC_PROC_KILL_FAMILY) != !!selector ||
+        selector > UINT32_MAX)
+        return -EINVAL;
+    kill_status = result->flags & RPC_PROC_KILL_FAMILY ? result->status :
+                                                        -ECANCELED;
+    if (kill_status >= 0)
         return -EINVAL;
     result->hart_id = (uint32_t)hart;
     result->status = 0;
@@ -1207,7 +1217,10 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
 
         if (family->cpu != cpu || family->killed || !family->root)
             continue;
+        if (selector && family->root->thread.id != (uint32_t)selector)
+            continue;
         family->killed = 1;
+        family->kill_status = kill_status;
         family->free_slots = 0;
         for (slot = family->slots; slot; slot = slot->family_next) {
             if (slot->state == PROC_SLOT_CHILD ||
@@ -1222,6 +1235,9 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
         kill_mark_slot(family,
                        container_of(family->root, struct proc_slot, proc));
     }
+
+    if (selector && !result->killed_roots)
+        return -ESRCH;
 
     for (index = 0; index < CONFIG_PROC_SLOT_COUNT; ++index) {
         struct proc_family *family = &hart_proc_families[hart][index];

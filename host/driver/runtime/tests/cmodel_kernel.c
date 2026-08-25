@@ -160,6 +160,25 @@ void kill_kernel(uint64_t *output, uint64_t value)
         dayan_yield();
 }
 
+static void trap_child(void *argument)
+{
+    (void)argument;
+    __asm__ volatile(".word 0");
+}
+
+void trap_kernel(void)
+{
+    if (dayan_task_mode() == 1U ||
+        dayan_task_id(DAYAN_TASK_X) == 3U) {
+        int child = dayan_create_thread("trap-child", trap_child, 0, 0);
+
+        if (child < 0)
+            dayan_thread_exit(child);
+    }
+    for (;;)
+        dayan_yield();
+}
+
 void locked_kernel(struct lock_test_results *results)
 {
     struct lock_child_work work[LOCK_TEST_CHILD_THREADS];

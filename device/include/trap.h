@@ -67,6 +67,9 @@ struct trap_record {
     uint64_t mtval;
     uint64_t fcsr;
     uint64_t x[32];
+    uint32_t host_proc_id;
+    uint32_t parent_proc_id;
+    uint64_t cookie;
 };
 
 struct trap_state {
@@ -87,7 +90,7 @@ _Static_assert(sizeof(struct trap_frame) == TRAP_FRAME_SIZE,
                "trap frame size");
 _Static_assert((TRAP_FRAME_SIZE & 15) == 0,
                "trap frame must preserve stack alignment");
-_Static_assert(sizeof(struct trap_record) == 312,
+_Static_assert(sizeof(struct trap_record) == 328,
                "Host trap record ABI must stay fixed");
 _Static_assert(offsetof(struct trap_record, hart_id) == 0,
                "trap record hart offset");
@@ -95,6 +98,8 @@ _Static_assert(offsetof(struct trap_record, mstatus) == 16,
                "trap record CSR offset");
 _Static_assert(offsetof(struct trap_record, x) == 56,
                "trap record GPR offset");
+_Static_assert(offsetof(struct trap_record, host_proc_id) == 312,
+               "trap record proc identity offset");
 
 _Noreturn void trap_handle(const struct trap_frame *frame);
 

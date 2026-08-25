@@ -256,20 +256,6 @@ static inline int cols_for_slice(const MatmulState *state, int tile_n,
     return min_int(state->n - col_base, Layout::slice_size(slice));
 }
 
-template <bool ProducerLoadsA>
-static inline int active_slices(const MatmulState *state, int tile_m,
-                                int tile_n)
-{
-    int count = 0;
-
-    for (int slice = 0; slice < MATMUL_BF16_1C_SLICES; ++slice) {
-        if (rows_for_slice<ProducerLoadsA>(state, tile_m, slice) > 0 &&
-            cols_for_slice<ProducerLoadsA>(state, tile_n, slice) > 0)
-            ++count;
-    }
-    return count;
-}
-
 static inline int k_for_tile(const MatmulState *state, int tile_k)
 {
     const int k_base = tile_k * Constants::kTileK;
@@ -396,54 +382,11 @@ static inline int wait_for_generation(SharedBuffer *buffer,
 }
 
 template <bool ProducerLoadsA, long GroupBase, int Slice>
-static inline void configure_consumer(const MatmulState *state)
+static void consume_slice(void *argument)
 {
     using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
 
-    long checksum = 0;
-    constexpr int rows = Layout::max_rows(Slice);
-    constexpr int cols = Layout::max_cols(Slice);
-    constexpr int local_rows = Layout::slice_size(Slice);
-    constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
-
-    set_lsu_matrix<GroupBase + Constants::kLsuLocal>(
-        checksum, local_rows,
-        Constants::kTileK * (int)sizeof(uint16_t),
-        (long)(ProducerLoadsA ? state->bt_stride : state->a_stride),
-        Constants::kTileK * (int)sizeof(uint16_t));
-    set_lsu_matrix<GroupBase + Constants::kLsuCStore>(
-        checksum, rows, cols * (int)sizeof(float),
-        cols * (int)sizeof(float), (long)state->c_stride);
-    __tx_lsu_tcsr_write<
-        (GroupBase + Constants::kLsuLocal) * LSU_GROUPSZ +
-        LSU_URAMWRITESWIZZLEMBS>(swizzle);
-    __tx_lsu_tcsr_write<
-        (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
-        LSU_URAMREADSWIZZLEMBS>(swizzle);
-
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_M>(rows - 1);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_N>(cols - 1);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_K>(
-        Constants::kTileK - 1);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASTRIDE>(
-        Constants::kTileK * sizeof(uint16_t));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSTRIDE>(
-        Constants::kTileK * sizeof(uint16_t));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSTRIDE>(
-        cols * sizeof(float));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASWIZZLEMBS>(swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSWIZZLEMBS>(swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSWIZZLEMBS>(swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_PERSISTENTMODE>(0);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_DATATYPE>(
-        BaseNPUInstBuilder::DT_BF16);
-}
-
-template <bool ProducerLoadsA, long GroupBase, int Slice>
-static void consume_slice(MatmulState *state)
-{
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-
+    MatmulState *state = (MatmulState *)argument;
     constexpr int slice_offset = Layout::slice_offset(Slice);
     constexpr int max_rows = Layout::max_rows(Slice);
     constexpr int max_cols = Layout::max_cols(Slice);
@@ -457,7 +400,40 @@ static void consume_slice(MatmulState *state)
     if (state->abort)
         return;
 
-    configure_consumer<ProducerLoadsA, GroupBase, Slice>(state);
+    long checksum = 0;
+    constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
+
+    set_lsu_matrix<GroupBase + Constants::kLsuLocal>(
+        checksum, local_rows,
+        Constants::kTileK * (int)sizeof(uint16_t),
+        (long)(ProducerLoadsA ? state->bt_stride : state->a_stride),
+        Constants::kTileK * (int)sizeof(uint16_t));
+    set_lsu_matrix<GroupBase + Constants::kLsuCStore>(
+        checksum, max_rows, max_cols * (int)sizeof(float),
+        max_cols * (int)sizeof(float), (long)state->c_stride);
+    __tx_lsu_tcsr_write<
+        (GroupBase + Constants::kLsuLocal) * LSU_GROUPSZ +
+        LSU_URAMWRITESWIZZLEMBS>(swizzle);
+    __tx_lsu_tcsr_write<
+        (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
+        LSU_URAMREADSWIZZLEMBS>(swizzle);
+
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_M>(max_rows - 1);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_N>(max_cols - 1);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_K>(
+        Constants::kTileK - 1);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASTRIDE>(
+        Constants::kTileK * sizeof(uint16_t));
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSTRIDE>(
+        Constants::kTileK * sizeof(uint16_t));
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSTRIDE>(
+        max_cols * sizeof(float));
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASWIZZLEMBS>(swizzle);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSWIZZLEMBS>(swizzle);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSWIZZLEMBS>(swizzle);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_PERSISTENTMODE>(0);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_DATATYPE>(
+        BaseNPUInstBuilder::DT_BF16);
 
     for (int tile_m = 0; tile_m < state->count_m; ++tile_m) {
         const int real_rows =
@@ -562,28 +538,15 @@ static void consume_slice(MatmulState *state)
 }
 
 template <bool ProducerLoadsA>
-static void consumer_0(void *argument)
+static void producer_thread(void *argument)
 {
-    consume_slice<ProducerLoadsA, 0, 0>((MatmulState *)argument);
-}
+    MatmulState *state = (MatmulState *)argument;
 
-#if MATMUL_BF16_1C_SLICES == 3
-template <bool ProducerLoadsA>
-static void consumer_1(void *argument)
-{
-    consume_slice<ProducerLoadsA, 0, 1>((MatmulState *)argument);
-}
+    while (!state->start)
+        dayan_yield();
+    if (state->abort)
+        return;
 
-template <bool ProducerLoadsA>
-static void consumer_2(void *argument)
-{
-    consume_slice<ProducerLoadsA, 0, 2>((MatmulState *)argument);
-}
-#endif
-
-template <bool ProducerLoadsA>
-static inline void configure_producer(const MatmulState *state)
-{
     long checksum = 0;
     constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
 
@@ -596,19 +559,19 @@ static inline void configure_producer(const MatmulState *state)
     __tx_lsu_tcsr_write<
         Constants::kLsuShared * LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(
         swizzle);
-}
-
-template <bool ProducerLoadsA>
-static int produce_shared(MatmulState *state)
-{
-    configure_producer<ProducerLoadsA>(state);
 
     for (int tile_m = 0; tile_m < state->count_m; ++tile_m) {
         for (int tile_n = 0; tile_n < state->count_n; ++tile_n) {
-            const int users = active_slices<ProducerLoadsA>(
-                state, tile_m, tile_n);
+            int users = 0;
 
-            if (users == 0)
+            for (int slice = 0; slice < MATMUL_BF16_1C_SLICES; ++slice) {
+                if (rows_for_slice<ProducerLoadsA>(
+                        state, tile_m, slice) > 0 &&
+                    cols_for_slice<ProducerLoadsA>(
+                        state, tile_n, slice) > 0)
+                    ++users;
+            }
+            if (!users)
                 continue;
 
             for (int tile_k = 0; tile_k < state->count_k; ++tile_k) {
@@ -629,12 +592,16 @@ static int produce_shared(MatmulState *state)
                                state->bt_stride);
                 int status = dayan_resource_wait_free(&shared->resource);
 
-                if (status < 0)
-                    return remember_error(state, status);
+                if (status < 0) {
+                    remember_error(state, status);
+                    return;
+                }
                 status = dayan_resource_alloc(&shared->resource, 1,
                                               (uint32_t)users);
-                if (status < 0)
-                    return remember_error(state, status);
+                if (status < 0) {
+                    remember_error(state, status);
+                    return;
+                }
 
                 shared->generation = generation;
                 load_matrix<Constants::kLsuShared>(
@@ -648,27 +615,13 @@ static int produce_shared(MatmulState *state)
                 dayan_wait_lsu();
 
                 status = dayan_resource_produce(&shared->resource);
-                if (status < 0)
-                    return remember_error(state, status);
+                if (status < 0) {
+                    remember_error(state, status);
+                    return;
+                }
                 dayan_yield();
             }
         }
-    }
-    return 0;
-}
-
-template <bool ProducerLoadsA>
-static void producer_thread(void *argument)
-{
-    MatmulState *state = (MatmulState *)argument;
-
-    while (!state->start)
-        dayan_yield();
-    if (!state->abort) {
-        const int status = produce_shared<ProducerLoadsA>(state);
-
-        if (status < 0)
-            remember_error(state, status);
     }
 }
 
@@ -720,16 +673,19 @@ static int run_pipeline(const MatmulBf16Config *config,
     resources.mat_tcsr_count = 1;
     if (status >= 0)
         status = dayan_create_thread("consumer-0",
-                                     consumer_0<ProducerLoadsA>, &state,
+                                     consume_slice<ProducerLoadsA, 0, 0>,
+                                     &state,
                                      &resources);
 #if MATMUL_BF16_1C_SLICES == 3
     if (status >= 0)
         status = dayan_create_thread("consumer-1",
-                                     consumer_1<ProducerLoadsA>, &state,
+                                     consume_slice<ProducerLoadsA, 0, 1>,
+                                     &state,
                                      &resources);
     if (status >= 0)
         status = dayan_create_thread("consumer-2",
-                                     consumer_2<ProducerLoadsA>, &state,
+                                     consume_slice<ProducerLoadsA, 0, 2>,
+                                     &state,
                                      &resources);
 #endif
     if (status < 0) {

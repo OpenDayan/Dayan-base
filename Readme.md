@@ -273,7 +273,8 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 有符号 status。当前 opcode 1–8 分别为字符串输出、清空输出缓冲、申请堆 region、
 归还堆 region、异常报告、张量中断报告、root proc 退出通知和 profile 满缓冲上报。
 异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
-稳定的 312-byte `struct trap_record`，后者直接指向 176-byte
+稳定的 328-byte `struct trap_record`，Host 默认 trap 回调会原子地打印线程身份、
+`mstatus/mepc/mcause/mtval/fcsr` 和 x0–x31；后者直接指向 176-byte
 `struct tensor_interrupt_record`。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte

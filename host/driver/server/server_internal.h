@@ -133,9 +133,12 @@ struct server_invocation {
     struct server_proc_resources resources;
     size_t slot_index;
     uint64_t resident;
+    uint64_t cookie;
+    int64_t trap_status;
     uint32_t proc_id;
     uint32_t task_id[3];
     uint32_t polling;
+    uint32_t trap_handled;
     struct server_launch_group *group;
     struct server_invocation *next;
 };

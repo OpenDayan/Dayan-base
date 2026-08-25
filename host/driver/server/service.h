@@ -192,6 +192,17 @@ int npu_service_rpc_kill_all_timeout(npu_service_device_t *device,
                                      npu_hal_core_t target,
                                      uint32_t timeout_ms,
                                      npu_service_kill_result_t *result);
+int npu_service_rpc_kill_family(npu_service_device_t *device,
+                                npu_hal_core_t target,
+                                uint32_t root_proc_id,
+                                int64_t failure_status,
+                                npu_service_kill_result_t *result);
+int npu_service_rpc_kill_family_timeout(npu_service_device_t *device,
+                                        npu_hal_core_t target,
+                                        uint32_t root_proc_id,
+                                        int64_t failure_status,
+                                        uint32_t timeout_ms,
+                                        npu_service_kill_result_t *result);
 
 /* One global allocation is partitioned into one FIFO per booted Hart. */
 int npu_service_profile_start(npu_service_device_t *device,

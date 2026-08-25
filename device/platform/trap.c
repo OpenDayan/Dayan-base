@@ -33,6 +33,18 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     record->fcsr = frame->fcsr;
     for (i = 0; i < 32; ++i)
         record->x[i] = frame->x[i];
+    record->host_proc_id = 0;
+    record->parent_proc_id = 0;
+    record->cookie = 0;
+    if (current->type == THREAD_TYPE_PROC) {
+        struct proc *proc = proc_self();
+
+        if (!proc)
+            platform_halt();
+        record->host_proc_id = proc->host_proc_id;
+        record->parent_proc_id = proc->parent_id;
+        record->cookie = proc->cookie;
+    }
 
     status = rpc_report_trap(record, sizeof(*record));
     if (status < 0)

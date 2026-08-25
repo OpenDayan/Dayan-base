@@ -23,6 +23,7 @@ int main(void)
     assert(sizeof(struct rpc_proc_info) == 96);
     assert(sizeof(struct rpc_proc_ps_snapshot) == 1864);
     assert(sizeof(struct rpc_proc_kill_result) == 40);
+    assert(RPC_PROC_KILL_FAMILY == 1U);
     assert(sizeof(struct rpc_profile_record) == 8);
     assert(sizeof(struct rpc_profile_slot_define) == 24);
     assert(sizeof(struct rpc_profile_config) == 56);
@@ -64,7 +65,7 @@ int main(void)
     assert(RPC_PROFILE_PROC_KILL_WAIT_PRODUCE == 7U);
     assert(RPC_PROFILE_RECORD_SLOT_DEFINE == 0x80U);
     assert(RPC_PROFILE_SLOT_COUNT == 20U);
-    assert(sizeof(struct trap_record) == 312);
+    assert(sizeof(struct trap_record) == 328);
     assert(DAYAN_DEVICE_MAILBOX(3) == 0x1018U);
     assert(DAYAN_IRQ_MAILBOX(3) == 0x2038U);
     assert(DAYAN_CLINT_MSIP(3) == 0x2000cU);

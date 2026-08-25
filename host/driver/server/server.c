@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "trap.h"
+
 #define DAYAN_SERVER_BACKLOG 64U
 #define DAYAN_SERVER_DEFAULT_RESIDENT (64U * 1024U * 1024U)
 #define DAYAN_SERVER_DEFAULT_PROCS_PER_HART 16U
@@ -359,11 +361,87 @@ static void server_device_trap(void *context, uint32_t cluster,
                                const struct trap_record *record)
 {
     dayan_server_t *server = context;
+    struct server_launch_group *trapped_group = 0;
+    struct server_command *trapped_command = 0;
 
-    if (server && server->service_trap) {
+    if (server && server->service_trap)
         server->service_trap(server->service_callback_context, cluster, core,
                              record);
+    if (!server || !record || !record->host_proc_id)
+        return;
+
+    pthread_mutex_lock(&server->mutex);
+    {
+        struct server_session *session;
+
+        for (session = server->sessions; session && !trapped_group;
+             session = session->next) {
+            struct server_context *server_context;
+
+            for (server_context = session->contexts;
+                 server_context && !trapped_group;
+                 server_context = server_context->next) {
+                struct server_stream *stream;
+
+                for (stream = server_context->streams;
+                     stream && !trapped_group; stream = stream->next) {
+                    struct server_command *command = stream->head;
+                    struct server_invocation *invocation;
+
+                    if (!command ||
+                        command->kind != SERVER_COMMAND_LAUNCH)
+                        continue;
+                    for (invocation = command->data.launch.invocations;
+                         invocation; invocation = invocation->next) {
+                        npu_hal_core_t target =
+                            server->slots[invocation->slot_index].target;
+
+                        if (target.cluster != cluster ||
+                            target.core != core ||
+                            invocation->cookie != record->cookie ||
+                            (invocation->proc_id &&
+                             invocation->proc_id != record->host_proc_id))
+                            continue;
+                        invocation->proc_id = record->host_proc_id;
+                        trapped_group = invocation->group;
+                        trapped_command = command;
+                        break;
+                    }
+                }
+            }
+        }
     }
+    if (trapped_group) {
+        struct server_invocation *invocation;
+
+        for (invocation = trapped_command->data.launch.invocations;
+             invocation; invocation = invocation->next) {
+            if (invocation->group == trapped_group) {
+                invocation->trap_status = -EIO;
+                invocation->trap_handled = 0;
+            }
+        }
+        if (!trapped_command->data.launch.aggregate_status)
+            trapped_command->data.launch.aggregate_status = -EIO;
+        trapped_command->data.launch.next_unit =
+            trapped_command->data.launch.total_units;
+        fprintf(stderr,
+                "dayan_server: terminating trapped kernel task='%s' "
+                "cluster=%u core=%u proc=%u root_proc=%u cookie=%llu "
+                "status=%d\n",
+                trapped_command->data.launch.task_name, cluster, core,
+                record->thread_id, record->host_proc_id,
+                (unsigned long long)record->cookie, -EIO);
+        pthread_cond_broadcast(&server->condition);
+    } else {
+        fprintf(stderr,
+                "dayan_server: trap could not be matched to an active "
+                "kernel cluster=%u core=%u proc=%u root_proc=%u "
+                "cookie=%llu\n",
+                cluster, core, record->thread_id, record->host_proc_id,
+                (unsigned long long)record->cookie);
+    }
+    pthread_mutex_unlock(&server->mutex);
 }
 
 static void server_device_tensor_interrupt(

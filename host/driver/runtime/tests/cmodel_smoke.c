@@ -44,6 +44,7 @@ struct proc_exit_capture {
     unsigned count;
     unsigned returned;
     unsigned cancelled;
+    unsigned failed;
     unsigned bad;
 };
 
@@ -60,6 +61,8 @@ static void capture_proc_exit(void *context, uint32_t cluster,
         __atomic_add_fetch(&capture->bad, 1U, __ATOMIC_RELAXED);
     if (result == -ECANCELED) {
         __atomic_add_fetch(&capture->cancelled, 1U, __ATOMIC_RELAXED);
+    } else if (result == -EIO) {
+        __atomic_add_fetch(&capture->failed, 1U, __ATOMIC_RELAXED);
     } else if (result > INT32_MAX) {
         __atomic_add_fetch(&capture->returned, 1U, __ATOMIC_RELAXED);
     } else {
@@ -79,6 +82,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
     npu_hal_core_t target = { 0, 0 };
     uint64_t value = UINT64_C(0x9876543210);
     unsigned attempt;
+    uint32_t root_proc_id = 0;
     int found = 0;
     int status;
 
@@ -123,6 +127,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
                             snapshot.global_free_slots != 15U)
                             return -EIO;
                         found = 1;
+                        root_proc_id = snapshot.records[record].proc_id;
                         break;
                     }
                 }
@@ -140,9 +145,10 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         fprintf(stderr, "kill test proc was not visible through rpc_ps\n");
         return -ETIMEDOUT;
     }
-    status = npu_service_rpc_kill_all(server->device, target, &killed);
+    status = npu_service_rpc_kill_family(server->device, target,
+                                         root_proc_id, -EIO, &killed);
     if (status < 0) {
-        fprintf(stderr, "kill test rpc_kill_all failed: %d\n", status);
+        fprintf(stderr, "kill test rpc_kill_family failed: %d\n", status);
         return status;
     }
     if (killed.killed_roots != 1U || killed.killed_children ||
@@ -157,9 +163,33 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         fprintf(stderr, "kill test event wait failed: %d\n", status);
         return status;
     }
-    if (info.status != -ECANCELED)
+    if (info.status != -EIO)
         return -EIO;
     return npu_event_destroy(event);
+}
+
+static int run_trap_test(npu_stream_t *stream, npu_kernel_t *kernel,
+                         unsigned core_count)
+{
+    npu_launch_desc_t launch;
+    npu_event_info_t info;
+    npu_event_t *event = 0;
+    int status;
+
+    npu_launch_desc_init(&launch, "trap-test");
+    if (core_count == 4U) {
+        launch.config.task_dim = (NPUTaskDim3){ 4, 1, 1 };
+        launch.config.task_mode = (NPUTaskMode)4;
+    }
+    status = npu_kernel_launch(stream, kernel, &launch, &event);
+    if (status < 0)
+        return status;
+    status = npu_event_wait(event, 10000, &info);
+    if (status == 0 && info.status != -EIO)
+        status = -EIO;
+    if (npu_event_destroy(event) < 0 && status == 0)
+        status = -EIO;
+    return status;
 }
 
 static void *run_server(void *argument)
@@ -656,7 +686,7 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
 int main(int argc, char **argv)
 {
     npu_package_argument_t arguments[3];
-    npu_package_kernel_desc_t kernel_desc[5];
+    npu_package_kernel_desc_t kernel_desc[6];
     dayan_server_options_t server_options;
     npu_hal_xdma_options_t xdma_options;
     npu_runtime_options_t runtime_options;
@@ -668,6 +698,7 @@ int main(int argc, char **argv)
     npu_module_t *module = 0;
     npu_kernel_t *kernel = 0;
     npu_kernel_t *killable_kernel = 0;
+    npu_kernel_t *trap_kernel = 0;
     npu_kernel_t *locked_kernel = 0;
     npu_kernel_t *normal_kernel = 0;
     npu_kernel_t *sequence_kernel = 0;
@@ -675,7 +706,7 @@ int main(int argc, char **argv)
     npu_profile_t *profile = 0;
     dayan_server_t *server = 0;
     struct run_state run;
-    struct proc_exit_capture exits = { 0, 0, 0, 0 };
+    struct proc_exit_capture exits = { 0, 0, 0, 0, 0 };
     pthread_t server_thread;
     void *object = 0;
     void *package = 0;
@@ -749,7 +780,13 @@ int main(int argc, char **argv)
     kernel_desc[4].max_tasks_per_core = 4;
     kernel_desc[4].arguments = arguments;
     kernel_desc[4].argument_count = 2;
-    status = npu_package_build(object, object_size, kernel_desc, 5, 0,
+    kernel_desc[5].name = "trap_kernel";
+    kernel_desc[5].entry_symbol = "trap_kernel";
+    kernel_desc[5].supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+    kernel_desc[5].max_tasks_per_core = 1;
+    kernel_desc[5].max_child_threads = 1;
+    kernel_desc[5].atomic_cache_size = 64;
+    status = npu_package_build(object, object_size, kernel_desc, 6, 0,
                                &package, &package_size);
     free(object);
     if (status < 0)
@@ -852,6 +889,11 @@ int main(int argc, char **argv)
                                        &killable_kernel);
     }
     if (status == 0) {
+        stage = "trap kernel lookup";
+        status = npu_module_get_kernel(module, "trap_kernel",
+                                       &trap_kernel);
+    }
+    if (status == 0) {
         stage = "locked kernel lookup";
         status = npu_module_get_kernel(module, "locked_kernel",
                                        &locked_kernel);
@@ -901,7 +943,11 @@ int main(int argc, char **argv)
                                           consecutive_launches);
     }
     if (status == 0) {
-        stage = "rpc kill all";
+        stage = "trap propagation";
+        status = run_trap_test(stream, trap_kernel, core_count);
+    }
+    if (status == 0) {
+        stage = "rpc kill family";
         status = run_kill_test(server, stream, killable_kernel, buffer);
     }
     if (status == 0) {
@@ -914,11 +960,14 @@ int main(int argc, char **argv)
         (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.count, __ATOMIC_RELAXED) !=
                  9U + (core_count == 1 ? 2U : 0U) +
-                     (core_count == 4 ? 8U : 0U) + consecutive_launches ||
+                     (core_count == 4 ? 8U : 0U) + consecutive_launches +
+                     (core_count == 4 ? 4U : 1U) ||
          __atomic_load_n(&exits.returned, __ATOMIC_RELAXED) !=
                  8U + (core_count == 1 ? 2U : 0U) +
                      (core_count == 4 ? 8U : 0U) + consecutive_launches ||
-         __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) != 1U)) {
+         __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) ||
+         __atomic_load_n(&exits.failed, __ATOMIC_RELAXED) !=
+             (core_count == 4 ? 5U : 2U))) {
         stage = "root-only proc exit notification";
         status = -EIO;
     }
@@ -929,6 +978,8 @@ int main(int argc, char **argv)
         (void)npu_kernel_release(kernel);
     if (killable_kernel)
         (void)npu_kernel_release(killable_kernel);
+    if (trap_kernel)
+        (void)npu_kernel_release(trap_kernel);
     if (locked_kernel)
         (void)npu_kernel_release(locked_kernel);
     if (normal_kernel)

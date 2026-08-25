@@ -2,6 +2,7 @@
 #define NPU_ERRNO_H
 
 #define EPERM       1
+#define ESRCH       3
 #define EIO         5
 #define ECHILD     10
 #define ENOMEM     12
