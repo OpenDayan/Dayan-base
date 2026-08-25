@@ -45,12 +45,13 @@ typedef struct dayan_thread_resources {
     uint32_t reserved;
 } dayan_thread_resources_t;
 
-/* Zero-initialized storage in the allocation rooted at shared. */
+/*
+ * Zero-initialized storage in the allocation rooted at shared.  arrivals is
+ * a monotonic ticket counter; fields are private to dayan_cluster_barrier().
+ */
 typedef struct dayan_cluster_barrier {
-    uint32_t lock;
-    uint32_t count;
-    uint32_t generation;
-    uint32_t reserved;
+    uint64_t arrivals;
+    uint64_t reserved;
 } dayan_cluster_barrier_t;
 
 enum dayan_resource_state {

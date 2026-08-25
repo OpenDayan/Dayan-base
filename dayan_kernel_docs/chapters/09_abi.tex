@@ -53,7 +53,7 @@ bootstrap 入口为 \code{proc_bootstrap + (8 - argc) * 4}，只执行所需的�
   \code{struct list_head} & 16/8 & \code{next=0}、\code{prev=8}。 \\
   \code{dayan_resource_t} & 64/8 & state/producer/consumer/lock 为 0/4/8/12，三条 list 为 16/32/48。 \\
   \code{dayan_shared_resource_t} & 16/8 & 打包 producer/consumer counts 位于 0，reserved 位于 8。 \\
-  \code{dayan_cluster_barrier_t} & 16/4 & lock/count/generation/reserved 位于 0/4/8/12。 \\
+  \code{dayan_cluster_barrier_t} & 16/8 & arrivals/reserved 位于 0/8。 \\
   \code{dayan_kernel_resource_desc_t} & 32/8 & 16-bit max children/max tasks 为 0/2，32-bit flags 为 4，四类 TCSR count 为 8--11，reserved 为 12，atomic cache/URAM size 为 16/24。 \\
   \code{dayan_thread_resources_t} & 8/4 & 四类 TCSR count 为 0--3，reserved 为 4。 \\
 \end{dayantable}

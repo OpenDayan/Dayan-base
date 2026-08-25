@@ -74,9 +74,9 @@ family 的 child Thread，因为它们由 Device scheduler 在已预留 slot 中
 \code{dayan\_wait\_*} 处让出 Hart。只有核间广播、远程 URAM 复制或多阶段流水等
 特殊场景才应创建子 Thread。
 
-cluster barrier 的参与者参数当前只能为 4，且 launch 必须为 mode 4。对象为零初始化的
-\code{dayan_cluster_barrier_t}，可以跨多轮复用；最后到达者以 release 语义推进
-generation，其它 lane 以 acquire 语义恢复。
+cluster barrier 的参与者参数当前只能为 4，且 launch 必须为 mode 4。对象为 Host 在
+lane 启动前零初始化的 \code{dayan_cluster_barrier_t}，可以跨多轮复用；参与者通过
+\code{AMOADD.D} 领取单调 ticket，并在 Atomic Cache coherent 域内等待本轮到达计数完成。
 
 \subsection{Logical task 坐标}
 

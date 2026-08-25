@@ -202,8 +202,9 @@ Service 接受 create response 后已经快速进入终态仍是合法情况。
 
 Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-local URAM。
 四核模式可把零初始化的 `dayan_cluster_barrier_t` 放在 shared allocation 中，并调用
-`dayan_cluster_barrier(4, barrier)`；该 barrier 可复用，使用 release/acquire 语义，
-其它参与者数量或非 `kFourCore` launch 会被拒绝。
+`dayan_cluster_barrier(4, barrier)`；Server 在启动四个 lane 前初始化本次 launch 的
+shared allocation。该 barrier 使用 `AMOADD.D` ticket，可跨多轮复用；其它
+参与者数量或非 `kFourCore` launch 会被拒绝。
 
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
 未定义符号。覆盖模块前，会对该 Cluster 所有已启动 Core 分别执行带地址和长度的

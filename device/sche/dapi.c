@@ -19,6 +19,9 @@ _Static_assert(offsetof(dayan_shared_resource_t, counts) == 0 &&
                "dayan shared resource ABI layout changed");
 _Static_assert(sizeof(dayan_cluster_barrier_t) == 16,
                "dayan cluster barrier ABI must stay fixed");
+_Static_assert(offsetof(dayan_cluster_barrier_t, arrivals) == 0 &&
+                   offsetof(dayan_cluster_barrier_t, reserved) == 8,
+               "dayan cluster barrier ABI layout changed");
 _Static_assert(sizeof(dayan_kernel_resource_desc_t) == 32,
                "dayan kernel resource descriptor ABI must stay fixed");
 _Static_assert(offsetof(dayan_kernel_resource_desc_t, max_child_threads) == 0 &&
@@ -299,29 +302,29 @@ size_t dayan_uram_size(void)
 
 struct barrier_wait {
     dayan_cluster_barrier_t *barrier;
-    uint32_t generation;
+    uint64_t target;
 };
 
-static inline int barrier_advanced(struct proc *proc, void *arg)
+static inline uint64_t barrier_arrive(dayan_cluster_barrier_t *barrier)
+{
+    uint64_t previous;
+    uint64_t increment = 1;
+
+    __asm__ volatile("amoadd.d %0, %2, (%1)"
+                     : "=r"(previous)
+                     : "r"(&barrier->arrivals), "r"(increment)
+                     : "memory");
+    return previous;
+}
+
+static inline int barrier_complete(struct proc *proc, void *arg)
 {
     const struct barrier_wait *wait = arg;
+    uint64_t arrivals;
 
     (void)proc;
-    return __atomic_load_n(&wait->barrier->generation,
-                           __ATOMIC_RELAXED) != wait->generation;
-}
-
-static inline void barrier_lock(dayan_cluster_barrier_t *barrier)
-{
-    while (__atomic_exchange_n(&barrier->lock, 1U, __ATOMIC_RELAXED)) {
-        while (__atomic_load_n(&barrier->lock, __ATOMIC_RELAXED))
-            proc_yield();
-    }
-}
-
-static inline void barrier_unlock(dayan_cluster_barrier_t *barrier)
-{
-    __atomic_store_n(&barrier->lock, 0U, __ATOMIC_RELAXED);
+    arrivals = __atomic_load_n(&wait->barrier->arrivals, __ATOMIC_RELAXED);
+    return arrivals - wait->target < ((uint64_t)1 << 63);
 }
 
 int dayan_cluster_barrier(uint32_t participants,
@@ -329,33 +332,17 @@ int dayan_cluster_barrier(uint32_t participants,
 {
     struct proc *proc = proc_self();
     struct barrier_wait wait;
-    uint32_t count;
+    uint64_t ticket;
 
     if (!proc || participants != 4U || proc->task_mode != 4U ||
         !shared_range_valid(barrier, sizeof(*barrier),
                             _Alignof(dayan_cluster_barrier_t)))
         return -EINVAL;
-    /* LR/SC is unsupported; serialize the state update with AXI AMOSWAP. */
-    barrier_lock(barrier);
-    count = barrier->count;
-    if (count >= participants) {
-        barrier_unlock(barrier);
-        return -EBUSY;
-    }
+    ticket = barrier_arrive(barrier);
     wait.barrier = barrier;
-    wait.generation = barrier->generation;
-    barrier->count = count + 1U;
-    if (count + 1U == participants) {
-        barrier->count = 0;
-        __atomic_store_n(&barrier->generation, wait.generation + 1U,
-                         __ATOMIC_RELAXED);
-        barrier_unlock(barrier);
-        return 0;
-    }
-    barrier_unlock(barrier);
-    while (!barrier_advanced(proc, &wait)) {
-        proc_wait_poll(barrier_advanced, &wait);
-    }
+    wait.target = ticket - ticket % participants + participants;
+    while (!barrier_complete(proc, &wait))
+        proc_wait_poll(barrier_complete, &wait);
     return 0;
 }
 

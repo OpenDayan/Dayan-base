@@ -183,8 +183,11 @@ if grep -Eq 'amoswap\.[wd]([[:space:]]|$)' <<<"$shared_resource_dump"; then
 fi
 barrier_dump=$($objdump --no-show-raw-insn \
     --disassemble-symbols=dayan_cluster_barrier "$build/sche/dapi.o")
-grep -Eq 'amoswap\.w([[:space:]]|$)' <<<"$barrier_dump" ||
-    fail "cluster barrier must use a coherent atomic lock"
+grep -Eq 'amoadd\.d([[:space:]]|$)' <<<"$barrier_dump" ||
+    fail "cluster barrier must use a native 64-bit AMOADD ticket"
+if grep -Eq 'amoswap\.[wd]([[:space:]]|$)' <<<"$barrier_dump"; then
+    fail "cluster barrier must not use an atomic spin lock"
+fi
 if grep -Eq '(^|[[:space:]])(lr\.[wd]|sc\.[wd])' <<<"$barrier_dump"; then
     fail "cluster barrier must not use per-core LR/SC reservations"
 fi

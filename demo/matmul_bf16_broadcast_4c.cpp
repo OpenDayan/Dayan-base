@@ -1030,12 +1030,6 @@ static int initialize_cluster_shared(ClusterShared *cluster, uint32_t lane,
     if (lane == 0U) {
         cluster->init_status = 0;
         cluster->reserved = 0;
-#if MATMUL_BF16_4C_D2A_MODEL
-        cluster->finish_barrier.lock = 0;
-        cluster->finish_barrier.count = 0;
-        cluster->finish_barrier.generation = 0;
-        cluster->finish_barrier.reserved = 0;
-#endif
         for (int row = 0; row < Constants::kClusterRows; ++row) {
             for (int slice = 0; slice < MATMUL_BF16_4C_SLICES;
                  ++slice) {

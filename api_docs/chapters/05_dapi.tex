@@ -42,7 +42,7 @@ dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接�
   \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 32 字节紧凑常量，描述最大子 Thread 数、每 Core 共驻数、标志、四类 TCSR 数量、Atomic Cache 字节数和 URAM 字节数。 \\
   \code{dayan_thread_entry_t} & 子 Thread 入口类型 \code{void (*)(void *)}。 \\
   \code{dayan_thread_resources_t} & 8 字节描述符；创建子 Thread 时显式声明 LSU/MAT/VEC/MACRO TCSR 数量，空指针表示不占用 TCSR。 \\
-  \code{dayan_cluster_barrier_t} & 四 Core 屏障使用的 16 字节共享存储，使用前必须清零。 \\
+  \code{dayan_cluster_barrier_t} & 四 Core 屏障使用的 16 字节 ticket 存储；Server 在 lane 启动前将其清零。 \\
   \code{dayan_resource_state} & \code{DAYAN_RESOURCE_FREE}、\code{DAYAN_RESOURCE_BUSY}、\code{DAYAN_RESOURCE_READY} 三态资源状态机。 \\
   \code{dayan_task_axis} & \code{DAYAN_TASK_X}、\code{DAYAN_TASK_Y}、\code{DAYAN_TASK_Z} 三个逻辑任务坐标轴。 \\
   \code{dayan_resource_t} & 同一 Hart 内的资源对象；字段私有，用户只负责存储生命周期。 \\
@@ -84,7 +84,7 @@ dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接�
   \code{dayan_task_id} & 返回当前逻辑任务在 X、Y 或 Z 轴上的坐标；非法轴返回 0。 \\
   \code{dayan_task_dim} & 返回启动网格在 X、Y 或 Z 轴上的大小；非法轴返回 0。 \\
   \code{dayan_task_mode} & 返回 1（单 Core）或 4（Cluster 协作）。 \\
-  \code{dayan_cluster_barrier} & 在共享区中执行可复用的四 Core 屏障；仅四 Core 模式且参与者数量为 4 时合法。 \\
+  \code{dayan_cluster_barrier} & 通过 AMOADD.D ticket 执行可复用的无锁四 Core 屏障；仅四 Core 模式且参与者数量为 4 时合法。 \\
 \end{dayantable}
 
 逻辑任务 API 不暴露物理 Cluster 或 Core 编号。四 Core 模式下 Runtime 要求

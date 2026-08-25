@@ -424,8 +424,11 @@ Hart 上交错执行，从而提高 LSU 与计算单元的利用率。
 算子再使用 `kFourCore`、`shared` resource 和独立的 loader/copy/MAT/store Thread。
 
 `dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前
-`shared` allocation 内的零初始化 8-byte 对象，四个 lane 到达后以 release/acquire
-语义推进 generation，因此同一对象可以重复使用。
+`shared` allocation 内的零初始化 16-byte 对象。每个 lane 通过 `AMOADD.D`
+领取单调 ticket，并等待到达计数跨过本轮边界，因此不需要 AMOSWAP、LR/SC 或清零
+计数，同一对象也可以跨多轮复用。Server 在启动任何 lane 前，会把本次 launch 的
+整个 shared allocation 初始化为零；不会清空可能仍被其它 kernel 使用的全局
+Atomic Cache backing。
 
 资源分为单核和跨核两种类型，两者提供相同的
 `FREE -> BUSY -> READY -> FREE` 状态机。`alloc()` 设置生产者和消费者计数；生产者为
