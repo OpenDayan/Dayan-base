@@ -35,6 +35,12 @@ struct MatmulBf16Perf {
     uint64_t pipeline_cycles;
 };
 
+enum : uint64_t {
+    kMatmulBf16TileLong = 384,
+    kMatmulBf16TileShort = 256,
+    kMatmulBf16TileK = 256,
+};
+
 #if defined(__DAYAN_DEVICE__)
 
 #include <dayan_intrinsics.h>
@@ -47,12 +53,15 @@ struct Constants {
         kLsuLocal = 0,
         kLsuShared = 0,
         kLsuCStore = 1,
-        kTileM = 128,
-        kTileN = 384,
-        kTileK = 256,
+        kTileK = kMatmulBf16TileK,
         kUramAlignment = 32,
         kUramWindowStride = 2 * 1024 * 1024,
     };
+};
+
+enum : uint64_t {
+    kStride512Swizzle = MAT_BATCH_SWIZZLE(7, 2, 3),
+    kStride1024Swizzle = MAT_BATCH_SWIZZLE(7, 3, 3),
 };
 
 static_assert(MATMUL_BF16_1C_SLICES == 1 ||
@@ -81,9 +90,16 @@ static inline uint64_t read_cycle()
 }
 
 template <bool ProducerLoadsA, int SliceCount> struct UramLayout {
+    enum : int {
+        kTileM = ProducerLoadsA ? kMatmulBf16TileShort
+                                : kMatmulBf16TileLong,
+        kTileN = ProducerLoadsA ? kMatmulBf16TileLong
+                                : kMatmulBf16TileShort,
+    };
+
     static constexpr int slice_offset(int slice)
     {
-        return (ProducerLoadsA ? Constants::kTileN : Constants::kTileM) *
+        return (ProducerLoadsA ? kTileN : kTileM) *
                slice / SliceCount;
     }
 
@@ -94,12 +110,12 @@ template <bool ProducerLoadsA, int SliceCount> struct UramLayout {
 
     static constexpr int max_rows(int slice)
     {
-        return ProducerLoadsA ? Constants::kTileM : slice_size(slice);
+        return ProducerLoadsA ? kTileM : slice_size(slice);
     }
 
     static constexpr int max_cols(int slice)
     {
-        return ProducerLoadsA ? slice_size(slice) : Constants::kTileN;
+        return ProducerLoadsA ? slice_size(slice) : kTileN;
     }
 
     static constexpr uint64_t local_bytes(int slice)
@@ -111,8 +127,7 @@ template <bool ProducerLoadsA, int SliceCount> struct UramLayout {
 
     static constexpr uint64_t shared_bytes()
     {
-        return align_up((uint64_t)(ProducerLoadsA ? Constants::kTileM
-                                                  : Constants::kTileN) *
+        return align_up((uint64_t)(ProducerLoadsA ? kTileM : kTileN) *
                             Constants::kTileK *
                             sizeof(uint16_t),
                         Constants::kUramAlignment);
@@ -175,6 +190,18 @@ template <bool ProducerLoadsA, int SliceCount> struct UramLayout {
 using AProducerLayout = UramLayout<true, MATMUL_BF16_1C_SLICES>;
 using BProducerLayout = UramLayout<false, MATMUL_BF16_1C_SLICES>;
 
+static_assert(MATMUL_BF16_1C_SLICES != 3 ||
+                  AProducerLayout::slice_size(0) == 128,
+              "A-producer consumers must own 128 columns");
+static_assert(MATMUL_BF16_1C_SLICES != 3 ||
+                  BProducerLayout::slice_size(0) == 128,
+              "B-producer consumers must own 128 rows");
+static_assert(MATMUL_BF16_1C_SLICES != 3 ||
+                  AProducerLayout::total_bytes() == 832U * 1024U,
+              "A-producer three-slice layout must use 832 KiB");
+static_assert(MATMUL_BF16_1C_SLICES != 3 ||
+                  BProducerLayout::total_bytes() == 832U * 1024U,
+              "B-producer three-slice layout must use 832 KiB");
 static_assert(AProducerLayout::total_bytes() <= MATMUL_BF16_1C_URAM_BYTES,
               "A-producer matmul URAM layout is too large");
 static_assert(BProducerLayout::total_bytes() <= MATMUL_BF16_1C_URAM_BYTES,
@@ -206,22 +233,26 @@ struct MatmulState {
     volatile uint32_t abort;
 };
 
+template <bool ProducerLoadsA>
 static inline int rows_for_tile(const MatmulState *state, int tile_m)
 {
-    const int row_base = tile_m * Constants::kTileM;
+    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
+    const int row_base = tile_m * Layout::kTileM;
 
     if (state->m <= row_base)
         return 0;
-    return min_int(state->m - row_base, Constants::kTileM);
+    return min_int(state->m - row_base, Layout::kTileM);
 }
 
+template <bool ProducerLoadsA>
 static inline int cols_for_tile(const MatmulState *state, int tile_n)
 {
-    const int col_base = tile_n * Constants::kTileN;
+    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
+    const int col_base = tile_n * Layout::kTileN;
 
     if (state->n <= col_base)
         return 0;
-    return min_int(state->n - col_base, Constants::kTileN);
+    return min_int(state->n - col_base, Layout::kTileN);
 }
 
 template <bool ProducerLoadsA>
@@ -231,8 +262,8 @@ static inline int rows_for_slice(const MatmulState *state, int tile_m,
     using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
 
     if (ProducerLoadsA)
-        return rows_for_tile(state, tile_m);
-    const int row_base = tile_m * Constants::kTileM +
+        return rows_for_tile<ProducerLoadsA>(state, tile_m);
+    const int row_base = tile_m * Layout::kTileM +
                          Layout::slice_offset(slice);
 
     if (state->m <= row_base)
@@ -247,8 +278,8 @@ static inline int cols_for_slice(const MatmulState *state, int tile_n,
     using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
 
     if (!ProducerLoadsA)
-        return cols_for_tile(state, tile_n);
-    const int col_base = tile_n * Constants::kTileN +
+        return cols_for_tile<ProducerLoadsA>(state, tile_n);
+    const int col_base = tile_n * Layout::kTileN +
                          Layout::slice_offset(slice);
 
     if (state->n <= col_base)
@@ -391,9 +422,16 @@ static void consume_slice(void *argument)
     constexpr int max_rows = Layout::max_rows(Slice);
     constexpr int max_cols = Layout::max_cols(Slice);
     constexpr int local_rows = Layout::slice_size(Slice);
+    constexpr uint64_t c_row_bytes = max_cols * sizeof(float);
+    constexpr uint64_t c_swizzle =
+        c_row_bytes == 1024 ? kStride1024Swizzle : kStride512Swizzle;
     const uint64_t local_uram =
         state->uram_base + Layout::local_base(Slice);
     const uint64_t c_uram = state->uram_base + Layout::c_base(Slice);
+
+    static_assert(c_row_bytes == 512 || c_row_bytes == 1024 ||
+                      c_row_bytes == 1536,
+                  "unsupported C row stride for swizzle");
 
     while (!state->start)
         dayan_yield();
@@ -401,8 +439,6 @@ static void consume_slice(void *argument)
         return;
 
     long checksum = 0;
-    constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
-
     set_lsu_matrix<GroupBase + Constants::kLsuLocal>(
         checksum, local_rows,
         Constants::kTileK * (int)sizeof(uint16_t),
@@ -413,10 +449,10 @@ static void consume_slice(void *argument)
         max_cols * (int)sizeof(float), (long)state->c_stride);
     __tx_lsu_tcsr_write<
         (GroupBase + Constants::kLsuLocal) * LSU_GROUPSZ +
-        LSU_URAMWRITESWIZZLEMBS>(swizzle);
+        LSU_URAMWRITESWIZZLEMBS>(kStride512Swizzle);
     __tx_lsu_tcsr_write<
         (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
-        LSU_URAMREADSWIZZLEMBS>(swizzle);
+        LSU_URAMREADSWIZZLEMBS>(c_swizzle);
 
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_M>(max_rows - 1);
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_N>(max_cols - 1);
@@ -428,9 +464,11 @@ static void consume_slice(void *argument)
         Constants::kTileK * sizeof(uint16_t));
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSTRIDE>(
         max_cols * sizeof(float));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASWIZZLEMBS>(swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSWIZZLEMBS>(swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSWIZZLEMBS>(swizzle);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASWIZZLEMBS>(
+        kStride512Swizzle);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSWIZZLEMBS>(
+        kStride512Swizzle);
+    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSWIZZLEMBS>(c_swizzle);
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_PERSISTENTMODE>(0);
     __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_DATATYPE>(
         BaseNPUInstBuilder::DT_BF16);
@@ -462,9 +500,9 @@ static void consume_slice(void *argument)
                     (uint64_t)tile_k * Constants::kTileK *
                         sizeof(uint16_t) +
                     (ProducerLoadsA
-                         ? ((uint64_t)tile_n * Constants::kTileN +
+                         ? ((uint64_t)tile_n * Layout::kTileN +
                             slice_offset) * state->bt_stride
-                         : ((uint64_t)tile_m * Constants::kTileM +
+                         : ((uint64_t)tile_m * Layout::kTileM +
                             slice_offset) * state->a_stride);
 
                 load_matrix<GroupBase + Constants::kLsuLocal>(
@@ -516,10 +554,10 @@ static void consume_slice(void *argument)
                 if (last_k) {
                     const uint64_t c_dram =
                         state->c_base +
-                        ((uint64_t)tile_n * Constants::kTileN +
+                        ((uint64_t)tile_n * Layout::kTileN +
                          (ProducerLoadsA ? slice_offset : 0)) *
                             sizeof(float) +
-                        ((uint64_t)tile_m * Constants::kTileM +
+                        ((uint64_t)tile_m * Layout::kTileM +
                          (ProducerLoadsA ? 0 : slice_offset)) *
                             state->c_stride;
 
@@ -540,6 +578,8 @@ static void consume_slice(void *argument)
 template <bool ProducerLoadsA>
 static void producer_thread(void *argument)
 {
+    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
+
     MatmulState *state = (MatmulState *)argument;
 
     while (!state->start)
@@ -548,17 +588,15 @@ static void producer_thread(void *argument)
         return;
 
     long checksum = 0;
-    constexpr uint64_t swizzle = MAT_BATCH_SWIZZLE(5, 3, 5);
-
     set_lsu_matrix<Constants::kLsuShared>(
         checksum,
-        ProducerLoadsA ? Constants::kTileM : Constants::kTileN,
+        ProducerLoadsA ? Layout::kTileM : Layout::kTileN,
         Constants::kTileK * (int)sizeof(uint16_t),
         (long)(ProducerLoadsA ? state->a_stride : state->bt_stride),
         Constants::kTileK * (int)sizeof(uint16_t));
     __tx_lsu_tcsr_write<
         Constants::kLsuShared * LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(
-        swizzle);
+        kStride512Swizzle);
 
     for (int tile_m = 0; tile_m < state->count_m; ++tile_m) {
         for (int tile_n = 0; tile_n < state->count_n; ++tile_n) {
@@ -586,9 +624,9 @@ static void producer_thread(void *argument)
                     (uint64_t)tile_k * Constants::kTileK *
                         sizeof(uint16_t) +
                     (ProducerLoadsA
-                         ? (uint64_t)tile_m * Constants::kTileM *
+                         ? (uint64_t)tile_m * Layout::kTileM *
                                state->a_stride
-                         : (uint64_t)tile_n * Constants::kTileN *
+                         : (uint64_t)tile_n * Layout::kTileN *
                                state->bt_stride);
                 int status = dayan_resource_wait_free(&shared->resource);
 
@@ -606,11 +644,11 @@ static void producer_thread(void *argument)
                 shared->generation = generation;
                 load_matrix<Constants::kLsuShared>(
                     (uint64_t)real_k * sizeof(uint16_t),
-                    ProducerLoadsA ? rows_for_tile(state, tile_m)
-                                   : cols_for_tile(state, tile_n),
+                    ProducerLoadsA
+                        ? rows_for_tile<ProducerLoadsA>(state, tile_m)
+                        : cols_for_tile<ProducerLoadsA>(state, tile_n),
                     Constants::kTileK * sizeof(uint16_t),
-                    ProducerLoadsA ? Constants::kTileM
-                                   : Constants::kTileN,
+                    ProducerLoadsA ? Layout::kTileM : Layout::kTileN,
                     shared->uram, shared_dram);
                 dayan_wait_lsu();
 
@@ -636,10 +674,8 @@ static int run_pipeline(const MatmulBf16Config *config,
     state.m = (int)config->m;
     state.n = (int)config->n;
     state.k = (int)config->k;
-    state.count_m = (state.m + Constants::kTileM - 1) /
-                    Constants::kTileM;
-    state.count_n = (state.n + Constants::kTileN - 1) /
-                    Constants::kTileN;
+    state.count_m = (state.m + Layout::kTileM - 1) / Layout::kTileM;
+    state.count_n = (state.n + Layout::kTileN - 1) / Layout::kTileN;
     state.count_k = (state.k + Constants::kTileK - 1) /
                     Constants::kTileK;
     state.a_base = (uint64_t)(uintptr_t)a;
@@ -1097,6 +1133,11 @@ __host__ int main(int argc, char **argv)
         status = upload(stream, perf_buffer, &perf, sizeof(perf), timeout_ms);
 
     if (status == 0) {
+        const uint64_t tile_m = m < n ? kMatmulBf16TileShort
+                                      : kMatmulBf16TileLong;
+        const uint64_t tile_n = m < n ? kMatmulBf16TileLong
+                                      : kMatmulBf16TileShort;
+
         npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
                                      "matmul-bf16-1c");
         launch_attrs.config.task_dim = NPUTaskDim3{1, 1, 1};
@@ -1104,11 +1145,14 @@ __host__ int main(int argc, char **argv)
         launch_attrs.timeout_ms = timeout_ms;
         std::printf("[host] launch matmul_bf16_1c: A[%llu,%llu] x "
                     "BT[%llu,%llu] -> C[%llu,%llu], slices=%u, "
-                    "tile=128x384x256, producer=%s\n",
+                    "tile=%llux%llux%llu, producer=%s\n",
                     (unsigned long long)m, (unsigned long long)k,
                     (unsigned long long)n, (unsigned long long)k,
                     (unsigned long long)m, (unsigned long long)n,
                     (unsigned)MATMUL_BF16_1C_SLICES,
+                    (unsigned long long)tile_m,
+                    (unsigned long long)tile_n,
+                    (unsigned long long)kMatmulBf16TileK,
                     m < n ? "A" : "B");
         status = matmul_bf16_1c(config_buffer, a_buffer, bt_buffer,
                                 c_buffer, perf_buffer, &launch_attrs);

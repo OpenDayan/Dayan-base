@@ -15,7 +15,19 @@
  * identifiers and datatype constants below.
  */
 #if defined(__riscv)
+#define __tx_vec_vv_fp32_max __dayan_builtin_tx_vec_vv_fp32_max
+#define __tx_vec_cvt_fp32_int32 __dayan_builtin_tx_vec_cvt_fp32_int32
+#define __tx_vec_cvt_fp32_fp16 __dayan_builtin_tx_vec_cvt_fp32_fp16
+#define __tx_vec_cvt_fp32_bf16 __dayan_builtin_tx_vec_cvt_fp32_bf16
+#define __tx_vec_cvt_fp16_fp32 __dayan_builtin_tx_vec_cvt_fp16_fp32
+#define __tx_vec_cvt_bf16_fp32 __dayan_builtin_tx_vec_cvt_bf16_fp32
 #include <rvt_intrinsics.h>
+#undef __tx_vec_vv_fp32_max
+#undef __tx_vec_cvt_fp32_int32
+#undef __tx_vec_cvt_fp32_fp16
+#undef __tx_vec_cvt_fp32_bf16
+#undef __tx_vec_cvt_fp16_fp32
+#undef __tx_vec_cvt_bf16_fp32
 #endif
 
 /*
@@ -193,8 +205,84 @@ __attribute__((always_inline)) static inline void emit_macro_3(long destination,
 
 #undef DAYAN_DETAIL_MAP_REGISTER
 
+template <long Vb, long Vrs1, long Rm, long Operation>
+__attribute__((always_inline)) static inline void emit_vec_cvt()
+{
+    static_assert(Vb >= 0 && Vb < 2);
+    static_assert(Vrs1 >= 0 && Vrs1 < 32);
+    static_assert(Rm >= 0 && Rm < 8);
+    static_assert(Operation >= 0 && Operation < 8);
+    constexpr long encoding =
+        BaseNPUInstBuilder::OPCODE_CUSTOM_32B |
+        (Vrs1 << 7) |
+        (Rm << 12) |
+        (Operation << 15) |
+        (1L << 18) |
+        (2L << 20) |
+        (Vb << 25) |
+        (0x20L << 26);
+    emit_void_32<encoding>();
+}
+
+template <long Vb, long Vrs1, long Vrs2, long Rm, long Operation>
+__attribute__((always_inline)) static inline void emit_vec_vv_fp32()
+{
+    static_assert(Vb >= 0 && Vb < 2);
+    static_assert(Vrs1 >= 0 && Vrs1 < 32);
+    static_assert(Vrs2 >= 0 && Vrs2 < 32);
+    static_assert(Rm >= 0 && Rm < 8);
+    static_assert(Operation >= 0 && Operation < 32);
+    constexpr long encoding =
+        BaseNPUInstBuilder::OPCODE_CUSTOM_32B |
+        (Rm << 7) |
+        (Operation << 10) |
+        (Vrs1 << 15) |
+        (Vrs2 << 20) |
+        (Vb << 25) |
+        (0x22L << 26);
+    emit_void_32<encoding>();
+}
+
 } // namespace detail
 } // namespace BaseNPUInstBuilder
+
+#if defined(__riscv)
+template <long Vb, long Vrs1, long Vrs2, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_vv_fp32_max()
+{
+    BaseNPUInstBuilder::detail::emit_vec_vv_fp32<Vb, Vrs1, Vrs2, Rm, 4>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_fp32_int32()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 0>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_fp32_fp16()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 2>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_fp32_bf16()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 3>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_fp16_fp32()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 4>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_bf16_fp32()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 5>();
+}
+#endif
 
 enum LSU_TCSR {
     LSU_BLOCK = 0,
@@ -222,6 +310,78 @@ enum LSU_TCSR {
 };
 
 #define LSU_GROUPSZ 32
+
+enum VEC_TCSR {
+    VEC_CONTROL = 0,
+    VEC_SYNC = 1,
+    VEC_DIM0 = 2,
+    VEC_DIM1 = 3,
+    VEC_DIM2 = 4,
+    VEC_DIM3 = 5,
+    VEC_DIM4 = 6,
+    VEC_DIM5 = 7,
+    VEC_IMPL_DEF_HINT = 8,
+    VEC_S0_BASE = 9,
+    VEC_S0_DIM0_STRIDE = 10,
+    VEC_S0_DIM1_STRIDE = 11,
+    VEC_S0_DIM2_STRIDE = 12,
+    VEC_S0_DIM3_STRIDE = 13,
+    VEC_S0_DIM4_STRIDE = 14,
+    VEC_S0_DIM5_STRIDE = 15,
+    VEC_S1_BASE = 16,
+    VEC_S1_DIM0_STRIDE = 17,
+    VEC_S1_DIM1_STRIDE = 18,
+    VEC_S1_DIM2_STRIDE = 19,
+    VEC_S1_DIM3_STRIDE = 20,
+    VEC_S1_DIM4_STRIDE = 21,
+    VEC_S1_DIM5_STRIDE = 22,
+    VEC_S2_BASE = 23,
+    VEC_S2_DIM0_STRIDE = 24,
+    VEC_S2_DIM1_STRIDE = 25,
+    VEC_S2_DIM2_STRIDE = 26,
+    VEC_S2_DIM3_STRIDE = 27,
+    VEC_S2_DIM4_STRIDE = 28,
+    VEC_S2_DIM5_STRIDE = 29,
+    VEC_S3_BASE = 30,
+    VEC_S3_DIM0_STRIDE = 31,
+    VEC_S3_DIM1_STRIDE = 32,
+    VEC_S3_DIM2_STRIDE = 33,
+    VEC_S3_DIM3_STRIDE = 34,
+    VEC_S3_DIM4_STRIDE = 35,
+    VEC_S3_DIM5_STRIDE = 36,
+    VEC_V0_BASE = 37,
+    VEC_V0_DIM0_STRIDE = 38,
+    VEC_V0_DIM1_STRIDE = 39,
+    VEC_V0_DIM2_STRIDE = 40,
+    VEC_V0_DIM3_STRIDE = 41,
+    VEC_V0_DIM4_STRIDE = 42,
+    VEC_V0_DIM5_STRIDE = 43,
+    VEC_V1_BASE = 44,
+    VEC_V1_DIM0_STRIDE = 45,
+    VEC_V1_DIM1_STRIDE = 46,
+    VEC_V1_DIM2_STRIDE = 47,
+    VEC_V1_DIM3_STRIDE = 48,
+    VEC_V1_DIM4_STRIDE = 49,
+    VEC_V1_DIM5_STRIDE = 50,
+    VEC_V2_BASE = 51,
+    VEC_V2_DIM0_STRIDE = 52,
+    VEC_V2_DIM1_STRIDE = 53,
+    VEC_V2_DIM2_STRIDE = 54,
+    VEC_V2_DIM3_STRIDE = 55,
+    VEC_V2_DIM4_STRIDE = 56,
+    VEC_V2_DIM5_STRIDE = 57,
+    VEC_V3_BASE = 58,
+    VEC_V3_DIM0_STRIDE = 59,
+    VEC_V3_DIM1_STRIDE = 60,
+    VEC_V3_DIM2_STRIDE = 61,
+    VEC_V3_DIM3_STRIDE = 62,
+    VEC_V3_DIM4_STRIDE = 63,
+    VEC_V3_DIM5_STRIDE = 64,
+    VEC_V0_URAM_CHANNEL_STRIDE = 65,
+    VEC_V1_URAM_CHANNEL_STRIDE = 66,
+    VEC_V2_URAM_CHANNEL_STRIDE = 67,
+    VEC_V3_URAM_CHANNEL_STRIDE = 68,
+};
 
 #if defined(__riscv)
 template <long GROUPBASE, bool TRANSPOSE = false,

@@ -54,6 +54,7 @@ static void compile_intrinsics(long destination, long left, long right)
     __tx_vec_vv_fp32_add<0, 0, 0, 0>();
     __tx_vec_vv_fp32_sub<0, 0, 0, 0>();
     __tx_vec_vv_fp32_mul<0, 0, 0, 0>();
+    __tx_vec_vv_fp32_max<0, 0, 0, 0>();
     __tx_vec_vv_mux2<0, 0, 0, 0>();
     __tx_vec_vv_int32_cmp<0, 0, 0, 0>();
     __tx_vec_vv_fp32_cmp<0, 0, 0, 0>();

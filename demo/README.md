@@ -10,6 +10,7 @@ demo/
 ├── Makefile
 ├── add_fp32_macro.cpp          # 最小 FP32 Add：LSU + MACRO
 ├── add_fp32_vec.cpp            # 最小 FP32 Add：LSU + VEC
+├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
@@ -33,6 +34,7 @@ make -C demo
 产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
 `build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、
+`build/demo/flash_attention_1c`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
 `build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
 `<rvt_intrinsics.h>`（`__builtin_riscv_tx_*`）提供；`dayan_intrinsics.h` 包含该头文件，
@@ -62,6 +64,61 @@ make -C demo ../build/demo/add_fp32_vec
 ```sh
 DAYAN_SERVER_SOCKET=/tmp/my-dayan.sock \
   build/demo/print_demo 1 2 3 4 5 6 7
+```
+
+## 单 Core FP8/FP16 FlashAttention tile
+
+`flash_attention_1c` 固定处理 128 行、`D=128` 和 4 个 256-column KV tile。同一份 Device
+object 同时提供 `flash_attention_fp16_1c` 和 `flash_attention_fp8_1c` 两个 kernel，
+共享 tile、Resource 和 online-softmax 实现，不再通过编译宏二选一：
+
+```text
+S       = Q[128][128] FP16 x KT[4][256][128] FP16
+P       = exp2(S - M_new)
+L_new   = alpha * L_old + rowsum(P)
+O_acc   = alpha * O_acc + FP16(P) x VT[4][128][256] FP16
+O       = O_acc / L
+```
+
+Device 创建 LSU、MAT、VEC 三个 DAPI worker，并用 Resource 串联数据生命周期。
+KT/VT 双缓冲，score/P 三缓冲。MAT worker 使用两个常驻配置组，按
+`QK(0), QK(1), PV(0), QK(2), PV(1), ...` 交错执行，QK 和 PV 都各用一条覆盖
+128 row 的大 MAT 指令。Vec worker 在 softmax 流中原地计算 `alpha * O_acc`，随后
+在同一个 VFork 尾部用 VEC 将 P 从 FP32 转成连续 FP16；PV 直接以 `mma`
+累加到 URAM 中的 FP32 O_acc。
+LSU 的通用配置只写一次，循环中没有重复刷新整组 TCSR。
+FP16 demo 还会回传从 worker 启动到全部 join 的流水周期，并以 QK/PV 的
+67,108,864 个矩阵 FLOPs 计算相对单 Core 4096 FLOPs/cycle 峰值的利用率。
+
+唯一的 Vec worker 每个 KV tile 发射一次 `DIM2=15` 的 VFork，生成 16 个
+FlexVec task。硬件将 task 分配到两个 Vec Group，每组最多同时运行 8 个 thread，
+因此一次覆盖 `16 x 8 = 128` 行。每个 task 执行与 RVTNG
+`FlashAttentionVecFlowSpec` 的 online-softmax 流，并追加 O_acc 缩放及逐行
+FP32-to-FP16 convert/compress，共 421 条 FlexVec 指令；最终 normalization 使用
+另一个 50 条指令的 VFork。`KT` 和 `VT`
+分别按 key row 与 output-channel row 转置存储。Q 必须预先折叠 attention scale
+和 `log2(e)`，因为向量阶段直接计算 `exp2(score - newM)`。M/L 使用 Vec 的物理
+布局，每行标量复制 8 份。
+
+FP16 URAM 实际使用 936 KiB，descriptor 申请 960 KiB：Q 32 KiB、KT/VT 双缓冲
+256 KiB、score/P 三缓冲 576 KiB、O_acc 64 KiB、M/L 8 KiB，低于单 Core
+1.5 MiB 容量。
+
+Q/KT 的 swizzle 由 `host/visual_swizzle` 穷举选择，并在 LSU 写入和 MAT A/B
+读取两端配置相同的 M/B/S。FP8 的 128B stride 在线性布局下已经无冲突，采用显式
+identity `M=5,B=0,S=1`；FP16 Q/KT 的 256B stride 采用 `M=7,B=1,S=3`，VT 的
+512B stride 采用 `M=7,B=2,S=3`，模型中的每拍 Bank 峰值降为 1x。score/P
+目前保持 identity，因为 FlexVec TCSR
+尚未提供 swizzle 字段；MAT C、FlexVec 和 LSU 回写必须保持一致。
+
+`flash_attention_fp8_1c` kernel 暂时保留原来的 QK + online-softmax 路径，只校验
+P/M/L，不执行低精度 P 转换、PV 和 O normalization。Host 使用确定性输入并逐元素
+校验 FP16 O 或 FP8 P/M/L；可执行文件默认运行 FP16，`--fp8` 选择 FP8：
+
+```sh
+make -C demo ../build/demo/flash_attention_1c
+build/demo/flash_attention_1c
+build/demo/flash_attention_1c --fp8
 ```
 
 ## LSU 单核带宽微基准
@@ -116,12 +173,13 @@ Service 转发给发起算子的 Runtime Session，并由 demo 进程输出；`d
 A[M][K] (BF16) × BT[N][K] (BF16) -> C[M][N] (FP32)
 ```
 
-这里 Host 直接按转置布局提供 B。Device 使用 output-stationary 分块：
-`tileM=128`、`tileN=384`、`tileK=256`。两个数据流由同一个模板生成并同时编入 kernel：
-当 `M < N` 时，root producer 双缓冲读取 A，三个 consumer 按 N 切片读取 B 并计算；
-否则 root producer 双缓冲读取 B，三个 consumer 按 M 切片读取 A。共享 tile 的代际与
-producer / consumer 关系由 `dayan_resource_init/alloc/produce/wait/consume` 管理；
-LSU 和 MAT 完成等待分别使用 `dayan_wait_lsu()` 与 `dayan_wait_mat()`。
+这里 Host 直接按转置布局提供 B。Device 严格沿用原版 output-stationary 的一个 producer
+和三个 consumer Thread：当 `M < N` 时使用 `256x384x256` tile，producer 双缓冲读取
+A，三个 consumer 各处理 128 列并读取自己的 BT；否则使用原版的 `384x256x256`
+tile，producer 双缓冲读取 BT，三个 consumer 各处理 128 行并读取自己的 A。共享 tile
+的代际与 producer / consumer 关系由
+`dayan_resource_init/alloc/produce/wait/consume` 管理；LSU 和 MAT 完成等待分别使用
+`dayan_wait_lsu()` 与 `dayan_wait_mat()`。三切片模式的 URAM 占用为 832 KiB。
 
 默认 Host case 为 `M=768, N=512, K=1536`。程序生成确定性 BF16 输入、执行 Device
 kernel、回传 Device `mcycle` 吞吐，并逐元素和 CPU 参考结果比较：

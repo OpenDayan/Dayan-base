@@ -13,25 +13,6 @@ enum : uint64_t {
     kAddUramBytes = 32 * 1024,
 };
 
-enum VecTcsr : long {
-    VEC_CONTROL = 0,
-    VEC_SYNC = 1,
-    VEC_DIM0 = 2,
-    VEC_DIM1 = 3,
-    VEC_DIM2 = 4,
-    VEC_DIM3 = 5,
-    VEC_DIM4 = 6,
-    VEC_DIM5 = 7,
-    VEC_IMPL_DEF_HINT = 8,
-    VEC_V0_BASE = 37,
-    VEC_V0_DIM0_STRIDE = 38,
-    VEC_V0_DIM1_STRIDE = 39,
-    VEC_V0_DIM2_STRIDE = 40,
-    VEC_V0_DIM3_STRIDE = 41,
-    VEC_V0_DIM4_STRIDE = 42,
-    VEC_V0_DIM5_STRIDE = 43,
-};
-
 __kernel__ void add_fp32_vec(const float *a, const float *b, float *c)
 {
     const uint64_t uram = (uint64_t)(uintptr_t)dayan_uram_base();
