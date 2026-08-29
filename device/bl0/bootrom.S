@@ -45,6 +45,7 @@ _hang: // reset vector
   li a0, 8               // MIE or MSIP bit
   csrw mie, a0           // set only MSIP in MIE CSR
   csrs mstatus, a0       // set MIE in mstatus CSR
+  csrs mnstatus, a0
 
 wfi_loop: // wait for MSIP interrupt to start program execution
   wfi
