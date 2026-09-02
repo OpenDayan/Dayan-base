@@ -26,9 +26,9 @@ struct tensor_interrupt_record {
 };
 
 struct tensor_interrupt_state {
-    volatile uint32_t pending;
-    uint32_t dropped_reports;
-    struct tensor_interrupt_record record;
+    /* Zero means none; 1 and 2 select the per-Hart record buffers. */
+    volatile uint8_t pending;
+    volatile uint8_t outbound;
 };
 
 _Static_assert(sizeof(struct tensor_interrupt_record) == 472,
@@ -42,5 +42,6 @@ struct trap_frame;
 
 void tensor_interrupt_handle(const struct trap_frame *frame);
 void tensor_interrupt_drain(void);
+void tensor_interrupt_report_complete(void);
 
 #endif

@@ -20,6 +20,7 @@ extern void proc_bootstrap(void);
 #define THREAD_SLOT_COUNT       RPC_PROFILE_SLOT_COUNT
 #define TASK_SLOT_FIRST         RPC_PROFILE_SLOT_USER_BASE
 #define TASK_SLOT_LAST          CONFIG_PROC_SLOT_COUNT
+#define TASK_SLOT_COUNT         CONFIG_PROC_SLOT_COUNT
 #define SYSTEM_SLOT_FIRST       RPC_PROFILE_SLOT_RPC_RECEIVE
 #define SLOT_ARRAY __attribute__((section(".proc_slots")))
 
@@ -44,31 +45,26 @@ static unsigned char
                       [CONFIG_PROC_PRINTF_SIZE]
     __attribute__((section(".proc_printf"), aligned(64)));
 
-/* Cold, per-slot state is kept out of the scheduling object itself. */
-static thread_poll_fn hart_poll[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static void *hart_poll_arg[CONFIG_HART_COUNT][THREAD_SLOT_COUNT] SLOT_ARRAY;
-static thread_cleanup_fn hart_cleanup[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static void *hart_cleanup_arg[CONFIG_HART_COUNT][THREAD_SLOT_COUNT] SLOT_ARRAY;
-static char *hart_output[CONFIG_HART_COUNT][THREAD_SLOT_COUNT] SLOT_ARRAY;
-static uint32_t hart_output_capacity[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static uint32_t hart_output_size[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static void *hart_system_wait[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static int64_t hart_result[CONFIG_HART_COUNT][THREAD_SLOT_COUNT] SLOT_ARRAY;
-static struct thread_list
-    *hart_list_owner[CONFIG_HART_COUNT][THREAD_SLOT_COUNT] SLOT_ARRAY;
-static struct thread_list
-    hart_wait_children[CONFIG_HART_COUNT][THREAD_SLOT_COUNT] SLOT_ARRAY;
-static uint8_t hart_slot_state[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static uint8_t hart_slot_owner[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
-static uint8_t hart_generation[CONFIG_HART_COUNT][THREAD_SLOT_COUNT]
-    SLOT_ARRAY;
+/* Each Hart owns one cache-line-isolated structure of per-slot arrays. */
+struct thread_runtime {
+    thread_poll_fn poll[THREAD_SLOT_COUNT];
+    void *poll_arg[THREAD_SLOT_COUNT];
+    void *task_cleanup_arg[TASK_SLOT_COUNT];
+    void *system_wait[THREAD_SLOT_COUNT - 1U];
+    int64_t result[TASK_SLOT_COUNT];
+    struct thread_list *list_owner[THREAD_SLOT_COUNT];
+    struct thread_list wait_children[TASK_SLOT_COUNT];
+    uint16_t output_size[TASK_SLOT_COUNT];
+    uint8_t slot_state[THREAD_SLOT_COUNT];
+    uint8_t slot_owner[TASK_SLOT_COUNT];
+    uint8_t generation[THREAD_SLOT_COUNT];
+} __attribute__((aligned(64)));
+
+static struct thread_runtime hart_thread_runtime[CONFIG_HART_COUNT] SLOT_ARRAY;
+
+#define HART_RUNTIME(hart) hart_thread_runtime[(hart)]
+#define TASK_INDEX(slot)   ((slot) - TASK_SLOT_FIRST)
+#define WAIT_INDEX(slot)   ((slot) - 1U)
 
 static uintptr_t scheduler_hart(void)
 {
@@ -123,12 +119,12 @@ static uint8_t checked_slot(const struct thread *thread)
 
 static enum slot_state slot_state_get(uint8_t slot)
 {
-    return (enum slot_state)hart_slot_state[scheduler_hart()][slot];
+    return (enum slot_state)HART_RUNTIME(scheduler_hart()).slot_state[slot];
 }
 
 static void slot_state_set(uint8_t slot, enum slot_state state)
 {
-    hart_slot_state[scheduler_hart()][slot] = (uint8_t)state;
+    HART_RUNTIME(scheduler_hart()).slot_state[slot] = (uint8_t)state;
 }
 
 void thread_list_init(struct thread_list *list)
@@ -157,7 +153,7 @@ static void thread_list_add_tail(struct thread_list *list,
     uint8_t slot = checked_slot(thread);
     uint8_t tail;
 
-    if (!list || hart_list_owner[hart][slot] ||
+    if (!list || HART_RUNTIME(hart).list_owner[slot] ||
         thread->node.prev != THREAD_SLOT_UNLINKED ||
         thread->node.next != THREAD_SLOT_UNLINKED)
         platform_halt();
@@ -176,7 +172,7 @@ static void thread_list_add_tail(struct thread_list *list,
         previous->node.next = slot;
     }
     list->tail = slot;
-    hart_list_owner[hart][slot] = list;
+    HART_RUNTIME(hart).list_owner[slot] = list;
 }
 
 static void thread_list_add_head(struct thread_list *list,
@@ -186,7 +182,7 @@ static void thread_list_add_head(struct thread_list *list,
     uint8_t slot = checked_slot(thread);
     uint8_t head;
 
-    if (!list || hart_list_owner[hart][slot] ||
+    if (!list || HART_RUNTIME(hart).list_owner[slot] ||
         thread->node.prev != THREAD_SLOT_UNLINKED ||
         thread->node.next != THREAD_SLOT_UNLINKED)
         platform_halt();
@@ -205,14 +201,14 @@ static void thread_list_add_head(struct thread_list *list,
         next->node.prev = slot;
     }
     list->head = slot;
-    hart_list_owner[hart][slot] = list;
+    HART_RUNTIME(hart).list_owner[slot] = list;
 }
 
 static void thread_list_remove(struct thread *thread)
 {
     uintptr_t hart = scheduler_hart();
     uint8_t slot = checked_slot(thread);
-    struct thread_list *list = hart_list_owner[hart][slot];
+    struct thread_list *list = HART_RUNTIME(hart).list_owner[slot];
     uint8_t previous = thread->node.prev;
     uint8_t next = thread->node.next;
 
@@ -242,7 +238,7 @@ static void thread_list_remove(struct thread *thread)
         node->node.prev = previous;
     }
     thread_node_init(thread);
-    hart_list_owner[hart][slot] = 0;
+    HART_RUNTIME(hart).list_owner[slot] = 0;
 }
 
 static void thread_list_move_tail(struct thread_list *list,
@@ -292,6 +288,47 @@ const struct task_descriptor *task_descriptor_self(void)
     return task ? &task->descriptor : 0;
 }
 
+void *task_shared_base(const struct task_proc *task)
+{
+    if (!task || !task->descriptor.shared_size)
+        return 0;
+    return (void *)((uintptr_t)CONFIG_COHERENT_BASE +
+                    task->descriptor.shared_offset);
+}
+
+size_t task_shared_size(const struct task_proc *task)
+{
+    return task ? task->descriptor.shared_size : 0;
+}
+
+size_t task_child_stack_size(const struct task_proc *task)
+{
+    return task ? (size_t)task->descriptor.child_stack_size_m1 + 1U : 0;
+}
+
+size_t task_uram_size(const struct task_proc *task)
+{
+    struct dayan_context_fields fields;
+
+    if (!task)
+        return 0;
+    fields = dayan_context_unpack(task->thread.tensor_context);
+    return (size_t)(fields.uram_hi - fields.uram_lo) *
+           DAYAN_CONTEXT_URAM_GRANULE;
+}
+
+void *task_uram_base(const struct task_proc *task)
+{
+    struct dayan_context_fields fields;
+
+    if (!task || !task_uram_size(task))
+        return 0;
+    fields = dayan_context_unpack(task->thread.tensor_context);
+    return (void *)((uintptr_t)CONFIG_URAM_BASE +
+                    scheduler_hart() * (uintptr_t)CONFIG_URAM_STRIDE +
+                    fields.uram_lo * DAYAN_CONTEXT_URAM_GRANULE);
+}
+
 static void thread_state_set(struct thread *thread, uint8_t state)
 {
     thread->state = state;
@@ -321,24 +358,26 @@ static int thread_name_copy(char destination[THREAD_NAME_SIZE],
 static void slot_runtime_reset(uint8_t slot)
 {
     uintptr_t hart = scheduler_hart();
+    struct thread_runtime *runtime = &HART_RUNTIME(hart);
 
-    hart_poll[hart][slot] = 0;
-    hart_poll_arg[hart][slot] = 0;
-    hart_cleanup[hart][slot] = 0;
-    hart_cleanup_arg[hart][slot] = 0;
-    hart_output[hart][slot] = 0;
-    hart_output_capacity[hart][slot] = 0;
-    hart_output_size[hart][slot] = 0;
-    hart_system_wait[hart][slot] = 0;
-    hart_result[hart][slot] = 0;
-    hart_list_owner[hart][slot] = 0;
-    thread_list_init(&hart_wait_children[hart][slot]);
+    runtime->poll[slot] = 0;
+    runtime->poll_arg[slot] = 0;
+    runtime->list_owner[slot] = 0;
+    if (slot)
+        runtime->system_wait[WAIT_INDEX(slot)] = 0;
+    if (slot >= TASK_SLOT_FIRST && slot <= TASK_SLOT_LAST) {
+        uint8_t index = TASK_INDEX(slot);
+
+        runtime->task_cleanup_arg[index] = 0;
+        runtime->result[index] = 0;
+        runtime->output_size[index] = 0;
+        thread_list_init(&runtime->wait_children[index]);
+    }
 }
 
 int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
                  const char *name, thread_fn entry,
                  void *stack, size_t stack_size, void *shared_base,
-                 void *printf_buffer, size_t printf_capacity,
                  size_t argc, const uintptr_t *args)
 {
     uintptr_t hart = scheduler_hart();
@@ -350,11 +389,7 @@ int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
     int status;
 
     if (!thread || thread != thread_slot_get(slot) || !slot || !entry ||
-        !stack || argc > PROC_MAX_ARGS || (argc && !args) ||
-        (!printf_buffer != !printf_capacity) ||
-        printf_capacity > UINT32_MAX ||
-        (printf_buffer && printf_capacity > UINTPTR_MAX -
-                                             (uintptr_t)printf_buffer))
+        !stack || argc > PROC_MAX_ARGS || (argc && !args))
         return -EINVAL;
     if ((type == THREAD_TYPE_SYSTEM &&
          (slot < SYSTEM_SLOT_FIRST || slot_state_get(slot) != SLOT_SYSTEM)) ||
@@ -379,10 +414,10 @@ int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
     status = thread_name_copy(thread->name, name);
     if (status < 0)
         return status;
-    generation = (uint8_t)(hart_generation[hart][slot] + 1U);
+    generation = (uint8_t)(HART_RUNTIME(hart).generation[slot] + 1U);
     if (!generation)
         generation = 1;
-    hart_generation[hart][slot] = generation;
+    HART_RUNTIME(hart).generation[slot] = generation;
     thread->type = type;
     thread->state = THREAD_WAIT_START;
     thread->id = (uint16_t)(((uint16_t)generation << THREAD_ID_SLOT_BITS) |
@@ -401,8 +436,6 @@ int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
     thread->pc = (uintptr_t)proc_bootstrap + PROC_BOOTSTRAP_PC_OFFSET(argc);
 
     slot_runtime_reset(slot);
-    hart_output[hart][slot] = printf_buffer;
-    hart_output_capacity[hart][slot] = (uint32_t)printf_capacity;
     if (type == THREAD_TYPE_TASK_THREAD)
         slot_state_set(slot, SLOT_CHILD);
     if (cpu_self()->sche.profile_enabled)
@@ -412,21 +445,21 @@ int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
     return 0;
 }
 
-int thread_set_cleanup(struct thread *thread,
-                       thread_cleanup_fn cleanup, void *arg)
+int task_proc_set_cleanup_arg(struct task_proc *task, void *arg)
 {
     uintptr_t hart = scheduler_hart();
     uint8_t slot;
 
-    if (!thread || !cleanup)
+    if (!task || !arg)
         return -EINVAL;
-    slot = thread_slot_id(thread);
-    if (!slot || slot == THREAD_SLOT_NONE)
+    slot = thread_slot_id(&task->thread);
+    if (slot < TASK_SLOT_FIRST || slot > TASK_SLOT_LAST ||
+        task->thread.type != THREAD_TYPE_TASK_PROC)
         return -EINVAL;
-    if (thread->state != THREAD_READY || hart_cleanup[hart][slot])
+    if (task->thread.state != THREAD_READY ||
+        HART_RUNTIME(hart).task_cleanup_arg[TASK_INDEX(slot)])
         return -EBUSY;
-    hart_cleanup[hart][slot] = cleanup;
-    hart_cleanup_arg[hart][slot] = arg;
+    HART_RUNTIME(hart).task_cleanup_arg[TASK_INDEX(slot)] = arg;
     return 0;
 }
 
@@ -444,7 +477,7 @@ int task_proc_slot_acquire(struct task_proc **task_out)
         memset(&hart_thread_slots[hart][slot - 1U], 0,
                sizeof(hart_thread_slots[hart][slot - 1U]));
         slot_runtime_reset(slot);
-        hart_slot_owner[hart][slot] = slot;
+        HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] = slot;
         slot_state_set(slot, SLOT_ROOT);
         *task_out = &hart_thread_slots[hart][slot - 1U].task_proc;
         return 0;
@@ -454,17 +487,22 @@ int task_proc_slot_acquire(struct task_proc **task_out)
 
 static int task_descriptor_valid(const struct task_descriptor *descriptor)
 {
+    size_t stack_size;
     size_t axis;
 
-    if (!descriptor ||
-        descriptor->max_child_threads > DAYAN_KERNEL_MAX_CHILD_THREADS ||
-        descriptor->child_stack_size < sizeof(struct proc_frame) ||
-        descriptor->child_stack_size > CONFIG_PROC_STACK_SIZE ||
+    if (!descriptor)
+        return 0;
+    stack_size = (size_t)descriptor->child_stack_size_m1 + 1U;
+    if (descriptor->max_child_threads > DAYAN_KERNEL_MAX_CHILD_THREADS ||
+        stack_size < sizeof(struct proc_frame) ||
+        stack_size > CONFIG_PROC_STACK_SIZE ||
         descriptor->child_printf_size > CONFIG_PROC_PRINTF_SIZE ||
         (descriptor->task_mode != 1U && descriptor->task_mode != 4U) ||
         (descriptor->task_mode == 4U && descriptor->task_dim[0] != 4U) ||
-        (!descriptor->shared_base != !descriptor->shared_size) ||
-        (!descriptor->uram_base != !descriptor->uram_size))
+        (!descriptor->shared_size && descriptor->shared_offset) ||
+        descriptor->shared_offset > CONFIG_COHERENT_SIZE ||
+        descriptor->shared_size >
+            CONFIG_COHERENT_SIZE - descriptor->shared_offset)
         return 0;
     for (axis = 0; axis < 3; ++axis) {
         if (!descriptor->task_dim[axis] ||
@@ -479,28 +517,18 @@ int task_proc_set_descriptor(struct task_proc *task,
                              uint64_t tensor_context)
 {
     struct dayan_context_fields fields = dayan_context_unpack(tensor_context);
-    uintptr_t uram_address;
-    uintptr_t uram_offset;
     uint8_t slot;
 
     if (!task || !task_descriptor_valid(descriptor) ||
-        (tensor_context >> 56) || !dayan_context_fields_valid(&fields))
+        (tensor_context >> 56) || !dayan_context_fields_valid(&fields) ||
+        (uint64_t)fields.uram_hi * DAYAN_CONTEXT_URAM_GRANULE >
+            CONFIG_URAM_SIZE ||
+        (fields.uram_lo == fields.uram_hi && fields.uram_lo))
         return -EINVAL;
     slot = thread_slot_id(&task->thread);
     if (slot == THREAD_SLOT_NONE || slot_state_get(slot) != SLOT_ROOT ||
         task->thread.type)
         return -EBUSY;
-    uram_address = (uintptr_t)descriptor->uram_base;
-    uram_offset = uram_address & (DAYAN_CONTEXT_URAM_WINDOW - 1U);
-    if (descriptor->uram_size &&
-        ((uram_address & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
-         (descriptor->uram_size & (DAYAN_URAM_ALLOCATION_GRANULE - 1U)) ||
-         descriptor->uram_size > UINTPTR_MAX - uram_address))
-        return -EINVAL;
-    if (fields.uram_lo != uram_offset / DAYAN_CONTEXT_URAM_GRANULE ||
-        fields.uram_hi != (uram_offset + descriptor->uram_size) /
-                          DAYAN_CONTEXT_URAM_GRANULE)
-        return -EINVAL;
     memcpy(&task->descriptor, descriptor, sizeof(task->descriptor));
     task->thread.tensor_context = tensor_context;
     return 0;
@@ -529,7 +557,7 @@ int task_proc_reserve(struct task_proc *task)
         if (slot_state_get(slot) != SLOT_FREE)
             continue;
         slot_state_set(slot, SLOT_RESERVED);
-        hart_slot_owner[hart][slot] = root;
+        HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] = root;
         --remaining;
     }
     return 0;
@@ -545,14 +573,15 @@ void task_proc_unreserve(struct task_proc *task)
         return;
     root = checked_slot(&task->thread);
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
-        if (slot == root || hart_slot_owner[hart][slot] != root)
+        if (slot == root ||
+            HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
             continue;
         if (slot_state_get(slot) != SLOT_RESERVED)
             platform_halt();
         memset(&hart_thread_slots[hart][slot - 1U], 0,
                sizeof(hart_thread_slots[hart][slot - 1U]));
         slot_runtime_reset(slot);
-        hart_slot_owner[hart][slot] = THREAD_SLOT_NONE;
+        HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] = THREAD_SLOT_NONE;
         slot_state_set(slot, SLOT_FREE);
     }
 }
@@ -565,7 +594,7 @@ static void task_root_release(struct task_proc *task)
     memset(&hart_thread_slots[hart][root - 1U], 0,
            sizeof(hart_thread_slots[hart][root - 1U]));
     slot_runtime_reset(root);
-    hart_slot_owner[hart][root] = THREAD_SLOT_NONE;
+    HART_RUNTIME(hart).slot_owner[TASK_INDEX(root)] = THREAD_SLOT_NONE;
     slot_state_set(root, SLOT_FREE);
 }
 
@@ -581,7 +610,8 @@ void task_proc_slot_release(struct task_proc *task)
     if (root < TASK_SLOT_FIRST || root > TASK_SLOT_LAST)
         platform_halt();
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
-        if (slot != root && hart_slot_owner[hart][slot] == root)
+        if (slot != root &&
+            HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] == root)
             platform_halt();
     }
     task_root_release(task);
@@ -604,11 +634,8 @@ int task_proc_start(struct task_proc *task, const char *name,
     status = thread_start(&task->thread, slot, THREAD_TYPE_TASK_PROC,
                           name, entry,
                           hart_thread_stacks[hart][slot - TASK_SLOT_FIRST],
-                          task->descriptor.child_stack_size,
-                          task->descriptor.shared_base,
-                          task->descriptor.child_printf_size ?
-                              hart_thread_printf[hart][slot - TASK_SLOT_FIRST] : 0,
-                          task->descriptor.child_printf_size, argc, args);
+                          task_child_stack_size(task), task_shared_base(task),
+                          argc, args);
     task->thread.tensor_context = tensor_context;
     if (status < 0)
         return status;
@@ -672,7 +699,7 @@ static struct task_tcsr_usage task_tcsr_usage(struct task_proc *task)
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
         struct dayan_context_fields child_context;
 
-        if (hart_slot_owner[hart][slot] != root ||
+        if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root ||
             slot_state_get(slot) != SLOT_CHILD)
             continue;
         child_context = dayan_context_unpack(
@@ -694,7 +721,7 @@ static struct thread *reserved_child_acquire(struct task_proc *task)
 
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
         if (slot_state_get(slot) != SLOT_RESERVED ||
-            hart_slot_owner[hart][slot] != root)
+            HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
             continue;
         memset(&hart_thread_slots[hart][slot - 1U], 0,
                sizeof(struct thread));
@@ -712,7 +739,7 @@ static uint32_t task_active_children(uint8_t root)
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
         enum slot_state state;
 
-        if (hart_slot_owner[hart][slot] != root)
+        if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
             continue;
         state = slot_state_get(slot);
         count += state == SLOT_CHILD;
@@ -733,19 +760,21 @@ static void child_slot_release(struct thread *child)
     slot_state_set(slot, SLOT_RESERVED);
 }
 
-static void child_thread_cleanup(struct thread *thread, void *arg)
+static void child_thread_cleanup(struct thread *thread)
 {
     uintptr_t hart = scheduler_hart();
     uint8_t slot = checked_slot(thread);
     uint8_t parent = thread->parent;
 
-    (void)arg;
     if (slot_state_get(slot) != SLOT_CHILD || parent == THREAD_SLOT_NONE)
         platform_halt();
     slot_state_set(slot, SLOT_ZOMBIE);
-    if (hart_result[hart][slot] < 0 && hart_result[hart][parent] == 0)
-        hart_result[hart][parent] = hart_result[hart][slot];
-    (void)thread_event_wake_all(&hart_wait_children[hart][parent]);
+    if (HART_RUNTIME(hart).result[TASK_INDEX(slot)] < 0 &&
+        HART_RUNTIME(hart).result[TASK_INDEX(parent)] == 0)
+        HART_RUNTIME(hart).result[TASK_INDEX(parent)] =
+            HART_RUNTIME(hart).result[TASK_INDEX(slot)];
+    (void)thread_event_wake_all(
+        &HART_RUNTIME(hart).wait_children[TASK_INDEX(parent)]);
 }
 
 int thread_create_child(struct thread *parent, const char *name,
@@ -819,21 +848,14 @@ int thread_create_child(struct thread *parent, const char *name,
     status = thread_start(child, child_slot, THREAD_TYPE_TASK_THREAD,
                           name, entry,
                           hart_thread_stacks[hart][child_slot - TASK_SLOT_FIRST],
-                          task->descriptor.child_stack_size,
-                          task->descriptor.shared_base,
-                          task->descriptor.child_printf_size ?
-                              hart_thread_printf[hart]
-                                                [child_slot - TASK_SLOT_FIRST] : 0,
-                          task->descriptor.child_printf_size, 1, args);
+                          task_child_stack_size(task), task_shared_base(task),
+                          1, args);
     if (status < 0) {
         memset(child, 0, sizeof(*child));
         return status;
     }
     child->parent = checked_slot(parent);
     child->tensor_context = dayan_context_pack(&child_context);
-    status = thread_set_cleanup(child, child_thread_cleanup, 0);
-    if (status < 0)
-        platform_halt();
     *thread_id_out = child->id;
     return 0;
 }
@@ -855,7 +877,7 @@ static struct thread *find_direct_child(struct thread *parent,
         enum slot_state state;
         struct thread *child;
 
-        if (hart_slot_owner[hart][slot] != root)
+        if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
             continue;
         state = slot_state_get(slot);
         if (state != SLOT_CHILD && state != SLOT_ZOMBIE)
@@ -884,7 +906,7 @@ static uint32_t direct_live_children(struct thread *parent)
         enum slot_state state;
         struct thread *child;
 
-        if (hart_slot_owner[hart][slot] != root)
+        if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
             continue;
         state = slot_state_get(slot);
         if (state != SLOT_CHILD)
@@ -911,13 +933,15 @@ int thread_join(uint32_t thread_id, int64_t *result)
         return -ECHILD;
     parent_slot = checked_slot(parent);
     while (slot_state_get(checked_slot(child)) != SLOT_ZOMBIE) {
-        thread_wait_event(&hart_wait_children[hart][parent_slot]);
+        thread_wait_event(
+            &HART_RUNTIME(hart).wait_children[TASK_INDEX(parent_slot)]);
         child = find_direct_child(parent, (uint16_t)thread_id);
         if (!child)
             return -ECHILD;
     }
     if (result)
-        *result = hart_result[hart][checked_slot(child)];
+        *result = HART_RUNTIME(hart).result[
+            TASK_INDEX(checked_slot(child))];
     child_slot_release(child);
     return 0;
 }
@@ -936,11 +960,12 @@ int thread_join_all(void)
     root = checked_slot(&task->thread);
     parent_slot = checked_slot(parent);
     while (direct_live_children(parent))
-        thread_wait_event(&hart_wait_children[hart][parent_slot]);
+        thread_wait_event(
+            &HART_RUNTIME(hart).wait_children[TASK_INDEX(parent_slot)]);
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
         struct thread *child;
 
-        if (hart_slot_owner[hart][slot] != root ||
+        if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root ||
             slot_state_get(slot) != SLOT_ZOMBIE)
             continue;
         child = thread_slot_get(slot);
@@ -954,74 +979,88 @@ int64_t thread_result(const struct thread *thread)
 {
     uint8_t slot = thread_slot_id(thread);
 
-    if (slot == THREAD_SLOT_NONE)
+    if (slot < TASK_SLOT_FIRST || slot > TASK_SLOT_LAST)
         return 0;
-    return hart_result[scheduler_hart()][slot];
+    return HART_RUNTIME(scheduler_hart()).result[TASK_INDEX(slot)];
 }
 
 void *thread_system_wait(const struct thread *thread)
 {
     uint8_t slot = thread_slot_id(thread);
 
-    if (slot == THREAD_SLOT_NONE)
+    if (!slot || slot == THREAD_SLOT_NONE)
         return 0;
-    return hart_system_wait[scheduler_hart()][slot];
+    return HART_RUNTIME(scheduler_hart()).system_wait[WAIT_INDEX(slot)];
 }
 
 void thread_system_wait_set(struct thread *thread, void *wait)
 {
     uint8_t slot = checked_slot(thread);
 
-    hart_system_wait[scheduler_hart()][slot] = wait;
+    if (!slot)
+        platform_halt();
+    HART_RUNTIME(scheduler_hart()).system_wait[WAIT_INDEX(slot)] = wait;
 }
 
 int thread_output_enabled(const struct thread *thread)
 {
-    uintptr_t hart = scheduler_hart();
-    uint8_t slot = thread_slot_id(thread);
+    struct task_proc *task = task_proc_for((struct thread *)thread);
 
-    return slot != THREAD_SLOT_NONE && hart_output[hart][slot] &&
-           hart_output_capacity[hart][slot];
+    return task && task->descriptor.child_printf_size;
 }
 
 int thread_output_flush(struct thread *thread)
 {
     uintptr_t hart = scheduler_hart();
     struct task_proc *task;
+    uint16_t *output_size;
+    uint16_t capacity;
     uint8_t slot;
 
     if (!thread)
         return -1;
     slot = thread_slot_id(thread);
-    if (slot == THREAD_SLOT_NONE ||
-        hart_output_size[hart][slot] > hart_output_capacity[hart][slot] ||
-        (!hart_output[hart][slot] != !hart_output_capacity[hart][slot]))
-        return -1;
-    if (!hart_output_size[hart][slot])
-        return 0;
     task = task_proc_for(thread);
-    if (!task || rpc_write_proc(task->thread.id, hart_output[hart][slot],
-                                hart_output_size[hart][slot]) < 0)
+    if (slot < TASK_SLOT_FIRST || slot > TASK_SLOT_LAST || !task)
         return -1;
-    hart_output_size[hart][slot] = 0;
+    output_size = &HART_RUNTIME(hart).output_size[TASK_INDEX(slot)];
+    capacity = task->descriptor.child_printf_size;
+    if (*output_size > capacity)
+        return -1;
+    if (!*output_size)
+        return 0;
+    if (!capacity ||
+        rpc_write_proc(task->thread.id,
+                       hart_thread_printf[hart][TASK_INDEX(slot)],
+                       *output_size) < 0)
+        return -1;
+    *output_size = 0;
     return 0;
 }
 
 int thread_output_put(struct thread *thread, char ch)
 {
     uintptr_t hart = scheduler_hart();
+    struct task_proc *task;
+    uint16_t *output_size;
+    uint16_t capacity;
     uint8_t slot;
 
     if (!thread || !thread_output_enabled(thread))
         return -1;
     slot = checked_slot(thread);
-    if (hart_output_size[hart][slot] > hart_output_capacity[hart][slot])
+    task = task_proc_for(thread);
+    if (!task || slot < TASK_SLOT_FIRST || slot > TASK_SLOT_LAST)
         return -1;
-    if (hart_output_size[hart][slot] == hart_output_capacity[hart][slot] &&
+    output_size = &HART_RUNTIME(hart).output_size[TASK_INDEX(slot)];
+    capacity = task->descriptor.child_printf_size;
+    if (*output_size > capacity)
+        return -1;
+    if (*output_size == capacity &&
         thread_output_flush(thread) < 0)
         return -1;
-    hart_output[hart][slot][hart_output_size[hart][slot]++] = ch;
-    if (hart_output_size[hart][slot] == hart_output_capacity[hart][slot] &&
+    hart_thread_printf[hart][TASK_INDEX(slot)][(*output_size)++] = ch;
+    if (*output_size == capacity &&
         thread_output_flush(thread) < 0)
         return -1;
     return 0;
@@ -1140,20 +1179,20 @@ static void kill_unlink_thread(struct thread *thread)
     case THREAD_WAIT_POLL:
     case THREAD_WAIT_EVENT:
     case THREAD_WAIT_PRODUCE:
-        if (!hart_list_owner[hart][slot])
+        if (!HART_RUNTIME(hart).list_owner[slot])
             platform_halt();
         thread_list_remove(thread);
         break;
     case THREAD_WAIT_EXIT:
     case THREAD_WAIT_START:
-        if (hart_list_owner[hart][slot])
+        if (HART_RUNTIME(hart).list_owner[slot])
             platform_halt();
         break;
     default:
         platform_halt();
     }
-    hart_poll[hart][slot] = 0;
-    hart_poll_arg[hart][slot] = 0;
+    HART_RUNTIME(hart).poll[slot] = 0;
+    HART_RUNTIME(hart).poll_arg[slot] = 0;
 }
 
 static void kill_mark_thread(struct thread *thread, int64_t status)
@@ -1163,17 +1202,13 @@ static void kill_mark_thread(struct thread *thread, int64_t status)
     enum slot_state state = slot_state_get(slot);
     int waiting_produce;
 
-    hart_result[hart][slot] = status;
+    HART_RUNTIME(hart).result[TASK_INDEX(slot)] = status;
     if (state == SLOT_ZOMBIE)
         return;
     if (state != SLOT_ROOT && state != SLOT_CHILD)
         platform_halt();
     waiting_produce = thread->state == THREAD_WAIT_PRODUCE;
     kill_unlink_thread(thread);
-    if (thread->type == THREAD_TYPE_TASK_THREAD) {
-        hart_cleanup[hart][slot] = 0;
-        hart_cleanup_arg[hart][slot] = 0;
-    }
     if (waiting_produce) {
         thread_state_set(thread, THREAD_KILL_WAIT_PRODUCE);
     } else {
@@ -1195,13 +1230,18 @@ static void thread_run_cleanup(struct thread *thread)
 {
     uintptr_t hart = scheduler_hart();
     uint8_t slot = checked_slot(thread);
-    thread_cleanup_fn cleanup = hart_cleanup[hart][slot];
-    void *arg = hart_cleanup_arg[hart][slot];
 
-    hart_cleanup[hart][slot] = 0;
-    hart_cleanup_arg[hart][slot] = 0;
-    if (cleanup)
-        cleanup(thread, arg);
+    if (thread->type == THREAD_TYPE_TASK_THREAD) {
+        child_thread_cleanup(thread);
+    } else if (thread->type == THREAD_TYPE_TASK_PROC) {
+        void **cleanup_arg =
+            &HART_RUNTIME(hart).task_cleanup_arg[TASK_INDEX(slot)];
+        void *arg = *cleanup_arg;
+
+        *cleanup_arg = 0;
+        if (arg)
+            rpc_proc_cleanup(thread, arg);
+    }
 }
 
 static uint32_t family_pending_produce(uint8_t root)
@@ -1211,7 +1251,7 @@ static uint32_t family_pending_produce(uint8_t root)
     uint32_t count = 0;
 
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
-        count += hart_slot_owner[hart][slot] == root &&
+        count += HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] == root &&
                  slot_state_get(slot) != SLOT_RESERVED &&
                  thread_slot_get(slot)->state == THREAD_KILL_WAIT_PRODUCE;
     return count;
@@ -1229,7 +1269,7 @@ static void killed_child_free(struct thread *thread)
     memset(&hart_thread_slots[hart][slot - 1U], 0,
            sizeof(struct thread));
     slot_runtime_reset(slot);
-    hart_slot_owner[hart][slot] = THREAD_SLOT_NONE;
+    HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] = THREAD_SLOT_NONE;
     slot_state_set(slot, SLOT_FREE);
 }
 
@@ -1242,13 +1282,14 @@ static void killed_family_release(uint8_t root)
     if (family_pending_produce(root))
         return;
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
-        if (slot == root || hart_slot_owner[hart][slot] != root)
+        if (slot == root ||
+            HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
             continue;
         if (slot_state_get(slot) == SLOT_RESERVED) {
             memset(&hart_thread_slots[hart][slot - 1U], 0,
                    sizeof(hart_thread_slots[hart][slot - 1U]));
             slot_runtime_reset(slot);
-            hart_slot_owner[hart][slot] = THREAD_SLOT_NONE;
+            HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] = THREAD_SLOT_NONE;
             slot_state_set(slot, SLOT_FREE);
         } else if (slot_state_get(slot) == SLOT_CHILD ||
                    slot_state_get(slot) == SLOT_ZOMBIE) {
@@ -1307,7 +1348,8 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
         for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
             enum slot_state state;
 
-            if (slot == root || hart_slot_owner[hart][slot] != root)
+            if (slot == root ||
+                HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
                 continue;
             state = slot_state_get(slot);
             if (state == SLOT_CHILD || state == SLOT_ZOMBIE) {
@@ -1334,21 +1376,23 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
             continue;
         task = (struct task_proc *)thread_slot_get(root);
         for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
-            if (hart_slot_owner[hart][slot] != root)
+            if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
                 continue;
             if (slot_state_get(slot) != SLOT_RESERVED &&
                 thread_slot_get(slot)->id)
                 kill_drain_system_wait(thread_slot_get(slot));
         }
         for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
-            if (hart_slot_owner[hart][slot] != root)
+            if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
                 continue;
             if (slot_state_get(slot) != SLOT_RESERVED &&
-                hart_output_size[hart][slot])
+                HART_RUNTIME(hart).output_size[TASK_INDEX(slot)])
                 (void)thread_output_flush(thread_slot_get(slot));
         }
         thread_run_cleanup(&task->thread);
-        (void)rpc_proc_exit(task->thread.id, 0, hart_result[hart][root],
+        (void)rpc_proc_exit(
+            task->thread.id, 0,
+            HART_RUNTIME(hart).result[TASK_INDEX(root)],
                             task->descriptor.cookie, RPC_PROC_EXIT_ROOT);
         before = CONFIG_PROC_SLOT_COUNT;
         for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
@@ -1366,7 +1410,7 @@ static void kill_complete_produce(struct thread *thread)
 {
     uintptr_t hart = scheduler_hart();
     uint8_t slot = checked_slot(thread);
-    uint8_t root = hart_slot_owner[hart][slot];
+    uint8_t root = HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)];
 
     if ((slot_state_get(slot) != SLOT_ROOT &&
          slot_state_get(slot) != SLOT_CHILD) ||
@@ -1406,7 +1450,7 @@ void thread_ready_first(struct thread *thread)
     if (!thread || thread->state != THREAD_READY)
         return;
     slot = checked_slot(thread);
-    if (hart_list_owner[hart][slot] != &cpu_self()->sche.ready)
+    if (HART_RUNTIME(hart).list_owner[slot] != &cpu_self()->sche.ready)
         return;
     thread_list_remove(thread);
     thread_list_add_head(&cpu_self()->sche.ready, thread);
@@ -1460,8 +1504,8 @@ void thread_wait_poll(thread_poll_fn poll, void *arg)
 
     if (!poll)
         platform_halt();
-    hart_poll[hart][slot] = poll;
-    hart_poll_arg[hart][slot] = arg;
+    HART_RUNTIME(hart).poll[slot] = poll;
+    HART_RUNTIME(hart).poll_arg[slot] = arg;
     thread_state_set(thread, THREAD_WAIT_POLL);
     cpu_self()->sche.active_dirty = 1;
     switch_to_next_or_scheduler(thread);
@@ -1515,23 +1559,24 @@ _Noreturn void thread_exit_status(int64_t status)
     struct task_proc *task = task_proc_for(thread);
     uint8_t slot;
 
-    if (!thread || thread->type == THREAD_TYPE_BASE)
+    if (!thread || thread->type == THREAD_TYPE_BASE || !task)
         platform_halt();
     slot = checked_slot(thread);
-    if (status < 0 || hart_result[hart][slot] >= 0)
-        hart_result[hart][slot] = status;
-    if (task) {
-        if (thread_join_all() < 0 && hart_result[hart][slot] >= 0)
-            hart_result[hart][slot] = -EIO;
-        if (hart_output_size[hart][slot])
-            (void)thread_output_flush(thread);
-        hart_output_size[hart][slot] = 0;
-        (void)rpc_clear_proc(task->thread.id);
-        if (thread->type == THREAD_TYPE_TASK_PROC) {
-            thread_run_cleanup(thread);
-            (void)rpc_proc_exit(thread->id, 0, hart_result[hart][slot],
-                                task->descriptor.cookie, RPC_PROC_EXIT_ROOT);
-        }
+    if (status < 0 || HART_RUNTIME(hart).result[TASK_INDEX(slot)] >= 0)
+        HART_RUNTIME(hart).result[TASK_INDEX(slot)] = status;
+    if (thread_join_all() < 0 &&
+        HART_RUNTIME(hart).result[TASK_INDEX(slot)] >= 0)
+        HART_RUNTIME(hart).result[TASK_INDEX(slot)] = -EIO;
+    if (HART_RUNTIME(hart).output_size[TASK_INDEX(slot)])
+        (void)thread_output_flush(thread);
+    HART_RUNTIME(hart).output_size[TASK_INDEX(slot)] = 0;
+    (void)rpc_clear_proc(task->thread.id);
+    if (thread->type == THREAD_TYPE_TASK_PROC) {
+        thread_run_cleanup(thread);
+        (void)rpc_proc_exit(
+            thread->id, 0,
+            HART_RUNTIME(hart).result[TASK_INDEX(slot)],
+            task->descriptor.cookie, RPC_PROC_EXIT_ROOT);
     }
     thread_state_set(thread, THREAD_WAIT_EXIT);
     cpu_self()->sche.active_dirty = 1;
@@ -1622,8 +1667,9 @@ void sche_init(void)
     memset(hart_thread_slots[hart], 0, sizeof(hart_thread_slots[hart]));
     for (slot = 0; slot < THREAD_SLOT_COUNT; ++slot) {
         slot_runtime_reset(slot);
-        hart_slot_owner[hart][slot] = THREAD_SLOT_NONE;
-        hart_generation[hart][slot] = 0;
+        if (slot >= TASK_SLOT_FIRST && slot <= TASK_SLOT_LAST)
+            HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] = THREAD_SLOT_NONE;
+        HART_RUNTIME(hart).generation[slot] = 0;
         slot_state_set(slot, slot >= SYSTEM_SLOT_FIRST ? SLOT_SYSTEM :
                                                         SLOT_FREE);
     }
@@ -1644,13 +1690,13 @@ _Noreturn void scheduler(void)
         while (slot != THREAD_SLOT_NONE) {
             struct thread *waiting = thread_slot_get(slot);
             uint8_t next = waiting->node.next;
-            thread_poll_fn poll = hart_poll[hart][slot];
+            thread_poll_fn poll = HART_RUNTIME(hart).poll[slot];
 
             if (!poll)
                 platform_halt();
-            if (poll(waiting, hart_poll_arg[hart][slot])) {
-                hart_poll[hart][slot] = 0;
-                hart_poll_arg[hart][slot] = 0;
+            if (poll(waiting, HART_RUNTIME(hart).poll_arg[slot])) {
+                HART_RUNTIME(hart).poll[slot] = 0;
+                HART_RUNTIME(hart).poll_arg[slot] = 0;
                 thread_state_set(waiting, THREAD_READY);
                 thread_list_move_tail(&sche->ready, waiting);
             }

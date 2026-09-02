@@ -107,7 +107,7 @@ static void proc_request_publish_state(
     platform_cache_flush(request, CONFIG_CACHE_LINE_SIZE);
 }
 
-static void managed_proc_cleanup(struct thread *thread, void *arg)
+void rpc_proc_cleanup(struct thread *thread, void *arg)
 {
     struct rpc_proc_create_request *request = arg;
     int64_t status = thread_result(thread);
@@ -141,14 +141,13 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     memcpy(descriptor.task_id, request->task_id, sizeof(descriptor.task_id));
     memcpy(descriptor.task_dim, request->task_dim,
            sizeof(descriptor.task_dim));
-    descriptor.task_mode = request->task_mode;
-    descriptor.max_child_threads = request->max_child_threads;
-    descriptor.child_stack_size = (uint32_t)request->stack_size;
-    descriptor.child_printf_size = (uint32_t)request->printf_buffer_size;
-    descriptor.shared_base = (void *)(uintptr_t)request->shared_base;
-    descriptor.shared_size = (size_t)request->shared_size;
-    descriptor.uram_base = (void *)(uintptr_t)request->uram_base;
-    descriptor.uram_size = (size_t)request->uram_size;
+    descriptor.task_mode = (uint8_t)request->task_mode;
+    descriptor.max_child_threads = (uint8_t)request->max_child_threads;
+    descriptor.child_stack_size_m1 = (uint16_t)(request->stack_size - 1U);
+    descriptor.child_printf_size = (uint16_t)request->printf_buffer_size;
+    descriptor.shared_offset = request->shared_base ?
+        (uint32_t)(request->shared_base - CONFIG_COHERENT_BASE) : 0;
+    descriptor.shared_size = (uint32_t)request->shared_size;
     descriptor.cookie = request->cookie;
 
     status = task_proc_slot_acquire(&task);
@@ -166,7 +165,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
                              request->argc, args);
     if (status < 0)
         goto complete;
-    status = thread_set_cleanup(&task->thread, managed_proc_cleanup, request);
+    status = task_proc_set_cleanup_arg(task, request);
     if (status < 0)
         platform_halt();
 

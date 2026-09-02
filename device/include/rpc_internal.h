@@ -7,37 +7,30 @@
 #include "list.h"
 #include "rpc.h"
 #include "sche.h"
-#include "tensor_interrupt.h"
-#include "trap.h"
 
 struct rpc_transaction;
-typedef void (*rpc_cleanup_fn)(struct rpc_transaction *transaction,
-                               void *arg);
+struct tensor_interrupt_record;
+typedef void (*rpc_cleanup_fn)(struct rpc_transaction *transaction);
 
 struct rpc_transaction {
     struct list_head node;
-    struct thread_list wait;
     uint64_t command;
     rpc_cleanup_fn cleanup;
-    void *cleanup_arg;
-    volatile uint32_t completed;
     long status;
+    volatile uint32_t completed;
+    struct thread_list wait;
 };
 
 struct rpc_state {
     struct list_head send_queue;
-    struct thread_list send_event;
     struct rpc_transaction trap;
-    _Alignas(RPC_DESCRIPTOR_GRANULE) struct trap_record trap_record;
     struct rpc_transaction tensor_interrupt;
-    _Alignas(RPC_DESCRIPTOR_GRANULE)
-        struct tensor_interrupt_record tensor_interrupt_record;
-    uint32_t initialized;
-    uint32_t trap_pending;
-    uint32_t tensor_interrupt_pending;
+    struct thread_list send_event;
+    uint8_t initialized;
 };
 
 int rpc_report_trap(const void *record, size_t size);
+int rpc_tensor_interrupt_ready(void);
 int rpc_report_tensor_interrupt(const struct tensor_interrupt_record *record);
 
 #endif

@@ -13,6 +13,32 @@
      ((uint32_t)(address) << 13) | ((uint32_t)(read) << 12) | \
      ((uint32_t)(reg) << 7))
 
+struct tensor_interrupt_record_buffer {
+    _Alignas(CONFIG_CACHE_LINE_SIZE) struct tensor_interrupt_record record;
+};
+
+static struct tensor_interrupt_record_buffer
+    tensor_interrupt_records[CONFIG_HART_COUNT][2]
+    __attribute__((section(".tensor_interrupt_records")));
+
+static struct tensor_interrupt_record *tensor_interrupt_record_get(uint8_t id)
+{
+    uintptr_t hart = platform_hart_id();
+
+    if (!id || id > 2U || hart >= CONFIG_HART_COUNT)
+        platform_halt();
+    return &tensor_interrupt_records[hart][id - 1U].record;
+}
+
+void tensor_interrupt_report_complete(void)
+{
+    struct tensor_interrupt_state *state = &cpu_self()->tensor_interrupt;
+
+    if (!state->outbound)
+        platform_halt();
+    state->outbound = 0;
+}
+
 #define TENSOR_INTR_READ(address)                                             \
     ({                                                                       \
         register uint64_t result __asm__("a0");                              \
@@ -68,19 +94,19 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     state = &cpu_self()->tensor_interrupt;
     control = TENSOR_INTR_READ(0);
     if (state->pending) {
-        ++state->dropped_reports;
-        state->record.dropped_reports = state->dropped_reports;
+        record = tensor_interrupt_record_get(state->pending);
+        ++record->dropped_reports;
         tensor_interrupt_clear_pending();
         return;
     }
-    record = &state->record;
+    state->pending = state->outbound == 1U ? 2U : 1U;
+    record = tensor_interrupt_record_get(state->pending);
     memset(record, 0, sizeof(*record));
     record->hart_id = (uint32_t)platform_hart_id();
     record->thread_id = current->id;
     record->thread_type = current->type;
     record->thread_state = current->state;
     record->recent_count = (uint32_t)((control >> 9) & 0x1fU);
-    record->dropped_reports = state->dropped_reports;
     record->tensor_context = current->tensor_context;
     record->control = control;
     record->interrupt_count = TENSOR_INTR_READ(33);
@@ -107,23 +133,24 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     record->fcsr = frame->fcsr;
     for (i = 0; i < 32; ++i)
         record->x[i] = frame->x[i];
-    state->pending = 1;
     tensor_interrupt_clear_pending();
 }
 
 void tensor_interrupt_drain(void)
 {
     struct tensor_interrupt_state *state = &cpu_self()->tensor_interrupt;
+    struct tensor_interrupt_record *record;
+    uint8_t pending;
     int status;
 
-    if (!state->pending)
+    if (!state->pending || state->outbound ||
+        !rpc_tensor_interrupt_ready())
         return;
-    status = rpc_report_tensor_interrupt(&state->record);
-    if (status == 0) {
-        state->pending = 0;
-        state->dropped_reports = 0;
-    } else if (status != -EBUSY && status != -ENOSYS) {
-        ++state->dropped_reports;
-        state->record.dropped_reports = state->dropped_reports;
-    }
+    pending = state->pending;
+    record = tensor_interrupt_record_get(pending);
+    state->outbound = pending;
+    state->pending = 0;
+    status = rpc_report_tensor_interrupt(record);
+    if (status < 0)
+        platform_halt();
 }

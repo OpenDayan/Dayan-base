@@ -111,6 +111,16 @@ SECTIONS
         __trap_stack_end = .;
     } > RAM
 
+    .trap_records ALIGN(64) (NOLOAD) :
+    {
+        *(.trap_records)
+    } > RAM
+
+    .tensor_interrupt_records ALIGN(64) (NOLOAD) :
+    {
+        *(.tensor_interrupt_records)
+    } > RAM
+
     .proc_slots ALIGN(64) (NOLOAD) :
     {
         __proc_slots_start = .;

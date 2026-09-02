@@ -73,9 +73,7 @@ struct trap_record {
 };
 
 struct trap_state {
-    uint32_t active;
-    uint32_t reserved;
-    struct trap_record record;
+    volatile uint8_t active;
 };
 
 _Static_assert(offsetof(struct trap_frame, x[1]) == TRAP_FRAME_X1,
@@ -102,6 +100,7 @@ _Static_assert(offsetof(struct trap_record, host_proc_id) == 312,
                "trap record proc identity offset");
 
 _Noreturn void trap_handle(const struct trap_frame *frame);
+void trap_report_complete(void);
 
 #endif
 #endif

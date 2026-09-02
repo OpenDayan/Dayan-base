@@ -415,5 +415,7 @@ long rpc_profile_flush(const struct rpc_profile_flush_request *request,
                        struct rpc_profile_flush_response *response);
 /* Returns 1 while the system send thread still owns the transaction. */
 int rpc_proc_wait_cancel(struct thread *thread);
+/* Completes the Host-owned launch descriptor after its root Thread exits. */
+void rpc_proc_cleanup(struct thread *thread, void *request);
 
 #endif

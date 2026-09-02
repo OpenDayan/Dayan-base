@@ -12,21 +12,17 @@ struct rpc_proc_kill_result;
 typedef void (*thread_fn)(void);
 /* Runs in scheduler context and must not block. */
 typedef int (*thread_poll_fn)(struct thread *thread, void *arg);
-/* Runs on the scheduler stack after a thread has stopped using its own stack. */
-typedef void (*thread_cleanup_fn)(struct thread *thread, void *arg);
 
 struct task_descriptor {
+    uint64_t cookie;
     uint32_t task_id[3];
     uint32_t task_dim[3];
-    uint32_t task_mode;
-    uint32_t max_child_threads;
-    uint32_t child_stack_size;
-    uint32_t child_printf_size;
-    void *shared_base;
-    size_t shared_size;
-    void *uram_base;
-    size_t uram_size;
-    uint64_t cookie;
+    uint32_t shared_offset;
+    uint32_t shared_size;
+    uint16_t child_stack_size_m1;
+    uint16_t child_printf_size;
+    uint8_t task_mode;
+    uint8_t max_child_threads;
 };
 
 struct task_proc {
@@ -45,14 +41,16 @@ uint8_t thread_slot_id(const struct thread *thread);
 struct thread *thread_self(void);
 struct task_proc *task_proc_self(void);
 const struct task_descriptor *task_descriptor_self(void);
+void *task_shared_base(const struct task_proc *task);
+size_t task_shared_size(const struct task_proc *task);
+size_t task_child_stack_size(const struct task_proc *task);
+void *task_uram_base(const struct task_proc *task);
+size_t task_uram_size(const struct task_proc *task);
 
 int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
                  const char *name, thread_fn entry,
                  void *stack, size_t stack_size, void *shared_base,
-                 void *printf_buffer, size_t printf_capacity,
                  size_t argc, const uintptr_t *args);
-int thread_set_cleanup(struct thread *thread,
-                       thread_cleanup_fn cleanup, void *arg);
 int task_proc_slot_acquire(struct task_proc **task_out);
 int task_proc_start(struct task_proc *task, const char *name,
                     thread_fn entry, size_t argc, const uintptr_t *args);
@@ -62,6 +60,7 @@ void task_proc_unreserve(struct task_proc *task);
 int task_proc_set_descriptor(struct task_proc *task,
                              const struct task_descriptor *descriptor,
                              uint64_t tensor_context);
+int task_proc_set_cleanup_arg(struct task_proc *task, void *arg);
 int thread_create_child(struct thread *parent, const char *name,
                         thread_fn entry,
                         void *argument,

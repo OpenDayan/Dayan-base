@@ -32,17 +32,17 @@ _Static_assert((uint32_t)THREAD_KILL_WAIT_PRODUCE ==
                "profile kill-wait-produce state ABI");
 
 struct profile_state {
-    struct thread_list wake;
-    struct thread_list flush_done;
     unsigned char *buffer;
+    uint64_t generation;
     uint32_t capacity;
     uint32_t count;
-    uint32_t enabled;
-    uint32_t full_pending;
-    uint32_t flushing;
-    uint64_t generation;
-    uint16_t defined_id[RPC_PROFILE_SLOT_COUNT];
-};
+    struct thread_list wake;
+    struct thread_list flush_done;
+    uint8_t enabled;
+    uint8_t full_pending;
+    uint8_t flushing;
+    uint8_t defined_generation[RPC_PROFILE_SLOT_COUNT];
+} __attribute__((aligned(64)));
 
 static struct profile_state profile_states[CONFIG_HART_COUNT]
     __attribute__((section(".profile_state"), aligned(64)));
@@ -124,14 +124,15 @@ void profile_record_thread_start(struct thread *thread)
     uint8_t slot = profile_thread_slot(thread);
     uint64_t counter;
 
-    state->defined_id[slot] = 0;
+    state->defined_generation[slot] = 0;
     if (!profile_reserve(state, RPC_PROFILE_SLOT_DEFINE_SIZE +
                                 RPC_PROFILE_RECORD_SIZE))
         return;
     counter = profile_counter();
     profile_queue_slot_define(state, thread, counter);
     profile_queue_record(state, counter, slot, thread->state);
-    state->defined_id[slot] = thread->id;
+    state->defined_generation[slot] = (uint8_t)(thread->id >>
+                                                THREAD_ID_SLOT_BITS);
     profile_finish_record(state);
 }
 
@@ -140,7 +141,8 @@ void profile_record_thread_state(struct thread *thread)
     struct profile_state *state = profile_self();
     uint8_t slot = profile_thread_slot(thread);
 
-    if (state->defined_id[slot] != thread->id) {
+    if (state->defined_generation[slot] !=
+        (uint8_t)(thread->id >> THREAD_ID_SLOT_BITS)) {
         profile_record_thread_start(thread);
         return;
     }
@@ -290,5 +292,5 @@ int profile_init(void)
     stack = __profile_stack_start + hart * CONFIG_PROFILE_STACK_SIZE;
     return thread_start(profile_thread(), RPC_PROFILE_SLOT_FLUSH,
                         THREAD_TYPE_SYSTEM, "profile-flush", profile_main,
-                        stack, CONFIG_PROFILE_STACK_SIZE, 0, 0, 0, 0, 0);
+                        stack, CONFIG_PROFILE_STACK_SIZE, 0, 0, 0);
 }

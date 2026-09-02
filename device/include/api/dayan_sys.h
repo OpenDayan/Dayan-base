@@ -68,11 +68,8 @@ enum dayan_task_axis {
 
 /* Per-hart resource. Treat every field as private. */
 typedef struct dayan_resource {
-    uint32_t state;
     uint32_t producer_count;
     uint32_t consumer_count;
-    volatile uint32_t lock;
-    struct thread_list wait_lock;
     struct thread_list wait_ready;
     struct thread_list wait_free;
 } dayan_resource_t;

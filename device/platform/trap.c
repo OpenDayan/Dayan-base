@@ -8,10 +8,23 @@
 #include "sche.h"
 #include "trap.h"
 
+struct trap_record_buffer {
+    _Alignas(CONFIG_CACHE_LINE_SIZE) struct trap_record record;
+};
+
+static struct trap_record_buffer trap_records[CONFIG_HART_COUNT]
+    __attribute__((section(".trap_records")));
+
+void trap_report_complete(void)
+{
+    cpu_self()->trap.active = 0;
+}
+
 _Noreturn void trap_handle(const struct trap_frame *frame)
 {
     struct cpu *cpu;
     struct trap_record *record;
+    uintptr_t hart;
     size_t i;
     int status;
 
@@ -21,8 +34,11 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     if (cpu->trap.active)
         platform_halt();
     cpu->trap.active = 1;
-    record = &cpu->trap.record;
-    record->hart_id = (uint32_t)platform_hart_id();
+    hart = platform_hart_id();
+    if (hart >= CONFIG_HART_COUNT)
+        platform_halt();
+    record = &trap_records[hart].record;
+    record->hart_id = (uint32_t)hart;
     record->thread_id = current->id;
     record->thread_type = current->type;
     record->thread_state = current->state;
@@ -52,7 +68,6 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     status = rpc_report_trap(record, sizeof(*record));
     if (status < 0)
         platform_halt();
-    cpu->trap.active = 0;
     if (current->type == THREAD_TYPE_TASK_PROC ||
         current->type == THREAD_TYPE_TASK_THREAD)
         thread_exit_status(-EIO);
