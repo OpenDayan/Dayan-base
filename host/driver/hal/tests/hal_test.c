@@ -297,6 +297,154 @@ int main(void)
                -ENOTSUP);
         assert(!unexpected);
     }
+    /* ClusterMMU register access. */
+    {
+        uint32_t observed_reg = 0;
+        uint64_t observed64 = 0;
+        int present = 0;
+
+        /* A LO half bound to a translation window must be 4 KiB aligned.
+         * The hardware ignores a misaligned write and reports no error, so
+         * the HAL has to reject it or the caller sees a phantom success. */
+        assert(npu_hal_mmu_write_reg(hal, 0, DAYAN_MMU_FIX_MAP_BASE_LO,
+                                     0x1234) == -EINVAL);
+        assert(npu_hal_mmu_write_reg(hal, 0, DAYAN_MMU_REDIR_PAGE_FAULT_LO,
+                                     0x0800) == -EINVAL);
+        assert(npu_hal_mmu_write_reg(hal, 0, DAYAN_MMU_FIX_MAP_BASE_LO,
+                                     0x2000) == 0);
+        /* PTW_BASE carries no such rule: page tables are page-aligned by
+         * construction and the hardware imposes nothing extra. */
+        assert(npu_hal_mmu_write_reg(hal, 0, DAYAN_MMU_PTW_BASE_LO,
+                                     0x1240) == 0);
+        /* Unaligned and out-of-page offsets are rejected outright. */
+        assert(npu_hal_mmu_write_reg(hal, 0, 0x002, 0) == -EINVAL);
+        assert(npu_hal_mmu_write_reg(hal, 0, DAYAN_MMU_APB_SIZE, 0) ==
+               -EINVAL);
+
+        /*
+         * The stub backs writes with xdma0_h2c_0 and reads with
+         * xdma0_c2h_0, so a register write is not visible to a register
+         * read.  Writes are therefore checked by inspecting the h2c file
+         * directly, and read paths by seeding the c2h file.
+         *
+         * These options set mmio_address_offset, which the backend adds to
+         * every address below the MMIO limit, so the MMU page lands that far
+         * into the file.
+         */
+        const off_t NPU_MMU_TEST_BASE = (off_t)DAYAN_MMU_APB_BASE + 0x10000;
+        int h2c = endpoint_fd(directory, 0, "h2c_0", O_RDONLY);
+        int c2h = endpoint_fd(directory, 0, "c2h_0", O_RDWR);
+        uint32_t raw[2];
+
+        assert(h2c >= 0 && c2h >= 0);
+
+        /* 64-bit writes are LO then HI, with HI holding only bits [55:32]. */
+        assert(npu_hal_mmu_write64(hal, 0, DAYAN_MMU_PTW_BASE_LO,
+                                   UINT64_C(0x00ab00000012f000)) == 0);
+        assert(pread(h2c, raw, sizeof(raw),
+                     (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_PTW_BASE_LO)) ==
+               (ssize_t)sizeof(raw));
+        assert(raw[0] == 0x0012f000);
+        assert(raw[1] == 0x00ab0000);
+        /* Anything above bit 55 cannot be represented; truncating it
+         * silently would map to an address nobody asked for. */
+        assert(npu_hal_mmu_write64(hal, 0, DAYAN_MMU_PTW_BASE_LO,
+                                   UINT64_C(0x0100000000000000)) == -EINVAL);
+        assert(pread(h2c, raw, sizeof(raw),
+                     (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_PTW_BASE_LO)) ==
+               (ssize_t)sizeof(raw));
+        assert(raw[0] == 0x0012f000 && raw[1] == 0x00ab0000);
+
+        /* read64 reassembles the pair and masks HI to 24 bits. */
+        raw[0] = 0x00033000;
+        raw[1] = 0xff00cd00;
+        assert(pwrite(c2h, raw, sizeof(raw),
+                      (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_PTW_BASE_LO)) ==
+               (ssize_t)sizeof(raw));
+        assert(npu_hal_mmu_read64(hal, 0, DAYAN_MMU_PTW_BASE_LO,
+                                  &observed64) == 0);
+        assert(observed64 == UINT64_C(0x00cd0000033000));
+
+        /* Presence is a round trip, so it needs the probe value staged on
+         * the read side; the write side must end up restored. */
+        observed_reg = 0x5a5a5000;
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE +
+                              DAYAN_MMU_FIX_MAP_SIZE_LO)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(npu_hal_mmu_present(hal, 0, &present) == 0);
+        assert(present == 1);
+        assert(pread(h2c, &observed_reg, sizeof(observed_reg),
+                     (off_t)(NPU_MMU_TEST_BASE +
+                             DAYAN_MMU_FIX_MAP_SIZE_LO)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(observed_reg == 0x5a5a5000);
+        /* A device that does not echo the probe is reported absent. */
+        observed_reg = 0;
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE +
+                              DAYAN_MMU_FIX_MAP_SIZE_LO)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(npu_hal_mmu_present(hal, 0, &present) == 0);
+        assert(present == 0);
+
+        /* Only 8 ASIDs exist, so a selective flush past that is a bug. */
+        assert(npu_hal_mmu_flush(hal, 0, 1, DAYAN_MMU_ASID_COUNT, 10) ==
+               -EINVAL);
+
+        /* Flush handshake, driven by seeding the read-side status words. */
+        observed_reg = 0;
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_FLUSH_BUSY)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE +
+                              DAYAN_MMU_FLUSH_ERR_CODE)) ==
+               (ssize_t)sizeof(observed_reg));
+        observed_reg = DAYAN_MMU_FLUSH_DONE_BIT;
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_FLUSH_DONE)) ==
+               (ssize_t)sizeof(observed_reg));
+        /*
+         * DONE stays set on the read side because nothing clears it here, so
+         * the post-ACK recheck reports -EIO.  That recheck is what stops a
+         * later flush from mistaking this DONE for its own completion.
+         */
+        assert(npu_hal_mmu_flush(hal, 0, 0, 0, 100) == -EIO);
+        assert(pread(h2c, &observed_reg, sizeof(observed_reg),
+                     (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_FLUSH_ACK)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(observed_reg == DAYAN_MMU_FLUSH_ACK_BIT);
+        /* The TLB_FLUSH command word carries mode and ASID. */
+        assert(pread(h2c, &observed_reg, sizeof(observed_reg),
+                     (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_TLB_FLUSH)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(observed_reg == DAYAN_MMU_TLB_FLUSH_GO);
+        assert(npu_hal_mmu_flush(hal, 0, 1, 5, 100) == -EIO);
+        assert(pread(h2c, &observed_reg, sizeof(observed_reg),
+                     (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_TLB_FLUSH)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(observed_reg == (DAYAN_MMU_TLB_FLUSH_GO |
+                                DAYAN_MMU_TLB_FLUSH_ASID_SEL |
+                                (5U << DAYAN_MMU_TLB_FLUSH_ASID_SHIFT)));
+        /* A busy-reject means nothing was invalidated: -EBUSY, not success. */
+        observed_reg = DAYAN_MMU_FLUSH_ERR_BUSY_REJECT;
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE +
+                              DAYAN_MMU_FLUSH_ERR_CODE)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(npu_hal_mmu_flush(hal, 0, 0, 0, 100) == -EBUSY);
+        /* BUSY never clearing must time out rather than spin forever. */
+        observed_reg = DAYAN_MMU_FLUSH_BUSY_BIT;
+        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
+                      (off_t)(NPU_MMU_TEST_BASE + DAYAN_MMU_FLUSH_BUSY)) ==
+               (ssize_t)sizeof(observed_reg));
+        assert(npu_hal_mmu_flush(hal, 0, 0, 0, 1) == -ETIMEDOUT);
+
+        close(c2h);
+        close(h2c);
+    }
+
     assert(npu_hal_memory_free(hal, local1) == 0);
     assert(npu_hal_memory_free(hal, local0) == 0);
     assert(npu_hal_memory_free(hal, uram1) == 0);

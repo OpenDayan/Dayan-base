@@ -23,7 +23,7 @@ HAL_DATA_SOURCES := hal/dataplane.c \
 HAL_CONTROL_SOURCES := $(filter-out hal/dataplane.c,$(HAL_ROOT_SOURCES)) \
 	$(filter-out %/dataplane.c %/io.c,$(HAL_BACKEND_SOURCES))
 SERVICE_SOURCES := server/device.c server/elf.c server/rpc.c \
-	server/kernel.c server/package.c server/profile.c
+	server/kernel.c server/package.c server/profile.c server/mmu.c
 SERVER_SOURCES := server/scheduler.c server/server.c
 RUNTIME_SOURCES := $(wildcard runtime/*.c)
 
@@ -101,6 +101,12 @@ $(BUILD)/tests/package_test: runtime/tests/package_test.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+# Links server/mmu.c against stub HAL and allocator definitions in the test
+# itself, so the page-table logic is exercised without a device.
+$(BUILD)/tests/mmu_test: server/tests/mmu_test.c $(BUILD)/server/mmu.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
 $(BUILD)/tests/socket_test: runtime/tests/socket_test.c $(PROTOCOL_OBJECT) \
 		$(HAL_IO_OBJECTS) $(HAL_CONTROL_OBJECTS) $(HAL_DATA_OBJECTS) \
 		$(SERVICE_OBJECTS) \
@@ -139,10 +145,11 @@ layer-check: $(RUNTIME_STATIC)
 
 check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
-	$(BUILD)/tests/public_headers.o
+	$(BUILD)/tests/mmu_test $(BUILD)/tests/public_headers.o
 	$(BUILD)/tests/hal_test
 	$(BUILD)/tests/package_test
 	$(BUILD)/tests/socket_test
+	$(BUILD)/tests/mmu_test
 
 $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 	@mkdir -p $(dir $@)

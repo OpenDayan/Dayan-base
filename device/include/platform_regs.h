@@ -21,4 +21,95 @@
 #define DAYAN_CLINT_MSIP(hart) \
     (DAYAN_CLINT_MSIP_BASE + (hart) * 4U)
 
+/*
+ * ClusterMMU APB4 register page.
+ *
+ * The integration manual (section 6.1 address map, section 6.6) places
+ * mmuconfig at 0x005000-0x006000.  npu-qemu's MMU-extend branch maps the
+ * same page at 0x008000 instead; the intra-page offsets below match the
+ * manual exactly, only the page base differs.  The base is overridable so
+ * one build can target either, and it defaults to the QEMU value because
+ * QEMU is the only thing this tree is validated against today.
+ *
+ * Real hardware needs DAYAN_MMU_APB_BASE=0x005000.
+ */
+#ifndef DAYAN_MMU_APB_BASE
+#define DAYAN_MMU_APB_BASE              0x008000U
+#endif
+#define DAYAN_MMU_APB_SIZE              0x001000U
+#define DAYAN_MMU_HW_APB_BASE           0x005000U
+
+/*
+ * 56-bit physical addresses are split across a LO/HI register pair: LO
+ * takes bits [31:0] and HI bits [55:32], so only the low 24 bits of a HI
+ * write are kept.  Every base bound to a translation window (FixMap,
+ * redirect, error-slave) must be 4 KiB aligned; the hardware silently
+ * ignores a misaligned LO write and does not raise an APB error
+ * (manual section 2.2.8 clause 4), so software has to check first.
+ */
+#define DAYAN_MMU_PTW_BASE_LO           0x000U
+#define DAYAN_MMU_PTW_BASE_HI           0x004U
+#define DAYAN_MMU_FIX_MAP_BASE_LO       0x008U
+#define DAYAN_MMU_FIX_MAP_BASE_HI       0x00cU
+#define DAYAN_MMU_N_FIX_MAP_EN          0x010U
+#define DAYAN_MMU_TLB_FLUSH             0x014U
+#define DAYAN_MMU_FLUSH_ACK             0x018U
+#define DAYAN_MMU_FLUSH_DONE            0x01cU
+#define DAYAN_MMU_FLUSH_BUSY            0x020U
+#define DAYAN_MMU_FLUSH_ERR_CODE        0x024U
+#define DAYAN_MMU_GLOBAL_ASID           0x028U
+#define DAYAN_MMU_ERROR_SLV_MASK_LO     0x048U
+#define DAYAN_MMU_ERROR_SLV_MASK_HI     0x04cU
+#define DAYAN_MMU_ERROR_SLV_OFF_MODE    0x050U
+#define DAYAN_MMU_ERROR_SLV_CFG_ERR     0x070U
+#define DAYAN_MMU_ERROR_SLV_CFG_CLR     0x074U
+#define DAYAN_MMU_FIX_MAP_SIZE_LO       0x0b0U
+#define DAYAN_MMU_FIX_MAP_SIZE_HI       0x0b4U
+
+/*
+ * Redirect bases, one per fault class, in the order the hardware fault
+ * codes select them (manual section 6.6.4).  A fault does not abort the
+ * access: the MMU replaces the whole master AR/AW address with the base
+ * for that class, so the access completes somewhere harmless instead of
+ * reporting anything.
+ */
+#define DAYAN_MMU_REDIR_PAGE_FAULT_LO   0x080U
+#define DAYAN_MMU_REDIR_READ_PERM_LO    0x088U
+#define DAYAN_MMU_REDIR_WRITE_PERM_LO   0x090U
+#define DAYAN_MMU_REDIR_EXEC_PERM_LO    0x098U
+#define DAYAN_MMU_REDIR_PTW_ERR_LO      0x0a0U
+#define DAYAN_MMU_REDIR_DEFAULT_LO      0x0a8U
+#define DAYAN_MMU_REDIR_CLASS_COUNT     6U
+#define DAYAN_MMU_REDIR_CLASS_STRIDE    0x008U
+#define DAYAN_MMU_REDIR_LO(index) \
+    (DAYAN_MMU_REDIR_PAGE_FAULT_LO + (index) * DAYAN_MMU_REDIR_CLASS_STRIDE)
+
+/* TLB_FLUSH: bit0 triggers, bit1 selects ASID mode, bits [9:2] carry the
+ * ASID.  Mode 0 is a full flush. */
+#define DAYAN_MMU_TLB_FLUSH_GO          0x1U
+#define DAYAN_MMU_TLB_FLUSH_ASID_SEL    0x2U
+#define DAYAN_MMU_TLB_FLUSH_ASID_SHIFT  2U
+#define DAYAN_MMU_TLB_FLUSH_ASID_MASK   0xffU
+
+#define DAYAN_MMU_FLUSH_BUSY_BIT        0x1U
+#define DAYAN_MMU_FLUSH_DONE_BIT        0x1U
+#define DAYAN_MMU_FLUSH_ACK_BIT         0x1U
+#define DAYAN_MMU_FLUSH_ERR_MASK        0xfU
+#define DAYAN_MMU_FLUSH_ERR_BUSY_REJECT 0x1U
+
+#define DAYAN_MMU_N_FIX_MAP_EN_BIT      0x1U
+/* bit0: 0 substitutes the whole address, 1 adds VA[11:0] to the base. */
+#define DAYAN_MMU_ERROR_SLV_OFF_VA      0x1U
+#define DAYAN_MMU_ERROR_SLV_CFG_ERR_BIT 0x1U
+
+/* Only 8 ASIDs exist and all ports share GLOBAL_ASID, so Contexts cannot
+ * be isolated by ASID (manual section 2.2.8 clause 3). */
+#define DAYAN_MMU_ASID_COUNT            8U
+
+#define DAYAN_MMU_PA_BITS               56U
+#define DAYAN_MMU_PA_HI_MASK            0x00ffffffU
+#define DAYAN_MMU_PAGE_SHIFT            12U
+#define DAYAN_MMU_PAGE_SIZE             0x1000U
+#define DAYAN_MMU_PAGE_MASK             0xfffU
+
 #endif

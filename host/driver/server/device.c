@@ -229,7 +229,9 @@ static int options_valid(const npu_service_options_t *options)
 {
     return options && options->version == NPU_SERVICE_OPTIONS_VERSION &&
            options->rpc_poll_interval_us && options->default_timeout_ms &&
-           !options->reserved && options->output && options->trap &&
+           /* This word was reserved-must-be-zero; it now carries enable_mmu,
+            * so only that bit is accepted and the rest stays rejected. */
+           !(options->enable_mmu & ~1U) && options->output && options->trap &&
            options->tensor_interrupt &&
            options->proc_exit && options->profile;
 }
@@ -295,6 +297,14 @@ int npu_service_open(npu_service_device_t **device_out,
         goto fail;
     }
     condition_initialized = 1;
+    /*
+     * Before any worker exists, so the page tables and identity mappings are
+     * complete before anything can submit work.  With enable_mmu clear this
+     * only initialises bookkeeping and leaves the hardware untouched.
+     */
+    status = npu_service_mmu_init(device);
+    if (status < 0)
+        goto fail;
     status = pthread_create(&device->worker, 0, npu_rpc_worker, device);
     if (status) {
         status = -status;
@@ -487,6 +497,13 @@ int npu_service_close(npu_service_device_t *device)
     free_heap_allocations(device);
     free_atomic_cache_backing(device);
     free_firmware_allocations(device);
+    /*
+     * After the workers are joined and the allocations above are gone, so
+     * nothing can translate an address while the tables come down.  This
+     * returns the MMU to identity addressing first, then drains the reclaim
+     * list without flushing (FixMap is back on, so no TLB entry matters).
+     */
+    npu_service_mmu_fini(device);
     pthread_cond_destroy(&device->condition);
     pthread_mutex_destroy(&device->kernel_mutex);
     pthread_mutex_destroy(&device->mutex);
@@ -1144,7 +1161,18 @@ int npu_service_launch(npu_service_device_t *device,
     agent = &device->launch_agents[npu_service_core_index(device,
                                                            desc->target)];
     pthread_mutex_lock(&device->mutex);
-    status = rpc_shutdown_status_locked(device);
+    /*
+     * A TLB flush may be running against a Device that was idle when it was
+     * decided.  Queueing this launch now would let it start executing while
+     * TLB_FLUSH is still draining, which hangs the Cluster, so wait for the
+     * idle-window work to finish first.
+     */
+    for (;;) {
+        status = rpc_shutdown_status_locked(device);
+        if (status < 0 || !device->reclaim_in_flight)
+            break;
+        pthread_cond_wait(&device->condition, &device->mutex);
+    }
     if (status == 0) {
         if (agent->tail)
             agent->tail->queue_next = launch;
@@ -1279,6 +1307,56 @@ int npu_service_launch_wait(npu_service_launch_t *launch,
     }
 }
 
+/*
+ * The idle-window MMU work: inspect the guard pages, then flush and free the
+ * parked reclaim batch.  Both need a Device with no launch in flight, and the
+ * flush needs that to stay true until it completes, so the idle decision and
+ * the work are tied together by reclaim_in_flight: it is set here under the
+ * lock, launch submission blocks on it, and it is cleared once the work is
+ * done.  A Device that ever had a launch abandoned on it is never idle again
+ * (see launch_abandoned), so nothing runs and the batch waits for teardown.
+ */
+static void launch_idle_window(npu_service_device_t *device)
+{
+    uint32_t cluster;
+
+    if (!device->mmu.enabled)
+        return;
+    pthread_mutex_lock(&device->mutex);
+    if (device->active_launches || device->launch_abandoned ||
+        device->reclaim_in_flight) {
+        pthread_mutex_unlock(&device->mutex);
+        return;
+    }
+    device->reclaim_in_flight = 1;
+    pthread_mutex_unlock(&device->mutex);
+
+    for (cluster = 0; cluster < device->hal_info.cluster_count; ++cluster) {
+        uint32_t fault_class = 0;
+        uint32_t fault_offset = 0;
+        int status = npu_service_mmu_check_faults(device, cluster,
+                                                  &fault_class, &fault_offset);
+
+        if (status > 0)
+            fprintf(stderr,
+                    "dayan_server: ClusterMMU fault on Cluster %u: class=%u "
+                    "(0=page 1=read 2=write 3=exec 4=ptw 5=default) "
+                    "va[11:0]=0x%03x\n",
+                    cluster, fault_class, fault_offset);
+        else if (status < 0)
+            fprintf(stderr,
+                    "dayan_server: ClusterMMU guard-page check failed on "
+                    "Cluster %u: %d\n",
+                    cluster, status);
+    }
+    (void)npu_service_mmu_run_reclaim(device, 0);
+
+    pthread_mutex_lock(&device->mutex);
+    device->reclaim_in_flight = 0;
+    pthread_cond_broadcast(&device->condition);
+    pthread_mutex_unlock(&device->mutex);
+}
+
 int npu_service_launch_release(npu_service_launch_t *launch)
 {
     npu_service_launch_info_t info;
@@ -1310,6 +1388,7 @@ int npu_service_launch_release(npu_service_launch_t *launch)
         --device->active_launches;
     pthread_mutex_unlock(&device->mutex);
     free(launch);
+    launch_idle_window(device);
     return 0;
 }
 
@@ -1344,6 +1423,13 @@ int npu_service_launch_abandon(npu_service_launch_t *launch)
         }
     }
     if (!free_launch) {
+        /*
+         * The launch reached (or is reaching) the Device and its completion
+         * is unknown, so its AXI traffic may continue indefinitely.  From
+         * here on the Device can never be proven idle, and a TLB flush would
+         * risk landing on live traffic; park reclaim until teardown.
+         */
+        device->launch_abandoned = 1;
         if (launch->submit_done)
             free_launch = 1;
         else
@@ -1355,6 +1441,9 @@ int npu_service_launch_abandon(npu_service_launch_t *launch)
     pthread_mutex_unlock(&device->mutex);
     if (free_launch)
         free(launch);
+    /* Only a launch pulled back off the queue leaves the Device idle; the
+     * sticky flag above makes the window a no-op in every other case. */
+    launch_idle_window(device);
     return 0;
 }
 

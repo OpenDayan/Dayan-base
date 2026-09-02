@@ -802,6 +802,20 @@ int main(int argc, char **argv)
     server_options.firmware_path = argv[1];
     server_options.api_elf_path = argv[2];
     server_options.enabled_core_mask = (UINT32_C(1) << core_count) - 1U;
+    /*
+     * MMU off by default, so the smoke keeps testing the identity-mapped path
+     * that the FixMap reset state gives.  NPU_CMODEL_MMU=1 runs the same
+     * sequence with translation enabled, which is the only end-to-end check
+     * that Device addresses survive being routed through the page tables.
+     */
+    {
+        const char *mmu = getenv("NPU_CMODEL_MMU");
+
+        if (mmu && *mmu == '1') {
+            server_options.service.enable_mmu = 1;
+            printf("cmodel smoke: ClusterMMU translation enabled\n");
+        }
+    }
     xdma_options.device_directory = device_prefix;
     server_options.service.proc_exit = capture_proc_exit;
     server_options.service.callback_context = &exits;

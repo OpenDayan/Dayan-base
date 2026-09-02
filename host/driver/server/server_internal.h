@@ -82,6 +82,16 @@ struct server_buffer {
     uint32_t flags;
     uint32_t references;
     npu_hal_allocation_t *allocation;
+    /*
+     * Device-visible address when the ClusterMMU is on: a virtual address
+     * reserved at create time and mapped onto the allocation's physical
+     * pages.  Zero means the MMU is off and the physical address is used
+     * directly.  @va_size is the page-rounded mapping length, which is what
+     * unmapping needs, and @va_cluster is the Cluster whose table holds it.
+     */
+    uint64_t va;
+    uint64_t va_size;
+    uint32_t va_cluster;
     struct server_context *context;
     struct server_buffer *next;
 };

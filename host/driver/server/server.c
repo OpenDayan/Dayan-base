@@ -1045,6 +1045,22 @@ static int memory_request_for_buffer(dayan_server_t *server,
     memory.owner = context->owner;
     memory.size = request->size;
     memory.alignment = request->alignment;
+    /*
+     * With translation on, a Buffer has to be mappable, and the smallest thing
+     * the ClusterMMU can map is one 4 KiB page.  The Runtime's default
+     * alignment is far smaller than that, so without this the allocator hands
+     * back an unaligned physical address and buffer_map_locked() has no page
+     * to install.  Rounding the size up too keeps a page from spanning two
+     * Buffers, which would leak one Buffer's permissions onto the other.
+     */
+    if (server->options.service.enable_mmu) {
+        if (memory.alignment < NPU_SERVICE_MMU_PAGE_SIZE)
+            memory.alignment = NPU_SERVICE_MMU_PAGE_SIZE;
+        if (memory.size > UINT64_MAX - NPU_SERVICE_MMU_PAGE_MASK)
+            return -EOVERFLOW;
+        memory.size = (memory.size + NPU_SERVICE_MMU_PAGE_MASK) &
+                      ~NPU_SERVICE_MMU_PAGE_MASK;
+    }
     if (request->flags & NPU_BUFFER_DEVICE_LOCAL) {
         scopes[0] = NPU_HAL_MEMORY_CLUSTER;
         scopes[1] = NPU_HAL_MEMORY_DEVICE;
@@ -1126,6 +1142,65 @@ static int context_create_locked(dayan_server_t *server,
     return 0;
 }
 
+/*
+ * Give a buffer its device-visible virtual address.
+ *
+ * With the ClusterMMU off this is a no-op and the buffer keeps using its
+ * physical address, which is why every caller can ignore the distinction.
+ * With it on, the buffer gets a VA range from the bump allocator mapped onto
+ * its physical pages, with permissions taken from the buffer flags.
+ *
+ * The mapping is installed in every Cluster's table.  A buffer's visibility
+ * is decided by npu_hal_memory_visible() at scheduling time, not by which
+ * page tables happen to contain it, so mapping it everywhere keeps the two
+ * from disagreeing.
+ */
+static int buffer_map_locked(dayan_server_t *server,
+                             struct server_buffer *buffer, uint32_t flags)
+{
+    npu_hal_allocation_info_t info;
+    uint64_t va = 0;
+    uint64_t size;
+    uint32_t prot = 0;
+    uint32_t cluster;
+    int status;
+
+    if (!server->device)
+        return 0;
+    status = npu_hal_memory_info(server->hal, buffer->allocation, &info);
+    if (status < 0)
+        return status;
+    size = (info.size + NPU_SERVICE_MMU_PAGE_MASK) &
+           ~(uint64_t)NPU_SERVICE_MMU_PAGE_MASK;
+    status = npu_service_mmu_reserve_va(server->device, size, &va);
+    /* -ENOTSUP means the MMU is disabled: the physical address stands. */
+    if (status == -ENOTSUP)
+        return 0;
+    if (status < 0)
+        return status;
+    if (flags & NPU_BUFFER_READ)
+        prot |= NPU_SERVICE_MMU_READ;
+    if (flags & NPU_BUFFER_WRITE)
+        prot |= NPU_SERVICE_MMU_WRITE;
+    for (cluster = 0; cluster < server->hal_info.cluster_count; ++cluster) {
+        status = npu_service_mmu_map(server->device, cluster, va,
+                                     info.address, size, prot);
+        if (status < 0) {
+            /* Roll back the clusters already mapped so a failed create
+             * leaves no half-installed translation behind. */
+            while (cluster--)
+                (void)npu_service_mmu_unmap(server->device, cluster, va,
+                                            size);
+            npu_service_mmu_release_va(server->device, va, size);
+            return status;
+        }
+    }
+    buffer->va = va;
+    buffer->va_size = size;
+    buffer->va_cluster = 0;
+    return 0;
+}
+
 static int buffer_create_locked(dayan_server_t *server,
                                 struct server_session *session,
                                 const npu_ipc_buffer_create_t *request,
@@ -1164,6 +1239,12 @@ static int buffer_create_locked(dayan_server_t *server,
         free(buffer);
         return status;
     }
+    status = buffer_map_locked(server, buffer, request->flags);
+    if (status < 0) {
+        (void)npu_hal_memory_free(server->hal, buffer->allocation);
+        free(buffer);
+        return status;
+    }
     buffer->size = request->size;
     buffer->flags = request->flags;
     buffer->context = context;
@@ -1186,8 +1267,31 @@ static int buffer_destroy_locked(dayan_server_t *server,
         return -ENOENT;
     if (buffer->references)
         return -EBUSY;
-    status = npu_hal_memory_free(server->hal,
-                                 buffer->allocation);
+    if (buffer->va) {
+        uint32_t cluster;
+
+        /*
+         * Clear the PTEs everywhere, then hand the backing memory to the
+         * deferred-reclaim list rather than freeing it here.  Until a TLB
+         * flush happens the Device may still translate these addresses, and
+         * the flush can only be issued when no launch is in flight - freeing
+         * now would let a later allocation reuse memory a stale entry still
+         * points at.
+         */
+        for (cluster = 0; cluster < server->hal_info.cluster_count;
+             ++cluster) {
+            status = npu_service_mmu_unmap(server->device, cluster,
+                                           buffer->va, buffer->va_size);
+            if (status < 0)
+                return status;
+        }
+        npu_service_mmu_release_va(server->device, buffer->va,
+                                   buffer->va_size);
+        status = npu_service_mmu_defer_reclaim(server->device, 0,
+                                               buffer->allocation);
+    } else {
+        status = npu_hal_memory_free(server->hal, buffer->allocation);
+    }
     if (status < 0)
         return status;
     link = &buffer->context->buffers;

@@ -108,6 +108,41 @@ int npu_hal_wait_command_consumed(npu_hal_t *hal, npu_hal_core_t core,
 int npu_hal_boot_core(npu_hal_t *hal, npu_hal_core_t core, uint64_t entry,
                       uint32_t timeout_ms);
 
+/*
+ * ClusterMMU APB4 register access.  Offsets are the DAYAN_MMU_* values from
+ * platform_regs.h, relative to the MMU register page rather than to the
+ * window npu_hal_register_* addresses.
+ *
+ * Writes to a base bound to a translation window are rejected with -EINVAL
+ * when not 4 KiB aligned, because the hardware would silently ignore them
+ * and report no error.  npu_hal_mmu_write64() likewise rejects values that
+ * do not fit 56 bits instead of truncating them.
+ */
+int npu_hal_mmu_present(npu_hal_t *hal, uint32_t cluster, int *present);
+int npu_hal_mmu_read_reg(npu_hal_t *hal, uint32_t cluster, uint32_t offset,
+                         uint32_t *value);
+int npu_hal_mmu_write_reg(npu_hal_t *hal, uint32_t cluster, uint32_t offset,
+                          uint32_t value);
+int npu_hal_mmu_read64(npu_hal_t *hal, uint32_t cluster, uint32_t offset_lo,
+                       uint64_t *value);
+int npu_hal_mmu_write64(npu_hal_t *hal, uint32_t cluster, uint32_t offset_lo,
+                        uint64_t value);
+
+/*
+ * Invalidate the Cluster TLB.  Returns -EBUSY if the hardware rejected the
+ * request because an earlier flush was still running (nothing was
+ * invalidated; retry), and -ETIMEDOUT if FLUSH_BUSY never cleared.
+ *
+ * The caller must have established that the Cluster has no AXI traffic in
+ * flight before calling this.  There is no quiesce register to enforce it:
+ * writing TLB_FLUSH with transactions outstanding leaves the drain waiting
+ * forever and FLUSH_BUSY permanently set, which no error path here can undo.
+ * In this tree that means no active launches, which is what the Service's
+ * deferred-reclaim path waits for.
+ */
+int npu_hal_mmu_flush(npu_hal_t *hal, uint32_t cluster, int asid_selective,
+                      uint8_t asid, uint32_t timeout_ms);
+
 /* Physical address allocation and ownership live entirely in HAL. */
 int npu_hal_memory_alloc(npu_hal_t *hal,
                          const npu_hal_memory_request_t *request,

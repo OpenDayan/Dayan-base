@@ -59,7 +59,16 @@ typedef struct npu_service_options {
     uint32_t version;
     uint32_t rpc_poll_interval_us;
     uint32_t default_timeout_ms;
-    uint32_t reserved;
+    /*
+     * Nonzero routes Device addresses through the ClusterMMU: the Service
+     * builds Sv39 page tables, identity-maps the firmware and control
+     * apertures, and hands Buffers virtual addresses.  Zero leaves the MMU in
+     * its reset state, whose FixMap is a full-range identity map, so every
+     * address behaves exactly as it did before this option existed.
+     *
+     * Occupies what was a reserved word, so the struct size does not change.
+     */
+    uint32_t enable_mmu;
     npu_service_output_fn output;
     npu_service_trap_fn trap;
     npu_service_tensor_interrupt_fn tensor_interrupt;
@@ -211,6 +220,52 @@ int npu_service_profile_stop(npu_service_device_t *device);
 
 const npu_service_options_t *npu_service_get_options(
     const npu_service_device_t *device);
+
+/*
+ * Device address space (ClusterMMU).
+ *
+ * All of these are no-ops returning success when the MMU is disabled, so
+ * callers need not branch on it.  The exception is reserve_va(), which
+ * returns -ENOTSUP because there is no virtual address to hand out and the
+ * caller must keep using the physical one.
+ */
+#define NPU_SERVICE_MMU_READ        (1U << 0)
+#define NPU_SERVICE_MMU_WRITE       (1U << 1)
+#define NPU_SERVICE_MMU_EXEC        (1U << 2)
+
+/* Mapping granularity; only 4 KiB pages are used. */
+#define NPU_SERVICE_MMU_PAGE_SIZE   UINT64_C(0x1000)
+#define NPU_SERVICE_MMU_PAGE_MASK   UINT64_C(0xfff)
+
+int npu_service_mmu_reserve_va(npu_service_device_t *device, uint64_t size,
+                               uint64_t *base_out);
+void npu_service_mmu_release_va(npu_service_device_t *device, uint64_t base,
+                                uint64_t size);
+int npu_service_mmu_map(npu_service_device_t *device, uint32_t cluster,
+                        uint64_t va, uint64_t pa, uint64_t size,
+                        uint32_t prot);
+/*
+ * Clears PTEs only; it does not flush.  The backing memory must be released
+ * through npu_service_mmu_defer_reclaim(), which is where the flush happens,
+ * because a flush issued while the Device has AXI traffic in flight hangs the
+ * Cluster and there is no quiesce register to prevent it.
+ */
+int npu_service_mmu_unmap(npu_service_device_t *device, uint32_t cluster,
+                          uint64_t va, uint64_t size);
+/* Narrowing permissions requires a flush; the caller owns it. */
+int npu_service_mmu_protect(npu_service_device_t *device, uint32_t cluster,
+                            uint64_t va, uint64_t size, uint32_t prot);
+/* Park an allocation whose PTEs are cleared; it is freed once a flush has
+ * happened.  Frees immediately when the MMU is disabled. */
+int npu_service_mmu_defer_reclaim(npu_service_device_t *device,
+                                  uint32_t cluster,
+                                  npu_hal_allocation_t *allocation);
+/* Returns 1 and fills the outputs when a guard page shows a fault, else 0.
+ * Sampling only: it cannot report the faulting VA's upper bits or a count,
+ * because the hardware has no fault-status register. */
+int npu_service_mmu_check_faults(npu_service_device_t *device,
+                                 uint32_t cluster, uint32_t *fault_class,
+                                 uint32_t *fault_offset);
 
 #ifdef __cplusplus
 }

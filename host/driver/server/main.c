@@ -82,6 +82,7 @@ static void usage(FILE *stream, const char *program)
             "  --core-mask MASK        enabled Core mask within Cluster\n"
             "  --timeout-ms N          Device operation timeout in milliseconds\n"
             "  --normal-memory-size-mib N  default Normal memory size in MiB\n"
+            "  --enable-mmu 0|1        route Device addresses through the ClusterMMU\n"
             "  --help                  show this text\n",
             program);
 }
@@ -160,6 +161,11 @@ int main(int argc, char **argv)
         else if (strcmp(argument, "--timeout-ms") == 0) {
             status = parse_u32(value, &options.service.default_timeout_ms);
             if (status == 0 && !options.service.default_timeout_ms)
+                status = -EINVAL;
+        }
+        else if (strcmp(argument, "--enable-mmu") == 0) {
+            status = parse_u32(value, &options.service.enable_mmu);
+            if (status == 0 && options.service.enable_mmu > 1U)
                 status = -EINVAL;
         }
         else if (strcmp(argument, "--normal-memory-size-mib") == 0) {

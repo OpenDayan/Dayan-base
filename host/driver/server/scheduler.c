@@ -821,12 +821,22 @@ static int fill_launch_arguments(dayan_server_t *server,
             struct server_buffer *buffer =
                 command->data.launch.buffers[index];
             uint64_t address;
+            /*
+             * Visibility is still decided against the allocation, so this
+             * call runs either way; only the address handed to the Device
+             * changes.  A nonzero va means the ClusterMMU is on and the
+             * Device must be given the virtual address instead.
+             */
             int status = npu_hal_memory_address(
                 server->hal, buffer->allocation, target,
                 &address);
 
-            if (status < 0 || address > UINT64_MAX - argument->offset)
-                return status < 0 ? status : -EOVERFLOW;
+            if (status < 0)
+                return status;
+            if (buffer->va)
+                address = buffer->va;
+            if (address > UINT64_MAX - argument->offset)
+                return -EOVERFLOW;
             desc->args[index] = address + argument->offset;
         }
     }

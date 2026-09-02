@@ -73,6 +73,64 @@ struct npu_service_cluster {
     uint64_t atomic_cache_backing_address;
 };
 
+/* BL0 boot ROM, mirroring device/bl0/linker.ld and the QEMU memmap.  It is
+ * the one thing below URAM the Device executes from. */
+#define NPU_SERVICE_MMU_ROM_BASE    UINT64_C(0x00010000)
+#define NPU_SERVICE_MMU_ROM_SIZE    UINT64_C(0x00010000)
+
+/* URAM aperture, mirroring device/include/config.h. */
+#define NPU_SERVICE_MMU_URAM_BASE   UINT64_C(0x00800000)
+#define NPU_SERVICE_MMU_URAM_SIZE   UINT64_C(0x00180000)
+#define NPU_SERVICE_MMU_URAM_STRIDE UINT64_C(0x00200000)
+
+/*
+ * One Sv39 table.  @entries is a Host shadow of the device-resident table at
+ * @device_address: the Host cannot dereference device memory, so entries are
+ * edited here and pushed across.  @children mirrors the interior links so a
+ * walk never has to read them back.
+ */
+struct npu_mmu_table {
+    uint64_t device_address;
+    npu_hal_allocation_t *allocation;
+    uint64_t *entries;
+    struct npu_mmu_table **children;
+};
+
+/*
+ * An allocation whose PTEs are cleared but which must not be freed until a
+ * TLB flush has happened.  The flush can only be issued when the device is
+ * idle, so release is two-phase; see npu_service_mmu_defer_reclaim().
+ */
+struct npu_mmu_reclaim {
+    npu_hal_allocation_t *allocation;
+    uint32_t cluster;
+    struct npu_mmu_reclaim *next;
+};
+
+/* Per-Cluster guard pages, one per redirect class. */
+struct npu_mmu_cluster {
+    npu_hal_allocation_t *guard_allocation[6];
+    uint64_t guard_address[6];
+};
+
+struct npu_mmu {
+    pthread_mutex_t lock;
+    uint32_t enabled;
+    uint32_t cluster_count;
+    struct npu_mmu_table **root;
+    struct npu_mmu_cluster *clusters;
+    struct npu_mmu_reclaim *reclaim;
+    uint64_t va_next;
+    uint64_t va_limit;
+    /*
+     * MMU pages are reserved top-down out of the Normal region. The firmware
+     * is loaded at fixed addresses starting at the bottom of that region, so
+     * plain allocation would collide with it (see npu_mmu_reserve_page()).
+     */
+    uint64_t pool_cursor;
+    uint64_t pool_limit;
+};
+
 struct npu_service_heap_allocation {
     npu_hal_allocation_t *allocation;
     npu_hal_core_t owner;
@@ -129,9 +187,23 @@ struct npu_service_device {
     uint32_t worker_stop;
     int abort_status;
     uint32_t active_launches;
+    /*
+     * Set while the idle-only MMU work (guard-page check, TLB flush) runs
+     * outside the lock.  Launch submission waits on it: a launch queued
+     * between the idle check and the flush would be running when TLB_FLUSH
+     * lands, which hangs the Cluster.
+     */
+    uint32_t reclaim_in_flight;
+    /*
+     * Sticky.  A launch that reached the Device and was then abandoned has
+     * unknown completion, so the Device can never again be shown idle and
+     * no further flush is safe; reclaim waits for teardown.
+     */
+    uint32_t launch_abandoned;
     struct npu_api_symbol *api_symbols;
     size_t api_symbol_count;
     struct npu_kernel_module *kernel_modules;
+    struct npu_mmu mmu;
 };
 
 struct npu_service_launch {
@@ -166,6 +238,19 @@ int npu_service_alloc_visible(npu_service_device_t *device,
 int npu_service_alloc_rpc_descriptor(
     npu_service_device_t *device, npu_hal_core_t viewer,
     size_t descriptor_size, npu_hal_allocation_t **allocation_out);
+
+/*
+ * ClusterMMU lifecycle.  The mapping API itself is public in service.h,
+ * because the Server layer needs it to give Buffers virtual addresses.
+ */
+int npu_service_mmu_init(npu_service_device_t *device);
+void npu_service_mmu_fini(npu_service_device_t *device);
+/*
+ * Flush once and free everything parked by defer_reclaim().  Only call this
+ * with no launch in flight - npu_hal_mmu_flush() hangs the Cluster otherwise.
+ * @force skips the flush, for teardown after the MMU is switched off.
+ */
+int npu_service_mmu_run_reclaim(npu_service_device_t *device, int force);
 
 int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
                              const void *image, size_t size,
