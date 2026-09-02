@@ -60,7 +60,7 @@ static int rpc_transaction_submit(struct rpc_transaction *transaction)
     list_add_tail(&transaction->node, &rpc->send_queue);
     if (proc_event_wake_one(&rpc->send_event)) {
         /* Publish RPC responses before a newly-created proc can block. */
-        list_move(&rpc->send.node, &rpc->send.thread.cpu->sche.ready);
+        list_move(&rpc->send.node, &cpu_self()->sche.ready);
     }
     return 0;
 }
@@ -84,7 +84,7 @@ int rpc_proc_wait_cancel(struct proc *proc)
 {
     struct rpc_transaction *transaction;
 
-    if (!proc || proc->thread.cpu != cpu_self())
+    if (!proc)
         return -EINVAL;
     transaction = proc->system_wait;
     if (!transaction)

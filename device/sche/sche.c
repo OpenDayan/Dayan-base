@@ -118,7 +118,7 @@ struct proc *proc_self(void)
 static inline void proc_state_set(struct proc *proc, uint32_t state)
 {
     proc->thread.state = state;
-    if (__builtin_expect(proc->thread.cpu->sche.profile_enabled, 0))
+    if (__builtin_expect(cpu_self()->sche.profile_enabled, 0))
         profile_record_proc_state(proc);
 }
 
@@ -383,7 +383,7 @@ int proc_init_args(struct proc *proc, const char *name, proc_fn entry,
     proc->uram_base = 0;
     proc->uram_size = 0;
     proc_state_set(proc, THREAD_READY);
-    list_add_tail(&proc->node, &proc->thread.cpu->sche.ready);
+    list_add_tail(&proc->node, &cpu_self()->sche.ready);
     return 0;
 }
 
@@ -423,8 +423,6 @@ int proc_set_cleanup(struct proc *proc, proc_cleanup_fn cleanup, void *arg)
 {
     if (!proc || proc->thread.type != THREAD_TYPE_PROC)
         return -EINVAL;
-    if (proc->thread.cpu != cpu_self())
-        return -EPERM;
     if (proc->thread.state != THREAD_READY || proc->cleanup)
         return -EBUSY;
     proc->cleanup = cleanup;
@@ -441,8 +439,6 @@ int proc_set_task(struct proc *proc, const uint32_t task_id[3],
         (task_mode != 1U && task_mode != 4U) ||
         (task_mode == 4U && task_dim[0] != 4U))
         return -EINVAL;
-    if (proc->thread.cpu != cpu_self())
-        return -EPERM;
     if (proc->thread.type != THREAD_TYPE_PROC ||
         proc->thread.state != THREAD_READY)
         return -EBUSY;
@@ -584,10 +580,10 @@ int proc_set_resources(struct proc *proc, struct proc_family *family,
     uintptr_t uram_offset = uram_address &
                             (DAYAN_CONTEXT_URAM_WINDOW - 1U);
 
-    if (!proc || !family || proc->thread.cpu != cpu_self() ||
+    if (!proc || !family ||
         proc->thread.type != THREAD_TYPE_PROC ||
         proc->thread.state != THREAD_READY || proc->family || family->root ||
-        family->owner != proc || family->cpu != proc->thread.cpu ||
+        family->owner != proc || family->cpu != cpu_self() ||
         (!proc->shared_base != !shared_size) ||
         (!uram_base != !uram_size) ||
         (tensor_context >> 56) || !dayan_context_fields_valid(&fields) ||
@@ -777,7 +773,7 @@ int thread_create_child(struct proc *parent, const char *name, proc_fn entry,
         resources->macro_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS)
         return -EINVAL;
     family = parent->family;
-    if (!family || family->root->thread.cpu != cpu_self())
+    if (!family || family->cpu != cpu_self())
         return -EPERM;
     if (family->active_child_threads >= family->max_child_threads ||
         !family->free_slots)
@@ -1312,7 +1308,7 @@ int proc_wake(struct proc *proc)
         return -EINVAL;
     state = proc->thread.state;
     if (state == THREAD_WAIT_PRODUCE || state == THREAD_WAIT_EVENT) {
-        sche = &proc->thread.cpu->sche;
+        sche = &cpu_self()->sche;
         proc_state_set(proc, THREAD_READY);
         list_move_tail(&proc->node, &sche->ready);
         return 0;
@@ -1345,7 +1341,7 @@ size_t proc_event_wake_all(struct list_head *event)
 
 static inline void switch_to_next_or_scheduler(struct proc *proc)
 {
-    struct sche_state *sche = &proc->thread.cpu->sche;
+    struct sche_state *sche = &cpu_self()->sche;
     struct list_head *next = proc->node.next;
 
     if (next == &sche->active) {
@@ -1365,14 +1361,14 @@ void proc_wait_poll(proc_poll_fn poll, void *arg)
     proc->poll = poll;
     proc->poll_arg = arg;
     proc_state_set(proc, THREAD_WAIT_POLL);
-    proc->thread.cpu->sche.active_dirty = 1;
+    cpu_self()->sche.active_dirty = 1;
     switch_to_next_or_scheduler(proc);
 }
 
 void proc_wait_event(struct list_head *event)
 {
     struct proc *proc = (struct proc *)current;
-    struct sche_state *sche = &proc->thread.cpu->sche;
+    struct sche_state *sche = &cpu_self()->sche;
 
     proc_state_set(proc, THREAD_WAIT_EVENT);
     if (!event) {
@@ -1398,7 +1394,7 @@ void proc_wait_produce(void)
     struct proc *proc = (struct proc *)current;
 
     proc_state_set(proc, THREAD_WAIT_PRODUCE);
-    proc->thread.cpu->sche.active_dirty = 1;
+    cpu_self()->sche.active_dirty = 1;
     switch_to_next_or_scheduler(proc);
 }
 
@@ -1441,7 +1437,7 @@ _Noreturn void proc_exit_status(int64_t status)
                                 proc->cookie, RPC_PROC_EXIT_ROOT);
         }
         proc_state_set(proc, THREAD_WAIT_EXIT);
-        proc->thread.cpu->sche.active_dirty = 1;
+        cpu_self()->sche.active_dirty = 1;
         switch_to_scheduler(&proc->thread);
     }
     platform_halt();
