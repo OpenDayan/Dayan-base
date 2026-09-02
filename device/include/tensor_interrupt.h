@@ -17,6 +17,12 @@ struct tensor_interrupt_record {
     uint64_t control;
     uint64_t interrupt_count;
     uint64_t recent[TENSOR_INTERRUPT_RECENT_COUNT];
+    uint64_t mstatus;
+    uint64_t mepc;
+    uint64_t mcause;
+    uint64_t mtval;
+    uint64_t fcsr;
+    uint64_t x[32];
 };
 
 struct tensor_interrupt_state {
@@ -25,10 +31,16 @@ struct tensor_interrupt_state {
     struct tensor_interrupt_record record;
 };
 
-_Static_assert(sizeof(struct tensor_interrupt_record) == 176,
+_Static_assert(sizeof(struct tensor_interrupt_record) == 472,
                "tensor interrupt report ABI");
+_Static_assert(offsetof(struct tensor_interrupt_record, mstatus) == 176,
+               "tensor interrupt CSR offset");
+_Static_assert(offsetof(struct tensor_interrupt_record, x) == 216,
+               "tensor interrupt GPR offset");
 
-void tensor_interrupt_handle(void);
+struct trap_frame;
+
+void tensor_interrupt_handle(const struct trap_frame *frame);
 void tensor_interrupt_drain(void);
 
 #endif

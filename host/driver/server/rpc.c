@@ -270,6 +270,7 @@ static int service_trap(npu_service_device_t *device, npu_hal_core_t core,
         return -EPROTO;
     device->options.trap(device->options.callback_context, core.cluster,
                          core.core, &record);
+    npu_service_dump_device(device, core, "trap", &record, sizeof(record));
     return 0;
 }
 
@@ -288,6 +289,8 @@ static int service_tensor_interrupt(npu_service_device_t *device,
         return -EPROTO;
     device->options.tensor_interrupt(device->options.callback_context,
                                      core.cluster, core.core, &record);
+    npu_service_dump_device(device, core, "tensor-interrupt", &record,
+                            sizeof(record));
     return 0;
 }
 

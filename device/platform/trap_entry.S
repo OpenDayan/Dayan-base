@@ -81,6 +81,7 @@ trap_entry:
     j       .Ltrap_restore
 
 .Ltrap_resume_tensor:
+    mv      a0, sp
     call    tensor_interrupt_handle
 
 .Ltrap_restore:

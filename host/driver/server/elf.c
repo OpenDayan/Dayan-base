@@ -11,6 +11,7 @@
 
 #define ELF_ZERO_CHUNK   (64U * 1024U)
 #define IRQ_ENABLE_OFFSET 0x04U
+#define IRQ_ENABLE_CLEAR_OFFSET 0x14U
 #define ATOMIC_CACHE_STATUS_OFFSET \
     (DAYAN_ATOMIC_CACHE_STATUS - DAYAN_IRQ_STATUS)
 #define ATOMIC_CACHE_BACKING_OFFSET \
@@ -286,6 +287,46 @@ static int wait_runtime_ready(npu_service_device_t *device, uint32_t cluster,
     }
 }
 
+static int runtime_ready_mask(npu_service_device_t *device, uint32_t cluster,
+                              uint32_t *mask_out)
+{
+    return npu_hal_register_read(device->hal, cluster, IRQ_ENABLE_OFFSET,
+                                 mask_out, sizeof(*mask_out));
+}
+
+static int halt_running_bl1(npu_service_device_t *device, uint32_t cluster,
+                            uint32_t valid_mask, uint32_t ready_mask)
+{
+    uint32_t halt_mask = ready_mask & valid_mask;
+    uint32_t remaining = 0;
+    uint32_t core;
+    int status;
+
+    if (!halt_mask)
+        return 0;
+    firmware_log(cluster,
+                 "running BL1 detected; parking core mask 0x%08x in bootrom",
+                 halt_mask);
+    for (core = 0; core < device->hal_info.cores_per_cluster; ++core) {
+        npu_hal_core_t target = { cluster, core };
+
+        if (!(halt_mask & (UINT32_C(1) << core)))
+            continue;
+        status = npu_hal_boot_core(device->hal, target,
+                                   DAYAN_BOOTROM_RESET_VECTOR,
+                                   device->options.default_timeout_ms);
+        if (status < 0)
+            return status;
+        firmware_log(cluster, "Core %u: parked in bootrom", core);
+    }
+    status = runtime_ready_mask(device, cluster, &remaining);
+    if (status < 0)
+        return status;
+    if (remaining & halt_mask)
+        return -EIO;
+    return 0;
+}
+
 static int wait_atomic_cache(npu_service_device_t *device, uint32_t cluster,
                              int require_done)
 {
@@ -401,6 +442,7 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
     npu_hal_core_t viewer = { cluster, 0 };
     size_t segment_count = 0;
     uint64_t entry = 0;
+    uint32_t ready_mask = 0;
     uint32_t valid_mask;
     uint32_t core;
     const char *stage = "validating the BL1 request";
@@ -430,6 +472,14 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
         goto out;
     firmware_log(cluster, "ELF parsed: segments=%zu entry=0x%llx",
                  segment_count, (unsigned long long)entry);
+    stage = "checking for a running BL1 instance";
+    status = runtime_ready_mask(device, cluster, &ready_mask);
+    if (status < 0)
+        goto out;
+    stage = "parking the running BL1 in bootrom";
+    status = halt_running_bl1(device, cluster, valid_mask, ready_mask);
+    if (status < 0)
+        goto out;
     previous_head = device->firmware_allocations;
     stage = "reserving BL1 memory segments";
     firmware_log(cluster, "reserving %zu BL1 memory segment(s)",
@@ -465,6 +515,12 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
         goto out;
     }
     firmware_log(cluster, "BL1 segments copied");
+    stage = "clearing stale BL1 readiness";
+    status = npu_hal_register_write(device->hal, cluster,
+                                    IRQ_ENABLE_CLEAR_OFFSET, &core_mask,
+                                    sizeof(core_mask));
+    if (status < 0)
+        goto out;
     for (core = 0; core < device->hal_info.cores_per_cluster; ++core) {
         npu_hal_core_t target = { cluster, core };
 

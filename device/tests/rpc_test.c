@@ -3,6 +3,7 @@
 
 #include "platform_regs.h"
 #include "rpc.h"
+#include "tensor_interrupt.h"
 #include "trap.h"
 
 int main(void)
@@ -66,8 +67,11 @@ int main(void)
     assert(RPC_PROFILE_RECORD_SLOT_DEFINE == 0x80U);
     assert(RPC_PROFILE_SLOT_COUNT == 20U);
     assert(sizeof(struct trap_record) == 328);
+    assert(sizeof(struct tensor_interrupt_record) == 472);
+    assert(DAYAN_BOOTROM_RESET_VECTOR == 0x10000U);
     assert(DAYAN_DEVICE_MAILBOX(3) == 0x1018U);
     assert(DAYAN_IRQ_MAILBOX(3) == 0x2038U);
+    assert(DAYAN_IRQ_ENABLE_CLR == 0x2014U);
     assert(DAYAN_CLINT_MSIP(3) == 0x2000cU);
     return 0;
 }

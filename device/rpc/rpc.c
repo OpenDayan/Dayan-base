@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "errno.h"
 #include "platform.h"
+#include "platform_regs.h"
 #include "rpc.h"
 #include "rpc_internal.h"
 #include "string.h"
@@ -165,6 +166,9 @@ static void rpc_receive_main(void)
             proc_wait_poll(rpc_receive_poll, 0);
 
         command = platform_rpc_receive();
+        if (rpc_command_opcode(command) == 0 &&
+            rpc_command_arg(command) == DAYAN_BOOTROM_RESET_VECTOR)
+            platform_rpc_halt();
         reply = rpc_receive(rpc_command_opcode(command),
                             rpc_command_arg(command), &response_command);
         if (reply > 0) {

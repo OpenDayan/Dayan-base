@@ -824,6 +824,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "server create failed: %d\n", status);
         return 1;
     }
+    dayan_server_destroy(server);
+    server = 0;
+    status = dayan_server_create(&server, &server_options);
+    if (status < 0) {
+        fprintf(stderr, "server restart failed: %d\n", status);
+        return 1;
+    }
     {
         npu_service_kill_result_t killed;
         npu_service_proc_snapshot_t snapshot;

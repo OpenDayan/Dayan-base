@@ -2,11 +2,13 @@
 #define NPU_PLATFORM_REGS_H
 
 /* Offsets relative to CONFIG_CONTROL_BASE, from the Dayan register list. */
+#define DAYAN_BOOTROM_RESET_VECTOR       0x00010000U
 #define DAYAN_DEVICE_MAILBOX_BASE       0x001000U
 #define DAYAN_IRQ_STATUS                0x002000U
 #define DAYAN_IRQ_STATUS_SET            0x002008U
 #define DAYAN_IRQ_STATUS_CLR            0x00200cU
 #define DAYAN_IRQ_ENABLE_SET            0x002010U
+#define DAYAN_IRQ_ENABLE_CLR            0x002014U
 #define DAYAN_IRQ_MAILBOX_BASE          0x002020U
 #define DAYAN_ATOMIC_CACHE_CONTROL_BASE 0x004000U
 #define DAYAN_ATOMIC_CACHE_STATUS       0x004000U

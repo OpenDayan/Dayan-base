@@ -5,10 +5,14 @@
 #include "tensor_interrupt.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "trap.h"
 
@@ -17,9 +21,39 @@
 #define NPU_DEFAULT_STACK_SIZE  UINT64_C(0x10000)
 #define NPU_DEFAULT_PRINTF_SIZE UINT64_C(0x1000)
 #define NPU_RPC_CANCEL_POLL_MS  100U
+#define NPU_TRAP_DUMP_CHUNK     (1024U * 1024U)
 
 _Static_assert((int)NPU_SERVICE_LAUNCH_SUBMITTED == (int)RPC_PROC_SUBMITTED,
                "Host and Device launch state ABI");
+
+static const char *const gpr_names[32] = {
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+    "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+    "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+};
+
+static void print_registers(const char *kind, uint64_t mstatus,
+                            uint64_t mepc, uint64_t mcause, uint64_t mtval,
+                            uint64_t fcsr, const uint64_t x[32])
+{
+    size_t i;
+    size_t j;
+
+    fprintf(stderr,
+            "dayan_server: %s csr mstatus=0x%016llx mepc=0x%016llx "
+            "mcause=0x%016llx mtval=0x%016llx fcsr=0x%016llx\n",
+            kind, (unsigned long long)mstatus, (unsigned long long)mepc,
+            (unsigned long long)mcause, (unsigned long long)mtval,
+            (unsigned long long)fcsr);
+    for (i = 0; i < 32; i += 4) {
+        fprintf(stderr, "dayan_server: %s gpr", kind);
+        for (j = i; j < i + 4; ++j)
+            fprintf(stderr, " x%02zu/%-4s=0x%016llx", j, gpr_names[j],
+                    (unsigned long long)x[j]);
+        fputc('\n', stderr);
+    }
+}
 _Static_assert((int)NPU_SERVICE_LAUNCH_RUNNING == (int)RPC_PROC_RUNNING,
                "Host and Device launch state ABI");
 _Static_assert((int)NPU_SERVICE_LAUNCH_EXITED == (int)RPC_PROC_EXITED,
@@ -82,15 +116,6 @@ static void default_output(void *context, uint32_t cluster, uint32_t core,
 static void default_trap(void *context, uint32_t cluster, uint32_t core,
                          const struct trap_record *record)
 {
-    static const char *const gpr_names[32] = {
-        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
-        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-        "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
-        "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
-    };
-    size_t i;
-    size_t j;
-
     (void)context;
     flockfile(stderr);
     if (!record) {
@@ -110,23 +135,163 @@ static void default_trap(void *context, uint32_t cluster, uint32_t core,
             (unsigned long long)record->mepc,
             (unsigned long long)record->mtval, record->host_proc_id,
             record->parent_proc_id, (unsigned long long)record->cookie);
-    fprintf(stderr,
-            "dayan_server: trap csr mstatus=0x%016llx mepc=0x%016llx "
-            "mcause=0x%016llx mtval=0x%016llx fcsr=0x%016llx\n",
-            (unsigned long long)record->mstatus,
-            (unsigned long long)record->mepc,
-            (unsigned long long)record->mcause,
-            (unsigned long long)record->mtval,
-            (unsigned long long)record->fcsr);
-    for (i = 0; i < 32; i += 4) {
-        fprintf(stderr, "dayan_server: trap gpr");
-        for (j = i; j < i + 4; ++j)
-            fprintf(stderr, " x%02zu/%-4s=0x%016llx", j, gpr_names[j],
-                    (unsigned long long)record->x[j]);
-        fputc('\n', stderr);
-    }
+    print_registers("trap", record->mstatus, record->mepc, record->mcause,
+                    record->mtval, record->fcsr, record->x);
     fflush(stderr);
     funlockfile(stderr);
+}
+
+static int write_all(int fd, const void *data, size_t size)
+{
+    const unsigned char *cursor = data;
+
+    while (size) {
+        ssize_t written = write(fd, cursor, size);
+
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            return written < 0 ? -errno : -EIO;
+        cursor += written;
+        size -= (size_t)written;
+    }
+    return 0;
+}
+
+static int dump_file(int directory_fd, const char *name,
+                     const void *data, size_t size)
+{
+    int fd = openat(directory_fd, name,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                    S_IRUSR | S_IWUSR);
+    int status;
+
+    if (fd < 0)
+        return -errno;
+    status = write_all(fd, data, size);
+    if (close(fd) != 0 && status == 0)
+        status = -errno;
+    if (status < 0)
+        (void)unlinkat(directory_fd, name, 0);
+    return status;
+}
+
+static int dump_region(npu_service_device_t *device, uint32_t cluster,
+                       int directory_fd, uint32_t index,
+                       const npu_hal_memory_region_t *region,
+                       unsigned char *buffer)
+{
+    char name[192];
+    uint64_t offset = 0;
+    int fd;
+    int status = 0;
+
+    if (snprintf(name, sizeof(name),
+                 "region-%02u-class-%u-scope-%u-cluster-%u-core-%u-"
+                 "base-%016llx-size-%016llx.bin",
+                 index, region->memory_class, region->scope,
+                 region->cluster, region->core,
+                 (unsigned long long)region->base,
+                 (unsigned long long)region->size) >= (int)sizeof(name))
+        return -ENAMETOOLONG;
+    fd = openat(directory_fd, name,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                S_IRUSR | S_IWUSR);
+    if (fd < 0)
+        return -errno;
+    while (offset < region->size) {
+        uint64_t remaining = region->size - offset;
+        size_t chunk = remaining < NPU_TRAP_DUMP_CHUNK ?
+            (size_t)remaining : NPU_TRAP_DUMP_CHUNK;
+
+        status = npu_hal_copy_from_address(device->hal, cluster, buffer,
+                                           region->base + offset, chunk);
+        if (status < 0)
+            break;
+        status = write_all(fd, buffer, chunk);
+        if (status < 0)
+            break;
+        offset += chunk;
+    }
+    if (close(fd) != 0 && status == 0)
+        status = -errno;
+    if (status < 0)
+        (void)unlinkat(directory_fd, name, 0);
+    return status;
+}
+
+void npu_service_dump_device(npu_service_device_t *device,
+                             npu_hal_core_t core, const char *kind,
+                             const void *record, size_t record_size)
+{
+    const char *root = getenv("DAYAN_TRAP_DUMP_DIR");
+    unsigned char *buffer = 0;
+    char record_name[64];
+    char path[PATH_MAX];
+    int directory_fd = -1;
+    uint32_t index;
+    int status = 0;
+
+    if (!device || !kind || !record)
+        return;
+    if (!root || !*root)
+        root = "/tmp";
+    if (snprintf(path, sizeof(path),
+                 "%s/dayan-%s-c%u-h%u-p%ld-XXXXXX", root, kind,
+                 core.cluster, core.core, (long)getpid()) >=
+        (int)sizeof(path)) {
+        status = -ENAMETOOLONG;
+        goto out;
+    }
+    if (snprintf(record_name, sizeof(record_name), "%s-record.bin", kind) >=
+        (int)sizeof(record_name)) {
+        status = -ENAMETOOLONG;
+        goto out;
+    }
+    if (!mkdtemp(path)) {
+        status = -errno;
+        goto out;
+    }
+    directory_fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory_fd < 0) {
+        status = -errno;
+        goto out;
+    }
+    status = dump_file(directory_fd, record_name, record, record_size);
+    if (status < 0)
+        goto out;
+    buffer = malloc(NPU_TRAP_DUMP_CHUNK);
+    if (!buffer) {
+        status = -ENOMEM;
+        goto out;
+    }
+    for (index = 0; index < device->hal_info.memory_region_count; ++index) {
+        npu_hal_memory_region_t region;
+        uint32_t cluster;
+
+        status = npu_hal_get_memory_region(device->hal, index, &region);
+        if (status < 0)
+            break;
+        cluster = region.scope == NPU_HAL_MEMORY_DEVICE ? core.cluster :
+                                                          region.cluster;
+        status = dump_region(device, cluster, directory_fd, index, &region,
+                             buffer);
+        if (status < 0)
+            break;
+    }
+
+out:
+    free(buffer);
+    if (directory_fd >= 0)
+        (void)close(directory_fd);
+    if (status < 0)
+        fprintf(stderr,
+                "dayan_server: %s memory dump failed: %s (%d)\n",
+                kind, strerror(-status), status);
+    else
+        fprintf(stderr, "dayan_server: %s memory dump saved to %s\n",
+                kind, path);
+    fflush(stderr);
 }
 
 static const char *tensor_interrupt_source_name(uint16_t source)
@@ -164,13 +329,21 @@ static void default_tensor_interrupt(
     uint16_t source = (uint16_t)(latest >> 32);
 
     (void)context;
+    flockfile(stderr);
     fprintf(stderr,
             "dayan_server: tensor interrupt cluster=%u core=%u proc=%u "
-            "source=%u(%s) info=0x%08x context=0x%014llx count=%llu\n",
+            "source=%u(%s) info=0x%08x context=0x%014llx count=%llu "
+            "epc=0x%016llx\n",
             cluster, core, record ? record->thread_id : 0, source,
             tensor_interrupt_source_name(source), (uint32_t)latest,
             (unsigned long long)(record ? record->tensor_context : 0),
-            (unsigned long long)(record ? record->interrupt_count : 0));
+            (unsigned long long)(record ? record->interrupt_count : 0),
+            (unsigned long long)(record ? record->mepc : 0));
+    if (record)
+        print_registers("tensor interrupt", record->mstatus, record->mepc,
+                        record->mcause, record->mtval, record->fcsr, record->x);
+    fflush(stderr);
+    funlockfile(stderr);
 }
 
 static void default_proc_exit(void *context, uint32_t cluster,

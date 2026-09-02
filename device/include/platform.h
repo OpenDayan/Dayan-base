@@ -14,6 +14,8 @@ void platform_data_fence(void);
 void platform_instruction_fence(void);
 
 void platform_rpc_init(void);
+void platform_rpc_ready(void);
+_Noreturn void platform_rpc_halt(void);
 int platform_rpc_receive_pending(void);
 uint64_t platform_rpc_receive(void);
 void platform_rpc_receive_ack(void);

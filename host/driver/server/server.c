@@ -361,6 +361,7 @@ static void server_device_trap(void *context, uint32_t cluster,
                                const struct trap_record *record)
 {
     dayan_server_t *server = context;
+    struct server_session *trapped_session = 0;
     struct server_launch_group *trapped_group = 0;
     struct server_command *trapped_command = 0;
 
@@ -403,6 +404,7 @@ static void server_device_trap(void *context, uint32_t cluster,
                              invocation->proc_id != record->host_proc_id))
                             continue;
                         invocation->proc_id = record->host_proc_id;
+                        trapped_session = session;
                         trapped_group = invocation->group;
                         trapped_command = command;
                         break;
@@ -413,6 +415,8 @@ static void server_device_trap(void *context, uint32_t cluster,
     }
     if (trapped_group) {
         struct server_invocation *invocation;
+        char report[512];
+        int report_size;
 
         for (invocation = trapped_command->data.launch.invocations;
              invocation; invocation = invocation->next) {
@@ -425,6 +429,20 @@ static void server_device_trap(void *context, uint32_t cluster,
             trapped_command->data.launch.aggregate_status = -EIO;
         trapped_command->data.launch.next_unit =
             trapped_command->data.launch.total_units;
+        report_size = snprintf(
+            report, sizeof(report),
+            "dayan_runtime: trap cluster=%u core=%u proc=%u type=%u "
+            "state=%u cause=0x%llx epc=0x%llx value=0x%llx "
+            "root_proc=%u parent_proc=%u cookie=%llu\n",
+            cluster, core, record->thread_id, record->thread_type,
+            record->thread_state, (unsigned long long)record->mcause,
+            (unsigned long long)record->mepc,
+            (unsigned long long)record->mtval, record->host_proc_id,
+            record->parent_proc_id, (unsigned long long)record->cookie);
+        if (report_size > 0 && report_size < (int)sizeof(report))
+            (void)server_queue_output_locked(
+                server, trapped_session, cluster, core, record->host_proc_id,
+                report, (size_t)report_size, 0);
         fprintf(stderr,
                 "dayan_server: terminating trapped kernel task='%s' "
                 "cluster=%u core=%u proc=%u root_proc=%u cookie=%llu "

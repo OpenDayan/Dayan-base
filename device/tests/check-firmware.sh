@@ -100,6 +100,25 @@ done
 grep -Eq 'frcsr[[:space:]]+t0' <<<"$trap_dump" ||
     fail "trap entry does not save fcsr"
 
+tensor_interrupt_raw=$($objdump --disassemble \
+    --disassemble-symbols=tensor_interrupt_handle \
+    "$build/platform/tensor_interrupt.o")
+for encoding in 0000350b 0000550b 0000750b 0000950b; do
+    grep -Fq "$encoding" <<<"$tensor_interrupt_raw" ||
+        fail "tensor interrupt Barrier $encoding is missing"
+done
+
+rpc_receive_pending_dump=$($objdump --disassemble --no-show-raw-insn \
+    --disassemble-symbols=platform_rpc_receive_pending \
+    "$build/platform/platform.o")
+grep -Eq 'csrr[[:space:]]+[^,]+,[[:space:]]*mip' \
+    <<<"$rpc_receive_pending_dump" ||
+    fail "RPC receive polling must read mip.MSIP through the CSR"
+if grep -Eq '(^|[[:space:]])(lb|lbu|lh|lhu|lw|lwu|ld)([[:space:]]|$)' \
+        <<<"$rpc_receive_pending_dump"; then
+    fail "RPC receive polling must not read CLINT through MMIO"
+fi
+
 stack_sections=$($readelf --sections --wide "$elf" | \
     grep -Ec '\.(stack|rpc_stack|profile_stack|trap_stack|proc_stack)[[:space:]]+NOBITS')
 [ "$stack_sections" -eq 5 ] ||

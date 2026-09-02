@@ -49,6 +49,8 @@ _start:
     csrw    fcsr, zero
 
     call    init
+    /* Publish readiness only after init has returned and released its stack. */
+    call    platform_rpc_ready
     /* RPC MSIP is polled; enable only the tensor machine-external IRQ. */
     li      t0, 0x800
     csrw    mie, t0

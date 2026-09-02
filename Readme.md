@@ -258,9 +258,10 @@ Device 发送前后都轮询 `IRQ_STATUS` (`0x2000`) 中自己的 bit，只有 H
 (`0x2010`) 使能对应的 Host IRQ 输出。上述 doorbell 只用于握手，不会触发 NPU 上的
 抢占：BL1 用 `csrw mie, 0x800` 仅启用张量机器外部中断，RPC MSIP 保持轮询。
 
-每个 hart 有三个内核 proc。receive proc 以 `proc_wait_poll()` 等待本核 `msip`，读取
-Host 命令，调用弱的 `rpc_receive(opcode, arg, &response)` 分派接口，并在需要回复时
-把响应加入发送队列，最后清除 `msip`。send proc 独占本核发送队列；队列为空时使用
+每个 hart 有三个内核 proc。receive proc 以 `proc_wait_poll()` 通过 CSR 轮询本核
+`mip.MSIP`，避免在等待路径中读取 CLINT MMIO；收到 doorbell 后读取 Host 命令，调用弱的
+`rpc_receive(opcode, arg, &response)` 分派接口，并在需要回复时把响应加入发送队列，最后
+向 CLINT `msip` 写 0 清除 pending。send proc 独占本核发送队列；队列为空时使用
 `proc_wait_event()`，有事务时写 Device → Host mailbox，等待 Host 清除状态位，再执行
 事务 cleanup 并唤醒调用者。receive handler 返回 1 表示发送 `response`，返回 0 表示
 无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行；若它发起阻塞式

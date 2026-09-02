@@ -255,6 +255,9 @@ int npu_service_mmu_run_reclaim(npu_service_device_t *device, int force);
 int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
                              const void *image, size_t size,
                              uint32_t core_mask);
+void npu_service_dump_device(npu_service_device_t *device,
+                             npu_hal_core_t core, const char *kind,
+                             const void *record, size_t record_size);
 int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
                          uint32_t timeout_ms,

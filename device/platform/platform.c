@@ -111,14 +111,45 @@ void platform_rpc_init(void)
 {
     uint32_t mask = rpc_interrupt_mask();
 
+    /* Do not publish BL1 readiness until every Device worker is initialized. */
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
     *rpc_interrupt_reg(DAYAN_IRQ_STATUS_CLR) = mask;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+}
+
+void platform_rpc_ready(void)
+{
+    uint32_t mask = rpc_interrupt_mask();
+
+    /* Publish all ordinary-memory initialization before the Host sees ready. */
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
     *rpc_interrupt_reg(DAYAN_IRQ_ENABLE_SET) = mask;
     __asm__ volatile("fence iorw, iorw" ::: "memory");
 }
 
+_Noreturn void platform_rpc_halt(void)
+{
+    uint32_t mask = rpc_interrupt_mask();
+    void (*bootrom)(void) = (void (*)(void))DAYAN_BOOTROM_RESET_VECTOR;
+
+    *rpc_interrupt_reg(DAYAN_IRQ_ENABLE_CLR) = mask;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    __asm__ volatile(
+        "li t0, 8\n"
+        "csrc mstatus, t0\n"
+        "fence.i"
+        ::: "t0", "memory");
+    /* Bootrom consumes and acknowledges the pending opcode-0 request. */
+    bootrom();
+    platform_halt();
+}
+
 int platform_rpc_receive_pending(void)
 {
-    return (*rpc_msip() & 1U) != 0;
+    uintptr_t mip;
+
+    __asm__ volatile("csrr %0, mip" : "=r"(mip));
+    return (mip & (1U << 3)) != 0;
 }
 
 uint64_t platform_rpc_receive(void)

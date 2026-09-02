@@ -6,6 +6,7 @@
 #include "rpc_internal.h"
 #include "string.h"
 #include "tensor_interrupt.h"
+#include "trap.h"
 
 #define TENSOR_INTR_ENCODING(address, read, reg) \
     (0x0bU | (5U << 23) | \
@@ -22,6 +23,27 @@
         result;                                                              \
     })
 
+#define TENSOR_BARRIER_ENCODING(unit, reg) \
+    (0x0bU | ((uint32_t)(unit) << 13) | (1U << 12) | \
+     ((uint32_t)(reg) << 7))
+
+#define TENSOR_BARRIER(unit)                                                  \
+    do {                                                                     \
+        register uint64_t result __asm__("a0");                             \
+        __asm__ volatile(".insn 4, %1"                                      \
+                         : "=r"(result)                                     \
+                         : "i"(TENSOR_BARRIER_ENCODING(unit, 10))           \
+                         : "memory");                                       \
+    } while (0)
+
+static inline void tensor_interrupt_barrier(void)
+{
+    TENSOR_BARRIER(1);
+    TENSOR_BARRIER(2);
+    TENSOR_BARRIER(3);
+    TENSOR_BARRIER(4);
+}
+
 static inline void tensor_interrupt_clear_pending(void)
 {
     register uint64_t value __asm__("a0") = 1;
@@ -33,15 +55,17 @@ static inline void tensor_interrupt_clear_pending(void)
                      : "memory");
 }
 
-void tensor_interrupt_handle(void)
+void tensor_interrupt_handle(const struct trap_frame *frame)
 {
     struct tensor_interrupt_state *state;
     struct tensor_interrupt_record *record;
     uint64_t control;
+    size_t i;
 
-    if (!current || !current->cpu)
+    if (!frame || !current || !current->cpu)
         platform_halt();
     state = &current->cpu->tensor_interrupt;
+    tensor_interrupt_barrier();
     control = TENSOR_INTR_READ(0);
     if (state->pending) {
         ++state->dropped_reports;
@@ -76,6 +100,13 @@ void tensor_interrupt_handle(void)
     record->recent[13] = TENSOR_INTR_READ(30);
     record->recent[14] = TENSOR_INTR_READ(31);
     record->recent[15] = TENSOR_INTR_READ(32);
+    record->mstatus = frame->mstatus;
+    record->mepc = frame->mepc;
+    record->mcause = frame->mcause;
+    record->mtval = frame->mtval;
+    record->fcsr = frame->fcsr;
+    for (i = 0; i < 32; ++i)
+        record->x[i] = frame->x[i];
     state->pending = 1;
     tensor_interrupt_clear_pending();
 }
