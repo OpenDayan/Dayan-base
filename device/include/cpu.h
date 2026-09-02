@@ -46,6 +46,8 @@ struct cpu {
     struct tensor_interrupt_state tensor_interrupt;
 };
 
+extern uint8_t __cpu_start[];
+
 _Static_assert(offsetof(struct cpu, sche) == 0,
                "bl1 expects scheduler state at CPU-local offset 0");
 _Static_assert(offsetof(struct sche_state, init) == 0,
@@ -55,7 +57,13 @@ _Static_assert(sizeof(struct cpu) <= CONFIG_CPU_LOCAL_SIZE,
 
 static inline struct cpu *cpu_self(void)
 {
-    return current->cpu;
+    uintptr_t hart;
+    uintptr_t base;
+
+    __asm__ volatile("csrr %0, mhartid\n"
+                     "la %1, __cpu_start"
+                     : "=r"(hart), "=r"(base));
+    return (struct cpu *)(base + hart * CONFIG_CPU_LOCAL_SIZE);
 }
 
 #endif

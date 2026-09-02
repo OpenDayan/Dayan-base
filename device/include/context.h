@@ -1,9 +1,9 @@
 #ifndef NPU_CONTEXT_H
 #define NPU_CONTEXT_H
 
-#define THREAD_SP_OFFSET       16
-#define THREAD_PC_OFFSET       24
-#define THREAD_TENSOR_CONTEXT_OFFSET 32
+#define THREAD_SP_OFFSET        8
+#define THREAD_PC_OFFSET       16
+#define THREAD_TENSOR_CONTEXT_OFFSET 24
 
 #define SWITCH_FRAME_RA         0
 #define SWITCH_FRAME_S0         8

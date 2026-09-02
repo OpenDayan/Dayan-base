@@ -62,10 +62,10 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     uint64_t control;
     size_t i;
 
-    if (!frame || !current || !current->cpu)
+    if (!frame || !current)
         platform_halt();
-    state = &current->cpu->tensor_interrupt;
     tensor_interrupt_barrier();
+    state = &cpu_self()->tensor_interrupt;
     control = TENSOR_INTR_READ(0);
     if (state->pending) {
         ++state->dropped_reports;

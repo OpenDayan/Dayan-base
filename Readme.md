@@ -39,11 +39,11 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
 
 `tp` 通过全局寄存器变量 `current` 始终解释为布局固定的 `struct thread *`，而不是
 `struct cpu *`。公共 thread
-依次保存 32-bit ID、32-bit state、当前 CPU 指针、`sp`、恢复 `pc` 和 32-bit type。
+依次保存 32-bit ID、32-bit state、`sp`、恢复 `pc` 和 32-bit type。
 init thread 的 ID 与 type 都是 0；其它类型把 `struct thread` 作为结构体首成员，并
 使用非零 type。每个独立 OS 实例的 scheduler 从 1 开始统一分配后续 ID。上下文切换
-同步切换 `tp`，thread 的 CPU 指针使内存分配器等每核服务能找到正确的私有状态；
-proc 一旦绑定到某个 hart，当前版本不允许迁移。
+同步切换 `tp`；内存分配器等每核服务根据 `mhartid` 定位 CPU-local 私有状态。proc
+一旦绑定到某个 hart，当前版本不允许迁移。
 由于 `tp` 已承担 `current` ABI，固件和算子都不能使用 ELF TLS；构建会拒绝
 TP-relative/TLS relocation，链接脚本也会拒绝 `.tdata` 和 `.tbss`。
 

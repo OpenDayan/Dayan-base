@@ -28,8 +28,7 @@ _start:
     addi    t1, t1, 8
     addi    t0, t0, -8
     bnez    t0, .Lzero_cpu
-    sd      tp, 8(tp)       /* init.cpu points back to the CPU-local block */
-    sd      sp, 16(tp)      /* init.sp records the boot stack */
+    sd      sp, 8(tp)       /* init.sp records the boot stack */
 
     /* Scheduler/init owns no Host shared allocation. */
     mv      gp, zero

@@ -15,9 +15,9 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     size_t i;
     int status;
 
-    if (!frame || !current || !current->cpu)
+    if (!frame || !current)
         platform_halt();
-    cpu = current->cpu;
+    cpu = cpu_self();
     if (cpu->trap.active)
         platform_halt();
     cpu->trap.active = 1;

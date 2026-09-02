@@ -2,6 +2,7 @@
 #define NPU_SCHE_H
 
 #include <stdarg.h>
+#include <stddef.h>
 
 #include "list.h"
 #include "thread.h"

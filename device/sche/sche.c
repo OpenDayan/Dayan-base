@@ -124,13 +124,14 @@ static inline void proc_state_set(struct proc *proc, uint32_t state)
 
 static inline void switch_to_scheduler(struct thread *thread)
 {
-    switch_context(thread, &thread->cpu->sche.init);
+    switch_context(thread, &cpu_self()->sche.init);
 }
 
 void sche_init(void)
 {
     struct thread *init = current;
-    struct sche_state *sche = &init->cpu->sche;
+    struct cpu *cpu = cpu_self();
+    struct sche_state *sche = &cpu->sche;
     uintptr_t hart = platform_hart_id();
     uint32_t index;
 
@@ -158,7 +159,7 @@ void sche_init(void)
         struct proc_family *family = &hart_proc_families[hart][index];
 
         memset(slot, 0, sizeof(*slot));
-        slot->cpu = init->cpu;
+        slot->cpu = cpu;
         slot->stack = hart_proc_stacks[hart][index];
         slot->printf_buffer = hart_proc_printf[hart][index];
         slot->free_next = sche->free_proc_slots;
@@ -274,7 +275,6 @@ int thread_init(struct thread *thread, uint32_t type)
         return -EOVERFLOW;
 
     thread->id = sche->next_id++;
-    thread->cpu = cpu;
     thread->sp = 0;
     thread->pc = 0;
     thread->tensor_context = 0;
@@ -1503,7 +1503,7 @@ static inline void scheduler_finish_active_batch(struct sche_state *sche)
 _Noreturn void scheduler(void)
 {
     struct thread *init = current;
-    struct sche_state *sche = &init->cpu->sche;
+    struct sche_state *sche = &cpu_self()->sche;
 
     for (;;) {
         tensor_interrupt_drain();
