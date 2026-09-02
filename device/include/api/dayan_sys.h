@@ -72,9 +72,9 @@ typedef struct dayan_resource {
     uint32_t producer_count;
     uint32_t consumer_count;
     volatile uint32_t lock;
-    struct list_head wait_lock;
-    struct list_head wait_ready;
-    struct list_head wait_free;
+    struct thread_list wait_lock;
+    struct thread_list wait_ready;
+    struct thread_list wait_free;
 } dayan_resource_t;
 
 /*

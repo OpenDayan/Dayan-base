@@ -16,7 +16,7 @@ typedef void (*rpc_cleanup_fn)(struct rpc_transaction *transaction,
 
 struct rpc_transaction {
     struct list_head node;
-    struct list_head wait;
+    struct thread_list wait;
     uint64_t command;
     rpc_cleanup_fn cleanup;
     void *cleanup_arg;
@@ -25,10 +25,8 @@ struct rpc_transaction {
 };
 
 struct rpc_state {
-    struct proc receive;
-    struct proc send;
     struct list_head send_queue;
-    struct list_head send_event;
+    struct thread_list send_event;
     struct rpc_transaction trap;
     _Alignas(RPC_DESCRIPTOR_GRANULE) struct trap_record trap_record;
     struct rpc_transaction tensor_interrupt;

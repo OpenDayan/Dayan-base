@@ -8,7 +8,7 @@
 #include "sche.h"
 #include "string.h"
 
-_Static_assert(sizeof(dayan_resource_t) == 64,
+_Static_assert(sizeof(dayan_resource_t) == 24,
                "dayan resource ABI must stay fixed");
 _Static_assert(sizeof(dayan_shared_resource_t) == 16,
                "dayan shared resource ABI must stay fixed");
@@ -112,14 +112,14 @@ static inline void produce_push(uint32_t unit, uintptr_t token)
 static inline void resource_lock(dayan_resource_t *resource)
 {
     while (resource->lock)
-        proc_wait_event(&resource->wait_lock);
+        thread_wait_event(&resource->wait_lock);
     resource->lock = 1;
 }
 
 static inline void resource_unlock(dayan_resource_t *resource)
 {
     resource->lock = 0;
-    (void)proc_event_wake_one(&resource->wait_lock);
+    (void)thread_event_wake_one(&resource->wait_lock);
 }
 
 static inline uint32_t resource_state(const dayan_resource_t *resource)
@@ -190,19 +190,19 @@ static inline uint32_t shared_resource_state(
 static int shared_range_valid(const void *object, size_t object_size,
                               size_t alignment)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
     uintptr_t start = (uintptr_t)CONFIG_COHERENT_BASE;
     uintptr_t size = (uintptr_t)CONFIG_COHERENT_SIZE;
     uintptr_t base;
     uintptr_t capacity;
     uintptr_t addr = (uintptr_t)object;
 
-    if (!proc || !object || !object_size || !alignment ||
+    if (!descriptor || !object || !object_size || !alignment ||
         (alignment & (alignment - 1U)))
         return 0;
-    base = (uintptr_t)proc->shared_base;
-    capacity = proc->shared_size;
-    if (!base || shared != proc->shared_base || capacity < object_size ||
+    base = (uintptr_t)descriptor->shared_base;
+    capacity = descriptor->shared_size;
+    if (!base || shared != descriptor->shared_base || capacity < object_size ||
         base < start || base - start >= size || capacity > size - (base - start) ||
         addr < base || addr - base > capacity - object_size)
         return 0;
@@ -233,21 +233,21 @@ static int resource_wait_issue(void *resource, size_t alignment,
     return 0;
 }
 
-static inline int shared_resource_ready(struct proc *proc, void *arg)
+static inline int shared_resource_ready(struct thread *thread, void *arg)
 {
-    (void)proc;
+    (void)thread;
     return shared_resource_state(arg) == DAYAN_RESOURCE_READY;
 }
 
-static inline int shared_resource_free(struct proc *proc, void *arg)
+static inline int shared_resource_free(struct thread *thread, void *arg)
 {
-    (void)proc;
+    (void)thread;
     return shared_resource_counts(arg) == 0;
 }
 
 void dayan_yield(void)
 {
-    proc_yield();
+    thread_yield();
 }
 
 void dayan_thread_resources_init(dayan_thread_resources_t *resources)
@@ -266,7 +266,7 @@ int dayan_create_thread(const char *name, dayan_thread_entry_t entry,
 
     if (!name || !entry)
         return -EINVAL;
-    status = thread_create_child(proc_self(), name, (proc_fn)entry, argument,
+    status = thread_create_child(thread_self(), name, (thread_fn)entry, argument,
                                  resources, &thread_id);
     return status < 0 ? status : (int)thread_id;
 }
@@ -283,21 +283,21 @@ int dayan_thread_join_all(void)
 
 DAYAN_NORETURN void dayan_thread_exit(int64_t result)
 {
-    proc_exit_status(result);
+    thread_exit_status(result);
 }
 
 void *dayan_uram_base(void)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
 
-    return proc ? proc->uram_base : 0;
+    return descriptor ? descriptor->uram_base : 0;
 }
 
 size_t dayan_uram_size(void)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
 
-    return proc ? proc->uram_size : 0;
+    return descriptor ? descriptor->uram_size : 0;
 }
 
 struct barrier_wait {
@@ -317,12 +317,12 @@ static inline uint64_t barrier_arrive(dayan_cluster_barrier_t *barrier)
     return previous;
 }
 
-static inline int barrier_complete(struct proc *proc, void *arg)
+static inline int barrier_complete(struct thread *thread, void *arg)
 {
     const struct barrier_wait *wait = arg;
     uint64_t arrivals;
 
-    (void)proc;
+    (void)thread;
     arrivals = __atomic_load_n(&wait->barrier->arrivals, __ATOMIC_RELAXED);
     return arrivals - wait->target < ((uint64_t)1 << 63);
 }
@@ -330,65 +330,65 @@ static inline int barrier_complete(struct proc *proc, void *arg)
 int dayan_cluster_barrier(uint32_t participants,
                           dayan_cluster_barrier_t *barrier)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
     struct barrier_wait wait;
     uint64_t ticket;
 
-    if (!proc || participants != 4U || proc->task_mode != 4U ||
+    if (!descriptor || participants != 4U || descriptor->task_mode != 4U ||
         !shared_range_valid(barrier, sizeof(*barrier),
                             _Alignof(dayan_cluster_barrier_t)))
         return -EINVAL;
     ticket = barrier_arrive(barrier);
     wait.barrier = barrier;
     wait.target = ticket - ticket % participants + participants;
-    while (!barrier_complete(proc, &wait))
-        proc_wait_poll(barrier_complete, &wait);
+    while (!barrier_complete(thread_self(), &wait))
+        thread_wait_poll(barrier_complete, &wait);
     return 0;
 }
 
 uint32_t dayan_task_id(uint32_t axis)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
 
-    return proc && axis < 3U ? proc->task_id[axis] : 0U;
+    return descriptor && axis < 3U ? descriptor->task_id[axis] : 0U;
 }
 
 uint32_t dayan_task_dim(uint32_t axis)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
 
-    return proc && axis < 3U ? proc->task_dim[axis] : 0U;
+    return descriptor && axis < 3U ? descriptor->task_dim[axis] : 0U;
 }
 
 uint32_t dayan_task_mode(void)
 {
-    struct proc *proc = proc_self();
+    const struct task_descriptor *descriptor = task_descriptor_self();
 
-    return proc ? proc->task_mode : 0U;
+    return descriptor ? descriptor->task_mode : 0U;
 }
 
 void dayan_wait_lsu(void)
 {
     __asm__ volatile(".insn 4, 0x0000220b" ::: "memory");
-    proc_wait_produce();
+    thread_wait_produce();
 }
 
 void dayan_wait_mat(void)
 {
     __asm__ volatile(".insn 4, 0x0000420b" ::: "memory");
-    proc_wait_produce();
+    thread_wait_produce();
 }
 
 void dayan_wait_vec(void)
 {
     __asm__ volatile(".insn 4, 0x0000620b" ::: "memory");
-    proc_wait_produce();
+    thread_wait_produce();
 }
 
 void dayan_wait_macro(void)
 {
     __asm__ volatile(".insn 4, 0x0000820b" ::: "memory");
-    proc_wait_produce();
+    thread_wait_produce();
 }
 
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));
@@ -444,7 +444,7 @@ void scheduler_scan_produce(void)
 
         switch (event) {
         case PRODUCE_TOKEN_WAKE_THREAD:
-            status = proc_wake((struct proc *)object);
+            status = thread_wake((struct thread *)object);
             break;
         case PRODUCE_TOKEN_RESOURCE_PRODUCE:
             status = dayan_resource_produce((dayan_resource_t *)object);
@@ -477,9 +477,9 @@ int dayan_resource_init(dayan_resource_t *resource)
     resource->producer_count = 0;
     resource->consumer_count = 0;
     resource->state = DAYAN_RESOURCE_FREE;
-    INIT_LIST_HEAD(&resource->wait_lock);
-    INIT_LIST_HEAD(&resource->wait_ready);
-    INIT_LIST_HEAD(&resource->wait_free);
+    thread_list_init(&resource->wait_lock);
+    thread_list_init(&resource->wait_ready);
+    thread_list_init(&resource->wait_free);
     return 0;
 }
 
@@ -500,7 +500,7 @@ int dayan_resource_alloc(dayan_resource_t *resource,
         resource->state = producer_count ? DAYAN_RESOURCE_BUSY :
                                            DAYAN_RESOURCE_READY;
         if (!producer_count)
-            (void)proc_event_wake_all(&resource->wait_ready);
+            (void)thread_event_wake_all(&resource->wait_ready);
     }
     resource_unlock(resource);
     return status;
@@ -519,7 +519,7 @@ int dayan_resource_produce(dayan_resource_t *resource)
         status = -EBUSY;
     } else if (!--resource->producer_count) {
         resource->state = DAYAN_RESOURCE_READY;
-        (void)proc_event_wake_all(&resource->wait_ready);
+        (void)thread_event_wake_all(&resource->wait_ready);
     }
     resource_unlock(resource);
     return status;
@@ -538,7 +538,7 @@ int dayan_resource_consume(dayan_resource_t *resource)
         status = -EBUSY;
     } else if (!--resource->consumer_count) {
         resource->state = DAYAN_RESOURCE_FREE;
-        (void)proc_event_wake_all(&resource->wait_free);
+        (void)thread_event_wake_all(&resource->wait_free);
     }
     resource_unlock(resource);
     return status;
@@ -549,7 +549,7 @@ int dayan_resource_wait_ready(dayan_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (resource_state(resource) != DAYAN_RESOURCE_READY)
-        proc_wait_event(&resource->wait_ready);
+        thread_wait_event(&resource->wait_ready);
     return 0;
 }
 
@@ -558,7 +558,7 @@ int dayan_resource_wait_free(dayan_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (resource_state(resource) != DAYAN_RESOURCE_FREE)
-        proc_wait_event(&resource->wait_free);
+        thread_wait_event(&resource->wait_free);
     return 0;
 }
 
@@ -623,7 +623,7 @@ int dayan_shared_resource_wait_ready(dayan_shared_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (shared_resource_state(resource) != DAYAN_RESOURCE_READY)
-        proc_wait_poll(shared_resource_ready, resource);
+        thread_wait_poll(shared_resource_ready, resource);
     return 0;
 }
 
@@ -632,6 +632,6 @@ int dayan_shared_resource_wait_free(dayan_shared_resource_t *resource)
     if (!resource)
         return -EINVAL;
     while (shared_resource_counts(resource))
-        proc_wait_poll(shared_resource_free, resource);
+        thread_wait_poll(shared_resource_free, resource);
     return 0;
 }

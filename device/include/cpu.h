@@ -12,9 +12,6 @@
 #include "tensor_interrupt.h"
 #include "trap.h"
 
-struct proc_slot;
-struct proc_family;
-
 struct mem_state {
     struct rb_root free;
     struct list_head regions;
@@ -24,18 +21,12 @@ struct mem_state {
 
 struct sche_state {
     struct thread init;
-    struct list_head ready;
-    struct list_head active;
-    struct list_head wait_poll;
-    struct list_head wait_event;
+    struct thread_list ready;
+    struct thread_list active;
+    struct thread_list wait_poll;
+    struct thread_list wait_event;
     uint32_t active_dirty;
     uint32_t profile_enabled;
-    uint32_t next_id;
-    struct proc_slot *free_proc_slots;
-    uint32_t free_proc_slot_count;
-    uint32_t reserved_proc_slot_count;
-    struct proc_family *free_proc_families;
-    uint32_t free_proc_family_count;
 };
 
 struct cpu {

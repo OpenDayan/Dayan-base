@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct proc;
+struct thread;
 
 enum rpc_service {
     RPC_WRITE = 1,
@@ -413,7 +413,7 @@ long rpc_proc_exit(uint32_t proc_id, uint32_t parent_proc_id,
                    int64_t result, uint64_t cookie, uint32_t flags);
 long rpc_profile_flush(const struct rpc_profile_flush_request *request,
                        struct rpc_profile_flush_response *response);
-/* Returns 1 while the system send proc still owns the transaction. */
-int rpc_proc_wait_cancel(struct proc *proc);
+/* Returns 1 while the system send thread still owns the transaction. */
+int rpc_proc_wait_cancel(struct thread *thread);
 
 #endif

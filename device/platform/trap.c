@@ -36,21 +36,25 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     record->host_proc_id = 0;
     record->parent_proc_id = 0;
     record->cookie = 0;
-    if (current->type == THREAD_TYPE_PROC) {
-        struct proc *proc = proc_self();
+    if (current->type == THREAD_TYPE_TASK_PROC ||
+        current->type == THREAD_TYPE_TASK_THREAD) {
+        struct task_proc *task = task_proc_self();
+        struct thread *parent = current->parent == THREAD_SLOT_NONE ? 0 :
+                                thread_slot_get(current->parent);
 
-        if (!proc)
+        if (!task)
             platform_halt();
-        record->host_proc_id = proc->host_proc_id;
-        record->parent_proc_id = proc->parent_id;
-        record->cookie = proc->cookie;
+        record->host_proc_id = task->thread.id;
+        record->parent_proc_id = parent ? parent->id : 0;
+        record->cookie = task->descriptor.cookie;
     }
 
     status = rpc_report_trap(record, sizeof(*record));
     if (status < 0)
         platform_halt();
     cpu->trap.active = 0;
-    if (current->type == THREAD_TYPE_PROC)
-        proc_exit_status(-EIO);
+    if (current->type == THREAD_TYPE_TASK_PROC ||
+        current->type == THREAD_TYPE_TASK_THREAD)
+        thread_exit_status(-EIO);
     platform_halt();
 }

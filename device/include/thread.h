@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 
+#include "api/dayan_list.h"
+
+#define THREAD_NAME_SIZE 16U
+#define THREAD_ID_SLOT_BITS 8U
+#define THREAD_ID_SLOT_MASK UINT8_MAX
+
 enum thread_state {
     THREAD_RUNNING = 0,
     THREAD_READY = 1,
@@ -16,22 +22,24 @@ enum thread_state {
 
 enum thread_type {
     THREAD_TYPE_BASE = 0,
-    THREAD_TYPE_PROC = 1,
+    THREAD_TYPE_SYSTEM = 1,
+    THREAD_TYPE_TASK_THREAD = 2,
+    THREAD_TYPE_TASK_PROC = 3,
 };
 
 /* The fixed prefix addressed by tp for every execution context. */
 struct thread {
-    uint32_t id;
-    uint32_t state;
+    uint8_t type;
+    uint8_t state;
+    uint16_t id;
+    uint8_t parent;
+    struct thread_list_node node;
     uintptr_t sp;
     uintptr_t pc;
     uint64_t tensor_context;
-    uint32_t type;
-    uint8_t profile_slot;
-    uint8_t profile_defined;
+    char name[THREAD_NAME_SIZE];
 };
 
-int thread_init(struct thread *thread, uint32_t type);
 void switch_context(struct thread *prev, struct thread *next);
 
 /* U-Boot-style global register variable: current has no memory object. */

@@ -5,16 +5,12 @@
 #include <stdint.h>
 
 struct thread {
-    uint32_t id;
+    uint16_t id;
 };
 
-struct proc {
-    struct thread thread;
-    char *printf_buffer;
-    size_t printf_capacity;
-    size_t printf_size;
-};
-
-struct proc *proc_self(void);
+struct thread *thread_self(void);
+int thread_output_enabled(const struct thread *thread);
+int thread_output_put(struct thread *thread, char ch);
+int thread_output_flush(struct thread *thread);
 
 #endif

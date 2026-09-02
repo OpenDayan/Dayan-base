@@ -107,10 +107,10 @@ static void proc_request_publish_state(
     platform_cache_flush(request, CONFIG_CACHE_LINE_SIZE);
 }
 
-static void managed_proc_cleanup(struct proc *proc, void *arg)
+static void managed_proc_cleanup(struct thread *thread, void *arg)
 {
     struct rpc_proc_create_request *request = arg;
-    int64_t status = proc->exit_status;
+    int64_t status = thread_result(thread);
 
     request->status = status;
     proc_request_publish_state(
@@ -120,8 +120,8 @@ static void managed_proc_cleanup(struct proc *proc, void *arg)
 static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
 {
     struct rpc_proc_create_request *request;
-    struct proc *proc = 0;
-    struct proc_family *family = 0;
+    struct task_proc *task = 0;
+    struct task_descriptor descriptor;
     uintptr_t args[RPC_PROC_MAX_ARGS];
     size_t index;
     int status = -EINVAL;
@@ -137,51 +137,50 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     for (index = 0; index < request->argc; ++index)
         args[index] = ((const volatile uint64_t *)request->args)[index];
 
-    status = proc_slot_acquire((size_t)request->stack_size,
-                               (size_t)request->printf_buffer_size, &proc);
-    if (status < 0)
-        goto complete;
-    status = proc_family_create(proc, request->max_child_threads,
-                                (size_t)request->stack_size,
-                                (size_t)request->printf_buffer_size,
-                                &family);
-    if (status < 0)
-        goto complete;
+    memset(&descriptor, 0, sizeof(descriptor));
+    memcpy(descriptor.task_id, request->task_id, sizeof(descriptor.task_id));
+    memcpy(descriptor.task_dim, request->task_dim,
+           sizeof(descriptor.task_dim));
+    descriptor.task_mode = request->task_mode;
+    descriptor.max_child_threads = request->max_child_threads;
+    descriptor.child_stack_size = (uint32_t)request->stack_size;
+    descriptor.child_printf_size = (uint32_t)request->printf_buffer_size;
+    descriptor.shared_base = (void *)(uintptr_t)request->shared_base;
+    descriptor.shared_size = (size_t)request->shared_size;
+    descriptor.uram_base = (void *)(uintptr_t)request->uram_base;
+    descriptor.uram_size = (size_t)request->uram_size;
+    descriptor.cookie = request->cookie;
 
-    status = proc_slot_init_args(proc, request->name,
-                                 (proc_fn)(uintptr_t)request->entry,
-                                 (void *)(uintptr_t)request->shared_base,
-                                 request->argc, args);
+    status = task_proc_slot_acquire(&task);
     if (status < 0)
         goto complete;
-    status = proc_set_resources(proc, family,
-                                (size_t)request->shared_size,
-                                (void *)(uintptr_t)request->uram_base,
-                                (size_t)request->uram_size,
-                                request->tensor_context);
+    status = task_proc_set_descriptor(task, &descriptor,
+                                      request->tensor_context);
     if (status < 0)
-        platform_halt();
-    proc->cookie = request->cookie;
-    proc->host_proc_id = proc->thread.id;
-    status = proc_set_cleanup(proc, managed_proc_cleanup, request);
+        goto complete;
+    status = task_proc_reserve(task);
     if (status < 0)
-        platform_halt();
-    status = proc_set_task(proc, request->task_id,
-                           request->task_dim, request->task_mode);
+        goto complete;
+    status = task_proc_start(task, request->name,
+                             (thread_fn)(uintptr_t)request->entry,
+                             request->argc, args);
+    if (status < 0)
+        goto complete;
+    status = thread_set_cleanup(&task->thread, managed_proc_cleanup, request);
     if (status < 0)
         platform_halt();
 
     request->status = 0;
-    request->proc_id = proc->thread.id;
+    request->proc_id = task->thread.id;
     request->hart_id = (uint32_t)platform_hart_id();
     proc_request_publish_state(request, RPC_PROC_RUNNING);
     return 1;
 
 complete:
-    if (family)
-        proc_family_destroy(family);
-    if (proc)
-        proc_slot_release(proc);
+    if (task) {
+        task_proc_unreserve(task);
+        task_proc_slot_release(task);
+    }
     request->status = status;
     request->proc_id = 0;
     request->hart_id = (uint32_t)platform_hart_id();

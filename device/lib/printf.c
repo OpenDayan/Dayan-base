@@ -257,42 +257,24 @@ int snprintf(char *restrict dst, size_t size,
     return result;
 }
 
-static int proc_flush(struct proc *proc)
+static int thread_flush(struct thread *thread)
 {
-    if (!proc || proc->printf_size > proc->printf_capacity ||
-        (!proc->printf_buffer != !proc->printf_capacity))
-        return -1;
-    if (!proc->printf_size)
-        return 0;
-    if (rpc_write(proc->printf_buffer, proc->printf_size) < 0)
-        return -1;
-    proc->printf_size = 0;
-    return 0;
+    return thread_output_flush(thread);
 }
 
-static int proc_put(void *context, char ch)
+static int thread_put(void *context, char ch)
 {
-    struct proc *proc = context;
+    struct thread *thread = context;
 
-    if (!proc || !proc->printf_buffer || !proc->printf_capacity ||
-        proc->printf_size > proc->printf_capacity)
-        return -1;
-    if (proc->printf_size == proc->printf_capacity &&
-        proc_flush(proc) < 0)
-        return -1;
-    proc->printf_buffer[proc->printf_size++] = ch;
-    if (proc->printf_size == proc->printf_capacity &&
-        proc_flush(proc) < 0)
-        return -1;
-    return 0;
+    return thread_output_put(thread, ch);
 }
 
 int vprintf(const char *restrict fmt, va_list args)
 {
-    struct proc *proc = proc_self();
-    struct output out = { proc_put, proc, 0, 0 };
+    struct thread *thread = thread_self();
+    struct output out = { thread_put, thread, 0, 0 };
 
-    if (!fmt || !proc || !proc->printf_buffer || !proc->printf_capacity)
+    if (!fmt || !thread || !thread_output_enabled(thread))
         return -1;
     return format(&out, fmt, args);
 }
@@ -310,24 +292,24 @@ int printf(const char *restrict fmt, ...)
 
 int putchar(int ch)
 {
-    struct proc *proc = proc_self();
+    struct thread *thread = thread_self();
 
-    if (!proc || proc_put(proc, (char)ch) < 0)
+    if (!thread || thread_put(thread, (char)ch) < 0)
         return EOF;
     return (unsigned char)ch;
 }
 
 int puts(const char *str)
 {
-    struct proc *proc = proc_self();
+    struct thread *thread = thread_self();
 
-    if (!str || !proc)
+    if (!str || !thread)
         return EOF;
     while (*str) {
-        if (proc_put(proc, *str++) < 0)
+        if (thread_put(thread, *str++) < 0)
             return EOF;
     }
-    if (proc_put(proc, '\n') < 0)
+    if (thread_put(thread, '\n') < 0)
         return EOF;
     return 0;
 }
@@ -336,5 +318,5 @@ int fflush(FILE *stream)
 {
     if (stream && stream != stdout)
         return EOF;
-    return proc_flush(proc_self()) < 0 ? EOF : 0;
+    return thread_flush(thread_self()) < 0 ? EOF : 0;
 }
