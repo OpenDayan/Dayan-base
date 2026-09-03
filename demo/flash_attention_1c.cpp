@@ -55,6 +55,8 @@ enum : uint64_t {
     kStateBytes = kStateElements * sizeof(float),
     kOutputElements = kQueryRows * kHeadD,
     kOutputBytes = kOutputElements * sizeof(float),
+    kOutputTaskBytes = kAttentionRows * kHeadD * sizeof(float),
+    kOutputRowBytes = kHeadD * sizeof(float),
     kP16TaskBytes = kAttentionRows * kKvTileCols * sizeof(uint16_t),
     kP16TileBytes = kQueryRows * kKvTileCols * sizeof(uint16_t),
     kFp8UramBytes = 480 * 1024,
@@ -143,6 +145,8 @@ static_assert(kContextLength % kKvTileCols == 0,
               "context length must contain whole KV tiles");
 static_assert(kKvTileCols % 64 == 0 && kHeadD % 8 == 0,
               "Vec flow requires aligned KV and head dimensions");
+static_assert(kOutputTaskBytes == kP16TaskBytes,
+              "output and P16 task strides must match");
 static_assert(Fp16Pipeline::kVecInstructionCount <= 512 &&
                   Fp16Pipeline::kNormalizeInstructionCount <= 512,
               "FP16 FlexVec flow exceeds the instruction queue");
@@ -299,14 +303,14 @@ static inline void configure_vec()
     __tx_vec_tcsr_write<VEC_V1_DIM2_STRIDE>(kStateTileBytes);
     if constexpr (Traits::kFullAttention) {
         __tx_vec_tcsr_write<VEC_V2_DIM2_STRIDE>(kScoreTaskBytes);
-        __tx_vec_tcsr_write<VEC_V3_DIM2_STRIDE>(kP16TaskBytes);
+        __tx_vec_tcsr_write<VEC_V3_DIM2_STRIDE>(kOutputTaskBytes);
     }
     __tx_vec_tcsr_write<VEC_V0_URAM_CHANNEL_STRIDE>(
         kKvTileCols * sizeof(float));
     __tx_vec_tcsr_write<VEC_V1_URAM_CHANNEL_STRIDE>(32);
     if constexpr (Traits::kFullAttention) {
         __tx_vec_tcsr_write<VEC_V2_URAM_CHANNEL_STRIDE>(32);
-        __tx_vec_tcsr_write<VEC_V3_URAM_CHANNEL_STRIDE>(32);
+        __tx_vec_tcsr_write<VEC_V3_URAM_CHANNEL_STRIDE>(kOutputRowBytes);
     }
 }
 
@@ -358,9 +362,9 @@ static inline void queue_online_softmax(uint64_t score, uint64_t m,
         for (uint32_t slice = 0; slice < kOutputSlices; ++slice) {
             const uint64_t address = output + slice * 32U;
 
-            __tx_vec_lsu_u2v<1, 0>((long)address);
+            __tx_vec_lsu_u2v<1, 3>((long)address);
             __tx_vec_vv_fp32_mul<1, 0, 16, 0>();
-            __tx_vec_lsu_v2u<16, 0>((long)address);
+            __tx_vec_lsu_v2u<16, 3>((long)address);
         }
     }
     __tx_vec_lsu_u2v<1, 1>((long)l);
@@ -409,9 +413,9 @@ static inline void queue_normalize_output(uint64_t output, uint64_t l)
     for (uint32_t slice = 0; slice < kSlices; ++slice) {
         const uint64_t address = output + slice * 32U;
 
-        __tx_vec_lsu_u2v<0, 0>((long)address);
+        __tx_vec_lsu_u2v<0, 3>((long)address);
         __tx_vec_vv_fp32_mul<0, 0, 16, 0>();
-        __tx_vec_lsu_v2u<0, 0>((long)address);
+        __tx_vec_lsu_v2u<0, 3>((long)address);
     }
 }
 
@@ -1098,14 +1102,17 @@ static void initialize_fp16(uint16_t *q, uint16_t *kt, uint16_t *vt,
     std::memset(kt, 0, kKtElements * sizeof(*kt));
     std::memset(vt, 0, kVtElements * sizeof(*vt));
     std::memset(output, 0, kOutputBytes);
-    for (uint32_t row = 0; row < kQueryRows; ++row)
-        q[row * kHeadD + row] = encode_small_integer<uint16_t>(1);
+    for (uint32_t row = 0; row < kQueryRows; ++row) {
+        const int value = 1 + (int)((row / kAttentionRows) & 1U);
+
+        q[row * kHeadD + row] = encode_small_integer<uint16_t>(value);
+    }
     for (uint32_t kv_tile = 0; kv_tile < kKvTiles; ++kv_tile) {
         for (uint32_t key = 0; key < kKvTileCols; ++key) {
             for (uint32_t component = 0; component < kHeadD;
                  ++component) {
-                const int value = tile_bias[kv_tile] -
-                                  (int)((key + component) & 1U);
+                const int value = tile_bias[kv_tile] +
+                                  (int)((key * 2U + component) % 3U) - 1;
 
                 kt[(kv_tile * kKvTileCols + key) * kHeadD +
                    component] = encode_small_integer<uint16_t>(value);

@@ -220,6 +220,18 @@ static int dump_region(npu_service_device_t *device, uint32_t cluster,
     return status;
 }
 
+static int dump_region_visible(npu_hal_core_t core,
+                               const npu_hal_memory_region_t *region)
+{
+    if (region->scope == NPU_HAL_MEMORY_DEVICE)
+        return 1;
+    if (region->cluster != core.cluster)
+        return 0;
+    return region->scope == NPU_HAL_MEMORY_CLUSTER ||
+           (region->scope == NPU_HAL_MEMORY_CORE &&
+            region->core == core.core);
+}
+
 void npu_service_dump_device(npu_service_device_t *device,
                              npu_hal_core_t core, const char *kind,
                              const void *record, size_t record_size)
@@ -235,7 +247,7 @@ void npu_service_dump_device(npu_service_device_t *device,
     if (!device || !kind || !record)
         return;
     if (!root || !*root)
-        root = "/tmp";
+        return;
     if (snprintf(path, sizeof(path),
                  "%s/dayan-%s-c%u-h%u-p%ld-XXXXXX", root, kind,
                  core.cluster, core.core, (long)getpid()) >=
@@ -272,6 +284,8 @@ void npu_service_dump_device(npu_service_device_t *device,
         status = npu_hal_get_memory_region(device->hal, index, &region);
         if (status < 0)
             break;
+        if (!dump_region_visible(core, &region))
+            continue;
         cluster = region.scope == NPU_HAL_MEMORY_DEVICE ? core.cluster :
                                                           region.cluster;
         status = dump_region(device, cluster, directory_fd, index, &region,

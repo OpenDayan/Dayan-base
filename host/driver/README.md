@@ -175,6 +175,9 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
   独立 Device printf buffer 使用所属 Host root ID 输出；Cluster、Core 与 root proc ID
   由 Server 归属到发起任务的 Runtime Session。Runtime
   在 Event/Stream 同步时读取并调用应用侧 output callback，Server 不直接打印算子文本。
+- Server 默认只打印 trap 和 tensor interrupt 的寄存器报告，不在故障处理路径读取设备
+  内存。需要完整 dump 时显式设置 `DAYAN_TRAP_DUMP_DIR`；dump 只读取故障 Core 可见的
+  Device、Cluster 和本 Core region，避免访问其它 Core 的私有 URAM。
 - Host→Device：`RPC_PROC_CREATE`、`RPC_DCACHE_FLUSH`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS`、
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
