@@ -10,28 +10,60 @@
 #define NPU_MAX_PRINT_BYTES (1024U * 1024U)
 #define NPU_RPC_IRQ_WAIT_TIMEOUT_MS 100U
 
+/*
+ * Every address in this file came from the Device, so it is in the Device's own
+ * address space: a firmware virtual address once the MMU is on.  XDMA is a
+ * separate bus master that does not traverse the ClusterMMU, so no such address
+ * may reach npu_hal_copy_*_address() or npu_hal_address_valid() untranslated -
+ * with a non-zero pool offset it would name someone else's memory, and with the
+ * default zero offset it would appear to work.
+ *
+ * The Device only ever names memory inside the firmware window this way
+ * (descriptors, its heap, its stack), so the window arithmetic is the whole
+ * conversion; a Buffer's virtual address has no such relation and is never a
+ * legal argument here.
+ */
+static int device_pa(npu_service_device_t *device, uint64_t address,
+                     uint64_t size, uint64_t *pa_out)
+{
+    int status = npu_service_mmu_fw_pa(device, address, size, pa_out);
+
+    /* -ENOTSUP is the MMU-off case and has already set *pa_out = address. */
+    return status == -ENOTSUP ? 0 : status;
+}
+
 static int range_valid(npu_service_device_t *device, npu_hal_core_t core,
                        uint64_t address, uint64_t size)
 {
-    return npu_hal_address_valid(device->hal, core, address, size);
+    uint64_t physical = 0;
+
+    if (device_pa(device, address, size, &physical) < 0)
+        return 0;
+    return npu_hal_address_valid(device->hal, core, physical, size);
 }
 
 static int copy_from_device(npu_service_device_t *device,
                             npu_hal_core_t core, void *destination,
                             uint64_t address, size_t size)
 {
-    if (!range_valid(device, core, address, size))
+    uint64_t physical = 0;
+
+    if (device_pa(device, address, size, &physical) < 0 ||
+        !npu_hal_address_valid(device->hal, core, physical, size))
         return -EPROTO;
     return npu_hal_copy_from_address(device->hal, core.cluster, destination,
-                                     address, size);
+                                     physical, size);
 }
 
 static int copy_to_device(npu_service_device_t *device, npu_hal_core_t core,
                           uint64_t address, const void *source, size_t size)
 {
-    if (!range_valid(device, core, address, size))
+    uint64_t physical = 0;
+
+    if (device_pa(device, address, size, &physical) < 0 ||
+        !npu_hal_address_valid(device->hal, core, physical, size))
         return -EPROTO;
-    return npu_hal_copy_to_address(device->hal, core.cluster, address,
+    return npu_hal_copy_to_address(device->hal, core.cluster, physical,
                                    source, size);
 }
 
@@ -161,8 +193,8 @@ static int service_heap_acquire(npu_service_device_t *device,
         &allocation);
     if (status < 0)
         goto finish;
-    status = npu_hal_memory_address(device->hal, allocation, core,
-                                    &response.addr);
+    status = npu_service_mmu_device_address(device, allocation, core,
+                                            &response.addr);
     if (status < 0)
         goto finish;
     response.size = size;

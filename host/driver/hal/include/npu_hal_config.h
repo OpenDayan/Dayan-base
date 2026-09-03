@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define NPU_HAL_OPTIONS_VERSION         4U
+#define NPU_HAL_OPTIONS_VERSION         5U
 #define NPU_HAL_MAX_CLUSTERS            32U
 #define NPU_HAL_MAX_CORES_PER_CLUSTER   32U
 
@@ -55,6 +55,15 @@ typedef struct npu_hal_options {
     uint32_t cluster_count;
     uint32_t cores_per_cluster;
     uint32_t normal_memory_size_mib;
+    /*
+     * Split the Normal region into a firmware pool and a Buffer pool.  Only the
+     * MMU needs the split - it is what keeps a Buffer's physical pages out of
+     * the linear-offset firmware window - and it costs the firmware pool's
+     * worth of address space to every other usage, so it stays off unless the
+     * caller enables the MMU.  npu_hal_firmware_pool() reports the boundary and
+     * returns -ENODEV when the split is off.
+     */
+    uint32_t split_normal_memory;
     const npu_hal_backend_options_t *backend_options;
     const npu_hal_memory_region_t *memory_regions;
     uint32_t memory_region_count;

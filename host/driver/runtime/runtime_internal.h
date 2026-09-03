@@ -55,7 +55,14 @@ struct npu_buffer {
     uint64_t id;
     uint64_t size;
     uint64_t base_offset;
-    struct npu_buffer *parent;
+    /*
+     * Nonzero on a view, which owns no Server-side buffer and so must not
+     * send BUFFER_DESTROY.  Deliberately a flag and not a pointer to the root:
+     * a view outlives its root whenever the caller destroys them in that
+     * order, and @id already carries the root's Server id, so nothing here
+     * ever has to dereference it.
+     */
+    uint32_t is_view;
     struct npu_buffer *next;
 };
 
@@ -87,7 +94,14 @@ struct npu_event {
 
 struct runtime_transfer_job {
     struct npu_context *context;
-    struct npu_event *event;
+    /*
+     * The event's id, not the struct npu_event.  The worker runs after the
+     * async submit call has returned, by which point the caller owns the event
+     * and may already have destroyed it - holding the pointer and reading
+     * event->id in the worker is a use-after-free.  The id is all the worker
+     * needs, and the Server rejects a stale one.
+     */
+    uint64_t event_id;
     void *host_buffer;
     size_t size;
     struct runtime_transfer_job *next;

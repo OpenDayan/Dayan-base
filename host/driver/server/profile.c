@@ -27,8 +27,8 @@ static int profile_config_call(npu_service_device_t *device,
         device, core->target, sizeof(config), &allocation);
     if (status < 0)
         return status;
-    status = npu_hal_memory_address(device->hal, allocation, core->target,
-                                    &descriptor_address);
+    status = npu_service_mmu_device_address(device, allocation, core->target,
+                                            &descriptor_address);
     if (status < 0 || descriptor_address > RPC_COMMAND_ARG_MASK) {
         status = status < 0 ? status : -EOVERFLOW;
         goto out;
@@ -230,8 +230,8 @@ static int allocate_profile(npu_service_device_t *device,
 
             if (!(booted_cores[cluster] & (UINT32_C(1) << core_id)))
                 continue;
-            status = npu_hal_memory_address(device->hal, *allocation_out,
-                                            target, &base);
+            status = npu_service_mmu_device_address(device, *allocation_out,
+                                                    target, &base);
             if (status < 0 || base > UINT64_MAX - ordinal * slice_size) {
                 status = status < 0 ? status : -EOVERFLOW;
                 goto fail;

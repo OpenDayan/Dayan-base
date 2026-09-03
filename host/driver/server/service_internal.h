@@ -73,15 +73,43 @@ struct npu_service_cluster {
     uint64_t atomic_cache_backing_address;
 };
 
-/* BL0 boot ROM, mirroring device/bl0/linker.ld and the QEMU memmap.  It is
- * the one thing below URAM the Device executes from. */
-#define NPU_SERVICE_MMU_ROM_BASE    UINT64_C(0x00010000)
-#define NPU_SERVICE_MMU_ROM_SIZE    UINT64_C(0x00010000)
+/*
+ * Nothing below 2 GiB is mapped.  The MMU bypasses that whole range before it
+ * ever consults a page table, so the control window, the BL0 ROM and URAM need
+ * no PTEs and must not be given any: a mapping here would be dead weight that
+ * disagrees with the hardware it is supposed to describe.  Only the firmware
+ * window and Buffers are translated.
+ *
+ * This makes the firmware and QEMU version-locked.  A firmware that maps
+ * nothing below 2 GiB against a QEMU that still translates the whole space
+ * sends every low access into an empty table, redirected to a guard page.
+ */
+#define NPU_SERVICE_MMU_BYPASS_LIMIT UINT64_C(0x80000000)
 
-/* URAM aperture, mirroring device/include/config.h. */
-#define NPU_SERVICE_MMU_URAM_BASE   UINT64_C(0x00800000)
-#define NPU_SERVICE_MMU_URAM_SIZE   UINT64_C(0x00180000)
-#define NPU_SERVICE_MMU_URAM_STRIDE UINT64_C(0x00200000)
+/*
+ * The firmware window.  Its virtual base is fixed by device/linker.ld (which
+ * places every section at CONFIG_RAM_BASE), so the firmware needs no rebuild
+ * and its internal pointers stay valid.  Its physical base is chosen by the
+ * Host, and the two differ by a constant:
+ *
+ *     pa = va - NPU_SERVICE_MMU_FW_VA_BASE + fw_pool_base
+ *
+ * Decoupling the physical side is what removes the ordering deadlock that an
+ * identity mapping would create: the window can be mapped in full at init
+ * time, before BL1 is even loaded, because where BL1's segments land inside it
+ * no longer matters.
+ */
+#define NPU_SERVICE_MMU_FW_VA_BASE  UINT64_C(0x80000000)
+
+/* 2 MiB Sv39 leaf, used only for the firmware window: permissions there are
+ * uniform and the pool base is 2 MiB-aligned.  Buffers stay on 4 KiB leaves so
+ * each keeps its own permissions and its own out-of-bounds granularity. */
+#define NPU_SERVICE_MMU_LARGE_SIZE  UINT64_C(0x00200000)
+
+/* Unmapped gap between the firmware window and the Buffer VA window, so an
+ * overrun off the end of the firmware window faults instead of sliding into
+ * Buffer space. */
+#define NPU_SERVICE_MMU_VA_SENTINEL NPU_SERVICE_MMU_LARGE_SIZE
 
 /*
  * One Sv39 table.  @entries is a Host shadow of the device-resident table at
@@ -123,12 +151,19 @@ struct npu_mmu {
     uint64_t va_next;
     uint64_t va_limit;
     /*
-     * MMU pages are reserved top-down out of the Normal region. The firmware
-     * is loaded at fixed addresses starting at the bottom of that region, so
-     * plain allocation would collide with it (see npu_mmu_reserve_page()).
+     * The firmware pool: physical base and size of the window mapped at
+     * NPU_SERVICE_MMU_FW_VA_BASE.  fw_pool_base is the whole linear-offset
+     * relation, so every Host-to-Device address conversion goes through it.
+     */
+    uint64_t fw_pool_base;
+    uint64_t fw_pool_size;
+    /*
+     * Downward cursor for page tables and guard pages, from the top of the
+     * firmware pool.  The pool's base is the Host's choice, but the firmware's
+     * offset inside it is not - BL1's segments start at fw_pool_base - so MMU
+     * pages are taken from the far end.
      */
     uint64_t pool_cursor;
-    uint64_t pool_limit;
 };
 
 struct npu_service_heap_allocation {

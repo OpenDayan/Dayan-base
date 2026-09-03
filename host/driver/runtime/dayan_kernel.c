@@ -210,9 +210,17 @@ int npu_kernel_descriptor_launch(npu_kernel_descriptor_t *descriptor,
     }
     timeout = attrs->timeout_ms ? attrs->timeout_ms :
               attrs->context->runtime->default_timeout_ms;
+    /*
+     * The event is this function's to dispose of on the synchronous path: the
+     * caller never sees it, so returning without destroying it strands one on
+     * the Server for the life of the Context and leaks the client-side struct.
+     * A wait that timed out is the common case for that.
+     */
     status = npu_event_wait(event, timeout, &info);
-    if (status < 0)
+    if (status < 0) {
+        (void)npu_event_destroy(event);
         return status;
+    }
     status = npu_event_destroy(event);
     if (status < 0)
         return status;

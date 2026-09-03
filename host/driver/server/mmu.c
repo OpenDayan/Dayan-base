@@ -53,12 +53,14 @@
 #define NPU_MMU_TABLE_BYTES     (NPU_MMU_PTE_PER_TABLE * sizeof(uint64_t))
 
 /*
- * Virtual addresses handed to Contexts.  The window starts above the
- * identity-mapped control and DRAM apertures so an identity mapping and a
- * Context mapping can never collide, and ends at the Sv39 limit.
+ * Top of the virtual addresses handed to Contexts: the Sv39 limit.  The base is
+ * not a constant - it sits just above the firmware window, whose size the HAL
+ * decides at run time, so npu_service_mmu_init() computes it.
  */
-#define NPU_MMU_VA_BASE         UINT64_C(0x0000000100000000)
 #define NPU_MMU_VA_TOP          UINT64_C(0x0000004000000000)
+
+/* One level-1 Sv39 entry spans 2 MiB; a level-1 leaf maps all of it. */
+#define NPU_MMU_LARGE_LEVEL     1U
 
 /* Guard-page fill: recognisable, and encodes its own offset so a corrupted
  * word tells us which VA[11:0] the faulting access carried. */
@@ -124,15 +126,21 @@ static int npu_mmu_push_entry(npu_service_device_t *device,
 }
 
 /*
- * Reserve one page of Device memory for MMU use, taken from the top of the
- * Normal region and working downwards.
+ * One page of Device memory for MMU use - page tables and guard pages - taken
+ * from the top of the firmware pool and working downwards.
  *
- * Plain allocation cannot be used here.  npu_service_mmu_init() runs before
- * BL1 is loaded, and the firmware is reserved at fixed addresses starting at
- * the bottom of Normal memory (its ELF entry is 0x80000000).  An ordinary
- * allocation hands out the lowest free address, which is exactly where the
- * firmware has to go, so page tables placed that way make the later BL1
- * reservation fail with -EEXIST.
+ * Both halves of that matter.  It has to come from the firmware pool, because
+ * that is the range the firmware window maps: a page allocated above the split
+ * would be unreachable by the Device and could collide with a Buffer.  And it
+ * has to come from the top of the pool, because the firmware's position
+ * *within* the pool is fixed even though the pool's own base need not be:
+ * BL1's segments are reserved at pool_base + (link address - CONFIG_RAM_BASE),
+ * which starts at pool_base itself.  An ordinary first-fit allocation hands
+ * out pool_base and makes the later BL1 reservation fail with -EEXIST.
+ *
+ * The linear offset removed the need to guess where the firmware pool sits.
+ * It did not remove the firmware's fixed offset inside it, which is what this
+ * reservation stays clear of.
  */
 static int npu_mmu_reserve_page(npu_service_device_t *device, uint32_t cluster,
                                 uint64_t size,
@@ -140,33 +148,16 @@ static int npu_mmu_reserve_page(npu_service_device_t *device, uint32_t cluster,
 {
     struct npu_mmu *mmu = &device->mmu;
     npu_hal_memory_request_t request;
-    int status = -ENOMEM;
+    uint64_t address;
+    int status;
 
-    if (!mmu->pool_cursor) {
-        /* First use: find the top of the Normal region that is visible to
-         * every Cluster, and grow downwards from there. */
-        uint32_t index;
-
-        for (index = 0; index < device->hal_info.memory_region_count;
-             ++index) {
-            npu_hal_memory_region_t region;
-
-            status = npu_hal_get_memory_region(device->hal, index, &region);
-            if (status < 0)
-                return status;
-            if (region.memory_class != NPU_HAL_MEMORY_NORMAL ||
-                region.scope != NPU_HAL_MEMORY_DEVICE)
-                continue;
-            mmu->pool_cursor = region.base + region.size;
-            mmu->pool_limit = region.base;
-            break;
-        }
-        if (!mmu->pool_cursor)
-            return -ENODEV;
-    }
-    if (mmu->pool_cursor - mmu->pool_limit < size)
+    if (!mmu->fw_pool_size)
+        return -ENODEV;
+    if (!mmu->pool_cursor)
+        mmu->pool_cursor = mmu->fw_pool_base + mmu->fw_pool_size;
+    if (mmu->pool_cursor - mmu->fw_pool_base < size)
         return -ENOMEM;
-    mmu->pool_cursor -= size;
+    address = mmu->pool_cursor - size;
 
     npu_hal_memory_request_init(&request);
     request.memory_class = NPU_HAL_MEMORY_NORMAL;
@@ -177,9 +168,16 @@ static int npu_mmu_reserve_page(npu_service_device_t *device, uint32_t cluster,
     request.location.core = NPU_HAL_ANY_CORE;
     request.size = size;
     request.alignment = DAYAN_MMU_PAGE_SIZE;
-    request.fixed_address = mmu->pool_cursor;
+    request.fixed_address = address;
     (void)cluster;
-    return npu_hal_memory_reserve(device->hal, &request, allocation_out);
+    /* The cursor moves only once the range is actually ours.  Consuming it
+     * first would retire a page on every failed attempt, so a caller that
+     * retries would walk the cursor down to the firmware's own segments. */
+    status = npu_hal_memory_reserve(device->hal, &request, allocation_out);
+    if (status < 0)
+        return status;
+    mmu->pool_cursor = address;
+    return 0;
 }
 
 static int npu_mmu_table_alloc(npu_service_device_t *device, uint32_t cluster,
@@ -250,26 +248,43 @@ static void npu_mmu_table_free(npu_service_device_t *device,
 }
 
 /*
- * Walk to the leaf slot for @va, optionally creating interior tables.
- * Returns the owning table and the leaf index rather than a pointer, because
- * every entry write has to be mirrored to device memory and so needs to know
- * which table it belongs to.
+ * Walk to the entry slot for @va at @stop_level, optionally creating interior
+ * tables.  Returns the owning table and the index rather than a pointer,
+ * because every entry write has to be mirrored to device memory and so needs
+ * to know which table it belongs to.
+ *
+ * @stop_level 0 is a 4 KiB leaf, 1 a 2 MiB leaf.  A level-1 slot reached this
+ * way must be empty before it is written as a leaf: an interior entry already
+ * there means 4 KiB mappings exist underneath, and overwriting it would strand
+ * them.  The callers check that (npu_mmu_map_firmware_window() refuses a slot
+ * with V set), and a create-walk down *through* a level-1 leaf is refused here.
  */
-static int npu_mmu_walk(npu_service_device_t *device, uint32_t cluster,
-                        uint64_t va, int create,
-                        struct npu_mmu_table **table_out, uint32_t *index_out)
+static int npu_mmu_walk_level(npu_service_device_t *device, uint32_t cluster,
+                              uint64_t va, int create, unsigned stop_level,
+                              struct npu_mmu_table **table_out,
+                              uint32_t *index_out)
 {
     struct npu_mmu *mmu = &device->mmu;
     struct npu_mmu_table *table = mmu->root[cluster];
     unsigned level;
 
-    for (level = NPU_MMU_LEVELS - 1U; level > 0U; --level) {
+    for (level = NPU_MMU_LEVELS - 1U; level > stop_level; --level) {
         uint32_t index = npu_mmu_vpn(va, level);
         struct npu_mmu_table *child = table->children[index];
 
         if (!child) {
             int status;
 
+            /*
+             * A valid entry with no child is a leaf - a 2 MiB firmware-window
+             * leaf, since those are the only ones installed above level 0.
+             * Descending would mean replacing it with an interior entry and
+             * unmapping the 2 MiB it covers, so refuse instead.  The firmware
+             * window and the Buffer range are disjoint by construction, which
+             * is why this is a guard and not a live path.
+             */
+            if (table->entries[index] & NPU_MMU_PTE_V)
+                return -EEXIST;
             if (!create)
                 return -ENOENT;
             status = npu_mmu_table_alloc(device, cluster, &child);
@@ -297,8 +312,16 @@ static int npu_mmu_walk(npu_service_device_t *device, uint32_t cluster,
         table = table->children[index];
     }
     *table_out = table;
-    *index_out = npu_mmu_vpn(va, 0);
+    *index_out = npu_mmu_vpn(va, stop_level);
     return 0;
+}
+
+static int npu_mmu_walk(npu_service_device_t *device, uint32_t cluster,
+                        uint64_t va, int create,
+                        struct npu_mmu_table **table_out, uint32_t *index_out)
+{
+    return npu_mmu_walk_level(device, cluster, va, create, 0, table_out,
+                              index_out);
 }
 
 /* ---------------------------------------------------------------- */
@@ -308,103 +331,74 @@ static int npu_mmu_walk(npu_service_device_t *device, uint32_t cluster,
 static int npu_mmu_guard_init(npu_service_device_t *device, uint32_t cluster);
 
 /*
- * Identity-map the apertures whose addresses are baked into the firmware.
+ * Map the firmware window: one contiguous range at a fixed virtual base, whose
+ * physical base the Host chose, with 2 MiB leaves.
  *
- * device/linker.ld places every section at CONFIG_RAM_BASE, so every pointer
- * inside the firmware is that address; giving the image a non-identity
- * mapping would mean rewriting the linker script and the firmware's whole
- * address model.  The control window, URAM and the coherent window are
- * identity-mapped for the same reason - the firmware reaches them through
- * fixed constants in platform_regs.h and config.h.
+ *     pa = va - NPU_SERVICE_MMU_FW_VA_BASE + fw_pool_base
+ *
+ * The virtual base is not negotiable - device/linker.ld places every section
+ * at CONFIG_RAM_BASE, so every pointer inside the firmware is that address and
+ * changing it means rebuilding the firmware.  The physical base is free, and
+ * that is what removes the ordering constraint an identity mapping had: the
+ * whole window is installed here, at init, before BL1 exists, so where BL1's
+ * segments land inside it never matters.
+ *
+ * Nothing below 2 GiB is mapped - not the control window, not the BL0 ROM, not
+ * URAM.  The MMU bypasses that range before consulting a page table, so PTEs
+ * there would describe translations the hardware never performs.  This is also
+ * what retires the old exec-permission hazard on the ROM: BL0's wake-up from
+ * wfi is a bypassed fetch, not a translated one.
  */
-static int npu_mmu_map_fixed_apertures(npu_service_device_t *device,
+static int npu_mmu_map_firmware_window(npu_service_device_t *device,
                                        uint32_t cluster)
 {
-    uint32_t region_count = device->hal_info.memory_region_count;
-    uint32_t index;
-    int status;
+    struct npu_mmu *mmu = &device->mmu;
+    uint64_t offset;
+    int status = 0;
 
-    /*
-     * Control space: mailboxes, IRQ, the MMU's own register page, the
-     * coherent (atomic cache) window and the CLINT.  This stops below URAM
-     * at 0x800000; URAM comes from the HAL region list below, and widening
-     * this to cover it would make the two overlap and fail with -EEXIST.
-     *
-     * The BL0 ROM in the middle of it is the one place below URAM the Device
-     * fetches from, and it does so after translation is on: the MMU is
-     * activated before BL1 is loaded, so BL0's wake-up from wfi executes
-     * against these tables.  Without X here that fetch is an exec-permission
-     * fault redirected to a guard page.  (QEMU's CPU TLB caches the ROM page
-     * before activation and is not flushed by MMU register writes, which is
-     * the only reason the omission ever passed there.)
-     */
-    status = npu_service_mmu_map(device, cluster, 0, 0,
-                                 NPU_SERVICE_MMU_ROM_BASE,
-                                 NPU_SERVICE_MMU_READ |
-                                 NPU_SERVICE_MMU_WRITE);
-    if (status < 0)
-        return status;
-    status = npu_service_mmu_map(device, cluster, NPU_SERVICE_MMU_ROM_BASE,
-                                 NPU_SERVICE_MMU_ROM_BASE,
-                                 NPU_SERVICE_MMU_ROM_SIZE,
-                                 NPU_SERVICE_MMU_READ |
-                                 NPU_SERVICE_MMU_EXEC);
-    if (status < 0)
-        return status;
-    status = npu_service_mmu_map(device, cluster,
-                                 NPU_SERVICE_MMU_ROM_BASE +
-                                 NPU_SERVICE_MMU_ROM_SIZE,
-                                 NPU_SERVICE_MMU_ROM_BASE +
-                                 NPU_SERVICE_MMU_ROM_SIZE,
-                                 NPU_SERVICE_MMU_URAM_BASE -
-                                 NPU_SERVICE_MMU_ROM_BASE -
-                                 NPU_SERVICE_MMU_ROM_SIZE,
-                                 NPU_SERVICE_MMU_READ |
-                                 NPU_SERVICE_MMU_WRITE);
-    if (status < 0)
-        return status;
+    if (!mmu->fw_pool_size)
+        return -ENODEV;
+    /* 2 MiB leaves need both ends 2 MiB aligned.  The HAL aligns the pool base
+     * for exactly this; a size that is not a whole number of leaves would
+     * leave a tail this loop cannot express, so it is rejected rather than
+     * silently mapped short. */
+    if ((mmu->fw_pool_base & (NPU_SERVICE_MMU_LARGE_SIZE - 1U)) ||
+        (mmu->fw_pool_size & (NPU_SERVICE_MMU_LARGE_SIZE - 1U)))
+        return -EINVAL;
 
-    /*
-     * Everything else comes from the HAL's own region list rather than
-     * hardcoded constants, because the Normal region's size is configurable
-     * (--normal-memory-size-mib).  Hardcoding it would leave any allocation
-     * past the assumed end unmapped, and an unmapped address does not fail
-     * visibly here - it gets redirected at run time.
-     */
-    for (index = 0; index < region_count; ++index) {
-        npu_hal_memory_region_t region;
-        uint64_t base;
-        uint64_t size;
-        uint32_t prot = NPU_SERVICE_MMU_READ | NPU_SERVICE_MMU_WRITE;
+    pthread_mutex_lock(&mmu->lock);
+    for (offset = 0; offset < mmu->fw_pool_size;
+         offset += NPU_SERVICE_MMU_LARGE_SIZE) {
+        struct npu_mmu_table *table = 0;
+        uint32_t index = 0;
 
-        status = npu_hal_get_memory_region(device->hal, index, &region);
+        status = npu_mmu_walk_level(device, cluster,
+                                    NPU_SERVICE_MMU_FW_VA_BASE + offset, 1,
+                                    NPU_MMU_LARGE_LEVEL, &table, &index);
         if (status < 0)
-            return status;
-        /* Regions below URAM are already covered by the control window. */
-        if (region.base < NPU_SERVICE_MMU_URAM_BASE)
-            continue;
-        /* A Cluster- or Core-scoped region belongs only to its own Cluster. */
-        if (region.scope != NPU_HAL_MEMORY_DEVICE &&
-            region.cluster != cluster)
-            continue;
-        base = region.base & ~(uint64_t)DAYAN_MMU_PAGE_MASK;
-        size = (region.base + region.size + DAYAN_MMU_PAGE_MASK) &
-               ~(uint64_t)DAYAN_MMU_PAGE_MASK;
-        size -= base;
-        /* The firmware image lives in Normal memory and is executed. */
-        if (region.memory_class == NPU_HAL_MEMORY_NORMAL)
-            prot |= NPU_SERVICE_MMU_EXEC;
-        status = npu_service_mmu_map(device, cluster, base, base, size, prot);
-        /*
-         * Regions can repeat across Cores that share an aperture; an
-         * existing identical mapping is not an error here.
-         */
-        if (status == -EEXIST)
-            continue;
-        if (status < 0)
-            return status;
+            break;
+        if (table->entries[index] & NPU_MMU_PTE_V) {
+            status = -EEXIST;
+            break;
+        }
+        table->entries[index] =
+            npu_mmu_pte_make(mmu->fw_pool_base + offset,
+                             NPU_SERVICE_MMU_READ | NPU_SERVICE_MMU_WRITE |
+                             NPU_SERVICE_MMU_EXEC, 1);
+        status = npu_mmu_push_entry(device, cluster, table, index);
+        if (status < 0) {
+            table->entries[index] = 0;
+            break;
+        }
     }
-    return 0;
+    pthread_mutex_unlock(&mmu->lock);
+    /*
+     * No undo on failure, unlike npu_service_mmu_map().  A partial firmware
+     * window is not a leak to clean up: init fails, npu_service_mmu_fini()
+     * runs, and the tables go away whole.  Leaving the installed leaves in
+     * place also keeps the failure diagnosable.
+     */
+    return status;
 }
 
 /*
@@ -432,11 +426,11 @@ static int npu_mmu_enable_cluster(npu_service_device_t *device,
     if (status < 0)
         return status;
     /*
-     * Apertures before guard pages: the guard pages are allocated out of
-     * DRAM, which these mappings cover, and npu_mmu_guard_init() relies on
-     * that identity mapping already existing rather than adding its own.
+     * The window before the guard pages: the guard pages are allocated out of
+     * the firmware pool, and npu_mmu_guard_init() relies on this mapping
+     * already covering them rather than adding one of its own.
      */
-    status = npu_mmu_map_fixed_apertures(device, cluster);
+    status = npu_mmu_map_firmware_window(device, cluster);
     if (status < 0)
         return status;
     return npu_mmu_guard_init(device, cluster);
@@ -465,7 +459,6 @@ int npu_service_mmu_init(npu_service_device_t *device)
 
     pthread_mutex_init(&mmu->lock, 0);
     mmu->cluster_count = clusters;
-    mmu->va_next = NPU_MMU_VA_BASE;
     mmu->va_limit = NPU_MMU_VA_TOP;
 
     /*
@@ -475,6 +468,36 @@ int npu_service_mmu_init(npu_service_device_t *device)
      */
     if (!device->options.enable_mmu)
         return 0;
+
+    /*
+     * The firmware pool decides both the size of the window and where the
+     * Buffer virtual addresses can start, so it has to be known before any
+     * mapping is built.
+     *
+     * -ENOENT is refused rather than tolerated.  It means the Normal region
+     * could not be split, so the whole of it would be the firmware window -
+     * which puts every Buffer's physical pages inside the window and gives them
+     * a second, linear-offset virtual address.  That is precisely the aliasing
+     * the split exists to prevent: an out-of-bounds Buffer access would land on
+     * a legally mapped address instead of a guard page.  Refusing here turns an
+     * unusably small --normal-memory-size-mib into a startup error instead of a
+     * silently weaker memory model.
+     */
+    status = npu_hal_firmware_pool(device->hal, &mmu->fw_pool_base,
+                                   &mmu->fw_pool_size);
+    if (status < 0)
+        return status;
+    /*
+     * Buffer virtual addresses begin one 2 MiB sentinel above the top of the
+     * window, so an overrun off the end of the firmware window faults instead
+     * of sliding into Buffer space.  Deriving the base from the pool size,
+     * rather than fixing it at some round number, is what keeps the property
+     * that every physical page has exactly one virtual address.
+     */
+    mmu->va_next = NPU_SERVICE_MMU_FW_VA_BASE + mmu->fw_pool_size +
+                   NPU_SERVICE_MMU_VA_SENTINEL;
+    if (mmu->va_next >= mmu->va_limit)
+        return -ENOSPC;
 
     for (cluster = 0; cluster < clusters; ++cluster) {
         int present = 0;
@@ -554,7 +577,118 @@ out:
     free(mmu->root);
     mmu->clusters = 0;
     mmu->root = 0;
+    /*
+     * Every allocation out of the pool is gone, so the cursor has to go back to
+     * unset rather than keep pointing part-way down a pool nothing holds any
+     * more.  Otherwise a second init on the same device (the failure path here
+     * calls fini, and the tests reuse a device) would carry the old cursor and
+     * hand out pages the fresh pool has already given to the firmware.
+     */
+    mmu->pool_cursor = 0;
+    mmu->fw_pool_base = 0;
+    mmu->fw_pool_size = 0;
+    mmu->va_next = 0;
     pthread_mutex_destroy(&mmu->lock);
+}
+
+/* ---------------------------------------------------------------- */
+/* Firmware window address conversion                                */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Convert a firmware virtual address to the physical address it translates to.
+ *
+ * The firmware's own addresses are fixed by device/linker.ld at
+ * CONFIG_RAM_BASE, but the memory behind them is wherever the Host put the
+ * firmware pool, so anything the Host does by physical address - reserving a
+ * BL1 segment, copying an image in, reading a descriptor back - has to come
+ * through here.
+ *
+ * Returns -ENOTSUP with the address unchanged when the MMU is off, so callers
+ * can use the result unconditionally: with FixMap identity-mapping everything,
+ * the virtual address already is the physical one.
+ */
+int npu_service_mmu_fw_pa(npu_service_device_t *device, uint64_t va,
+                          uint64_t size, uint64_t *pa_out)
+{
+    struct npu_mmu *mmu;
+    uint64_t offset;
+
+    if (!device || !pa_out)
+        return -EINVAL;
+    mmu = &device->mmu;
+    if (!mmu->enabled) {
+        *pa_out = va;
+        return -ENOTSUP;
+    }
+    if (va < NPU_SERVICE_MMU_FW_VA_BASE)
+        return -EINVAL;
+    offset = va - NPU_SERVICE_MMU_FW_VA_BASE;
+    /* Refuse rather than clamp: a range that runs off the end of the window is
+     * a firmware image too big for the pool, and truncating the reservation
+     * would put the overflow somewhere the Device cannot reach at all. */
+    if (offset >= mmu->fw_pool_size || size > mmu->fw_pool_size - offset)
+        return -ERANGE;
+    *pa_out = mmu->fw_pool_base + offset;
+    return 0;
+}
+
+/*
+ * The address a Device Core must use to reach @allocation.
+ *
+ * This is the inverse of npu_service_mmu_fw_pa() and the one place a physical
+ * address becomes a Device-visible one.  It is deliberately not folded into
+ * npu_hal_memory_address(): two of that function's own callers
+ * (npu_hal_memory_write/read) hand its result to npu_hal_copy_to_address(),
+ * which is XDMA - a separate bus master that does not traverse the MMU and so
+ * must keep using physical addresses.  Converting inside the HAL would corrupt
+ * every Host-side read and write.
+ *
+ * Buffers are not handled here.  Their virtual addresses come from
+ * npu_service_mmu_reserve_va() and are recorded by the Server, because a
+ * Buffer's physical pages are outside the firmware window and have no
+ * arithmetic relation to its virtual address.
+ */
+int npu_service_mmu_device_address(npu_service_device_t *device,
+                                   const npu_hal_allocation_t *allocation,
+                                   npu_hal_core_t viewer,
+                                   uint64_t *address_out)
+{
+    struct npu_mmu *mmu;
+    npu_hal_allocation_info_t info;
+    uint64_t offset;
+    int status;
+
+    if (!device || !allocation || !address_out)
+        return -EINVAL;
+    status = npu_hal_memory_address(device->hal, allocation, viewer,
+                                   address_out);
+    if (status < 0)
+        return status;
+    mmu = &device->mmu;
+    if (!mmu->enabled)
+        return 0;
+    status = npu_hal_memory_info(device->hal, allocation, &info);
+    if (status < 0)
+        return status;
+    /*
+     * Only Normal memory is translated.  Coherent and URAM live below 2 GiB,
+     * which the MMU bypasses outright, so their addresses are already what the
+     * Device must use.
+     */
+    if (info.memory_class != NPU_HAL_MEMORY_NORMAL)
+        return 0;
+    /*
+     * A Buffer is outside the window by construction (the HAL allocates it
+     * from the other pool).  Reporting its physical address would be wrong,
+     * but silently returning a bogus virtual one would be worse, so say so.
+     */
+    if (*address_out < mmu->fw_pool_base ||
+        *address_out - mmu->fw_pool_base >= mmu->fw_pool_size)
+        return -EFAULT;
+    offset = *address_out - mmu->fw_pool_base;
+    *address_out = NPU_SERVICE_MMU_FW_VA_BASE + offset;
+    return 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -632,6 +766,22 @@ int npu_service_mmu_map(npu_service_device_t *device, uint32_t cluster,
     if (va > UINT64_MAX - size || pa > UINT64_MAX - size)
         return -EOVERFLOW;
     if ((pa + size - 1U) >> DAYAN_MMU_PA_BITS)
+        return -EINVAL;
+    /*
+     * Below 2 GiB the MMU bypasses the page table entirely, so a PTE there
+     * would never be consulted - a caller asking for one has the wrong address
+     * and would otherwise get a success it cannot use.
+     */
+    if (va < NPU_SERVICE_MMU_BYPASS_LIMIT)
+        return -EINVAL;
+    /*
+     * The firmware window is owned by npu_mmu_map_firmware_window() and mapped
+     * with 2 MiB leaves.  A 4 KiB mapping landing inside it would either
+     * collide with a large leaf or, worse, silently give a second virtual
+     * address to a physical page that already has one.
+     */
+    if (va < NPU_SERVICE_MMU_FW_VA_BASE + mmu->fw_pool_size &&
+        va + size > NPU_SERVICE_MMU_FW_VA_BASE)
         return -EINVAL;
 
     pthread_mutex_lock(&mmu->lock);
@@ -924,8 +1074,9 @@ static int npu_mmu_guard_init(npu_service_device_t *device, uint32_t cluster)
         npu_hal_allocation_t *allocation = 0;
         npu_hal_allocation_info_t info;
 
-        /* Also from the top-down pool, for the same reason page tables are:
-         * the firmware needs the bottom of Normal memory. */
+        /* From the firmware pool, like page tables: the Host has to be able
+         * to refill the page after a fault, and the Device reaches the
+         * redirect target through the same window. */
         status = npu_mmu_reserve_page(device, cluster, DAYAN_MMU_PAGE_SIZE,
                                       &allocation);
         if (status < 0)
@@ -948,12 +1099,12 @@ static int npu_mmu_guard_init(npu_service_device_t *device, uint32_t cluster)
         if (status < 0)
             return status;
         /*
-         * No mapping is installed here.  Guard pages come out of DRAM, which
-         * the fixed apertures already identity-map, so mapping them again
-         * would collide with -EEXIST.  Redirects are physical addresses
-         * substituted by the hardware and do not need a translation of their
-         * own; the identity mapping only matters so the Host and Device agree
-         * on where the page is.
+         * No mapping is installed here.  Guard pages come out of the firmware
+         * pool, which the window already covers, so mapping them again would
+         * collide with -EEXIST.  A redirect base is a physical address that
+         * the hardware substitutes for the whole master address and needs no
+         * translation of its own - what matters is that info.address is the
+         * physical address, which is what the HAL reports.
          */
     }
 

@@ -58,6 +58,8 @@ struct npu_hal {
     uint32_t backend;
     uint32_t cluster_count;
     uint32_t cores_per_cluster;
+    /* npu_hal_options_t::split_normal_memory; see normal_split_offset(). */
+    uint32_t split_normal;
     pthread_mutex_t irq_mutex;
     pthread_mutex_t memory_mutex;
     struct npu_hal_arena *arenas;

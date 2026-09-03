@@ -144,6 +144,16 @@ struct server_invocation {
     size_t slot_index;
     uint64_t resident;
     uint64_t cookie;
+    /*
+     * server_now_ms() of the first launch_query failure in the current run of
+     * them, or zero when the last query succeeded.  A query can fail while
+     * npu_service_status() still reports the Device healthy - a dropped RPC
+     * reply, a busy mailbox - and such a failure is retried.  Without a
+     * deadline a permanent one is retried forever: the invocation never
+     * becomes terminal, so it stays on the list, the command never completes
+     * and the client's wait never returns.
+     */
+    uint64_t query_failed_since;
     int64_t trap_status;
     uint32_t proc_id;
     uint32_t task_id[3];
@@ -215,7 +225,6 @@ struct server_command {
             uint64_t next_unit;
             uint64_t total_units;
             int64_t aggregate_status;
-            uint64_t cookie;
             char task_name[NPU_PROC_NAME_SIZE];
             struct server_launch_group *groups;
             struct server_invocation *invocations;
@@ -271,6 +280,18 @@ struct dayan_server {
     size_t next_slot;
     uint64_t next_id;
     uint64_t next_sequence;
+    /*
+     * Source of the cookies handed to the Device, one per invocation, starting
+     * at one so that zero stays "no task" as the Device's trap.c uses it.  It
+     * has to be the Server's own counter and not the client's launch cookie:
+     * the Device echoes the cookie back in trap and proc-exit records and
+     * server_device_trap() identifies the trapped invocation by it, so two
+     * clients that happened to choose the same launch cookie on the same hart
+     * would make that match ambiguous and the trap would terminate the wrong
+     * context's kernel family.  The client's cookie is reported back through
+     * server_event::cookie and never reaches the Device.
+     */
+    uint64_t next_cookie;
     struct server_core_slot *slots;
     size_t slot_count;
     struct server_session *sessions;

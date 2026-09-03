@@ -8,7 +8,7 @@ int runtime_transfer_enqueue(struct runtime_transfer_job *job)
 {
     npu_runtime_t *runtime;
 
-    if (!job || !job->context || !job->event || !job->size)
+    if (!job || !job->context || !job->event_id || !job->size)
         return -EINVAL;
     runtime = job->context->runtime;
     pthread_mutex_lock(&runtime->mutex);
@@ -53,7 +53,7 @@ void *runtime_data_worker(void *argument)
 
         memset(&grant, 0, sizeof(grant));
         status = runtime_data_call(runtime, NPU_IPC_TRANSFER_ACQUIRE,
-                                   job->event->id, 0, 0, &grant,
+                                   job->event_id, 0, 0, &grant,
                                    sizeof(grant));
         if (status == 0) {
             status = npu_hal_data_plane_transfer(runtime->data_plane,
@@ -135,7 +135,7 @@ static int submit_host_transfer(npu_stream_t *stream,
     if (status < 0)
         goto fail_submitted;
     job->context = stream->context;
-    job->event = event;
+    job->event_id = id;
     job->host_buffer = host_buffer;
     job->size = size;
     status = runtime_transfer_enqueue(job);

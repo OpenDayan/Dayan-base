@@ -606,6 +606,34 @@ static int context_collectable(const struct server_context *context)
     return 1;
 }
 
+/*
+ * Give up a Buffer's backing memory.  A mapped Buffer cannot simply be freed:
+ * the Device may still translate its virtual address until a TLB flush happens,
+ * and the flush can only be issued when no launch is in flight, so the PTEs are
+ * cleared and the memory parked on the deferred-reclaim list.  Freeing it here
+ * instead would let a later allocation reuse memory a stale entry still points
+ * at - which is why every path that drops a Buffer comes through here, not just
+ * the explicit destroy.
+ */
+static int buffer_release_backing_locked(dayan_server_t *server,
+                                         struct server_buffer *buffer)
+{
+    uint32_t cluster;
+    int status;
+
+    if (!buffer->va)
+        return npu_hal_memory_free(server->hal, buffer->allocation);
+    for (cluster = 0; cluster < server->hal_info.cluster_count; ++cluster) {
+        status = npu_service_mmu_unmap(server->device, cluster, buffer->va,
+                                       buffer->va_size);
+        if (status < 0)
+            return status;
+    }
+    npu_service_mmu_release_va(server->device, buffer->va, buffer->va_size);
+    return npu_service_mmu_defer_reclaim(server->device, 0,
+                                         buffer->allocation);
+}
+
 static void free_context_locked(dayan_server_t *server,
                                 struct server_context *context)
 {
@@ -634,8 +662,7 @@ static void free_context_locked(dayan_server_t *server,
     while (buffer) {
         struct server_buffer *next = buffer->next;
 
-        (void)npu_hal_memory_free(server->hal,
-                                  buffer->allocation);
+        (void)buffer_release_backing_locked(server, buffer);
         free(buffer);
         buffer = next;
     }
@@ -832,6 +859,16 @@ int dayan_server_create(dayan_server_t **server_out,
     condition_initialized = 1;
     stage = "opening the HAL";
     server_log("startup", "opening HAL");
+    /*
+     * The physical pool split exists only to keep Buffer pages out of the
+     * firmware window, so it is the MMU's requirement and nobody else's.  Derive
+     * it here rather than making it a second flag a caller could set
+     * inconsistently: a split without the MMU costs every firmware usage the
+     * Buffer pool for nothing, and the MMU without a split aliases Buffers into
+     * the window.
+     */
+    server->options.hal.split_normal_memory =
+        server->options.service.enable_mmu ? 1U : 0U;
     status = npu_hal_open(&server->hal, &server->options.hal);
     if (status < 0)
         goto fail;
@@ -1172,6 +1209,12 @@ static int context_create_locked(dayan_server_t *server,
  * is decided by npu_hal_memory_visible() at scheduling time, not by which
  * page tables happen to contain it, so mapping it everywhere keeps the two
  * from disagreeing.
+ *
+ * A Coherent buffer gets no virtual address.  Coherent memory lives below
+ * 2 GiB, which the MMU bypasses before it consults a page table, so a PTE
+ * there would describe a translation the hardware never performs - and giving
+ * the buffer a va would then make the scheduler hand the Device an address
+ * nothing maps.
  */
 static int buffer_map_locked(dayan_server_t *server,
                              struct server_buffer *buffer, uint32_t flags)
@@ -1188,6 +1231,8 @@ static int buffer_map_locked(dayan_server_t *server,
     status = npu_hal_memory_info(server->hal, buffer->allocation, &info);
     if (status < 0)
         return status;
+    if (info.memory_class != NPU_HAL_MEMORY_NORMAL)
+        return 0;
     size = (info.size + NPU_SERVICE_MMU_PAGE_MASK) &
            ~(uint64_t)NPU_SERVICE_MMU_PAGE_MASK;
     status = npu_service_mmu_reserve_va(server->device, size, &va);
@@ -1285,31 +1330,7 @@ static int buffer_destroy_locked(dayan_server_t *server,
         return -ENOENT;
     if (buffer->references)
         return -EBUSY;
-    if (buffer->va) {
-        uint32_t cluster;
-
-        /*
-         * Clear the PTEs everywhere, then hand the backing memory to the
-         * deferred-reclaim list rather than freeing it here.  Until a TLB
-         * flush happens the Device may still translate these addresses, and
-         * the flush can only be issued when no launch is in flight - freeing
-         * now would let a later allocation reuse memory a stale entry still
-         * points at.
-         */
-        for (cluster = 0; cluster < server->hal_info.cluster_count;
-             ++cluster) {
-            status = npu_service_mmu_unmap(server->device, cluster,
-                                           buffer->va, buffer->va_size);
-            if (status < 0)
-                return status;
-        }
-        npu_service_mmu_release_va(server->device, buffer->va,
-                                   buffer->va_size);
-        status = npu_service_mmu_defer_reclaim(server->device, 0,
-                                               buffer->allocation);
-    } else {
-        status = npu_hal_memory_free(server->hal, buffer->allocation);
-    }
+    status = buffer_release_backing_locked(server, buffer);
     if (status < 0)
         return status;
     link = &buffer->context->buffers;
@@ -1752,7 +1773,6 @@ static int kernel_launch_locked(dayan_server_t *server,
     command->data.launch.config.task_dim.z = request->task_z;
     command->data.launch.config.task_mode = (NPUTaskMode)request->task_mode;
     command->data.launch.total_units = total_units;
-    command->data.launch.cookie = request->cookie;
     memcpy(command->data.launch.task_name, request->task_name,
            sizeof(command->data.launch.task_name));
     for (index = 0; index < request->argument_count; ++index) {

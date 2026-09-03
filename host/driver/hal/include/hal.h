@@ -77,9 +77,27 @@ int npu_hal_get_info(npu_hal_t *hal, npu_hal_info_t *info);
 int npu_hal_get_memory_region(npu_hal_t *hal, uint32_t index,
                               npu_hal_memory_region_t *region);
 int npu_hal_core_valid(npu_hal_t *hal, npu_hal_core_t core);
+/*
+ * Total size of the regions of @memory_class visible to @viewer.  This is the
+ * installed memory, not what any one allocation can reach: with the Normal
+ * region split (see npu_hal_firmware_pool()) no single request can use all of
+ * it, so this is a topology figure and not an allocation budget.
+ */
 int npu_hal_memory_capacity(npu_hal_t *hal,
                             npu_hal_memory_class_t memory_class,
                             npu_hal_core_t viewer, uint64_t *capacity_out);
+/*
+ * The device-visible Normal region is split into a firmware pool (low, at the
+ * region base, a 2 MiB multiple) and a Buffer pool above it, when
+ * npu_hal_options_t::split_normal_memory asked for it.  Reports the firmware
+ * pool so the MMU can map it as one linear-offset window.  Returns -ENODEV when
+ * the split was not requested, and -ENOENT when it was but the region cannot be
+ * split, in which case the whole region is reported: mapping all of it is
+ * possible but leaves Buffer pages inside the window, so a caller that needs
+ * the pools disjoint has to treat -ENOENT as fatal.
+ */
+int npu_hal_firmware_pool(npu_hal_t *hal, uint64_t *base_out,
+                          uint64_t *size_out);
 
 /* Raw address access is reserved for BL1/RPC implementation inside Service. */
 int npu_hal_copy_to_address(npu_hal_t *hal, uint32_t cluster,

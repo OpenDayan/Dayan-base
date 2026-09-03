@@ -486,10 +486,107 @@ int main(void)
     options.memory_regions = 0;
     options.memory_region_count = 0;
     options.normal_memory_size_mib = 4096;
+    /*
+     * The split costs every non-Buffer usage the Buffer pool it can no longer
+     * allocate from, and only the MMU needs it, so it is off unless asked for.
+     * With it off the region stays whole and there is no pool to report.
+     */
+    assert(npu_hal_open(&hal, &options) == 0);
+    {
+        uint64_t pool_base = 0;
+        uint64_t pool_size = 0;
+        npu_hal_allocation_t *unsplit = 0;
+        uint64_t unsplit_address = 0;
+
+        assert(npu_hal_firmware_pool(hal, &pool_base, &pool_size) ==
+               -ENODEV);
+        npu_hal_memory_request_init(&request);
+        request.memory_class = NPU_HAL_MEMORY_NORMAL;
+        request.scope = NPU_HAL_MEMORY_DEVICE;
+        request.size = 0x1000;
+        request.alignment = 0x1000;
+        /* A firmware usage may take the region base, which under the split
+         * belongs to the firmware pool and above it to Buffers. */
+        request.usage = NPU_HAL_MEMORY_SHARED;
+        assert(npu_hal_memory_alloc(hal, &request, &unsplit) == 0);
+        assert(npu_hal_memory_address(hal, unsplit, core1,
+                                      &unsplit_address) == 0);
+        assert(unsplit_address == UINT64_C(0x80000000));
+        assert(npu_hal_memory_free(hal, unsplit) == 0);
+    }
+    npu_hal_close(hal);
+    hal = 0;
+    options.split_normal_memory = 1;
     assert(npu_hal_open(&hal, &options) == 0);
     assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_NORMAL, core1,
                                    &capacity) == 0);
+    /* Capacity is the installed region, not what one request can reach: the
+     * split means no single allocation can use all of it. */
     assert(capacity == UINT64_C(0x100000000));
+    /*
+     * The firmware pool is capped, not proportional: 4 GiB of Normal memory
+     * still leaves the firmware 64 MiB and gives the rest to Buffers.  A
+     * proportional split would strand 2 GiB behind a firmware that cannot
+     * address past its own linker window.
+     *
+     * It sits at the region base, so the firmware's physical address does not
+     * move when this option does.  That is what lets server/mmu.c map it with
+     * an offset of zero in the default configuration.
+     */
+    {
+        uint64_t pool_base = 0;
+        uint64_t pool_size = 0;
+        npu_hal_allocation_t *fw = 0;
+        npu_hal_allocation_t *buf = 0;
+        uint64_t fw_address = 0;
+        uint64_t buf_address = 0;
+
+        assert(npu_hal_firmware_pool(hal, &pool_base, &pool_size) == 0);
+        assert(pool_base == UINT64_C(0x80000000));
+        assert(pool_size == UINT64_C(0x04000000));
+
+        npu_hal_memory_request_init(&request);
+        request.memory_class = NPU_HAL_MEMORY_NORMAL;
+        request.scope = NPU_HAL_MEMORY_DEVICE;
+        request.size = 0x1000;
+        request.alignment = 0x1000;
+        /* Firmware-owned memory comes from the pool, Buffers from above it. */
+        request.usage = NPU_HAL_MEMORY_SHARED;
+        assert(npu_hal_memory_alloc(hal, &request, &fw) == 0);
+        assert(npu_hal_memory_address(hal, fw, core1, &fw_address) == 0);
+        assert(fw_address >= pool_base &&
+               fw_address < pool_base + pool_size);
+        request.usage = NPU_HAL_MEMORY_BUFFER;
+        request.owner = 1;
+        assert(npu_hal_memory_alloc(hal, &request, &buf) == 0);
+        assert(npu_hal_memory_address(hal, buf, core1, &buf_address) == 0);
+        assert(buf_address >= pool_base + pool_size);
+        assert(npu_hal_memory_free(hal, buf) == 0);
+        assert(npu_hal_memory_free(hal, fw) == 0);
+
+        /*
+         * A fixed-address reservation is confined to its usage's pool too.
+         * Bounds-checking against the whole region instead would let firmware
+         * memory be pinned inside the Buffer pool, or a range straddle the
+         * boundary, and the disjointness would hold for alloc but not reserve.
+         */
+        request.usage = NPU_HAL_MEMORY_SHARED;
+        request.owner = UINT32_MAX;
+        request.fixed_address = pool_base + pool_size;
+        assert(npu_hal_memory_reserve(hal, &request, &fw) == -ERANGE);
+        request.fixed_address = pool_base + pool_size - 0x1000;
+        assert(npu_hal_memory_reserve(hal, &request, &fw) == 0);
+        assert(npu_hal_memory_free(hal, fw) == 0);
+        request.usage = NPU_HAL_MEMORY_BUFFER;
+        request.owner = 1;
+        request.fixed_address = pool_base;
+        assert(npu_hal_memory_reserve(hal, &request, &buf) == -ERANGE);
+        request.fixed_address = pool_base + pool_size;
+        assert(npu_hal_memory_reserve(hal, &request, &buf) == 0);
+        assert(npu_hal_memory_free(hal, buf) == 0);
+        request.fixed_address = 0;
+        request.owner = 0;
+    }
     assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM, core1,
                                    &capacity) == 0);
     assert(capacity == 0x180000);
@@ -523,6 +620,19 @@ int main(void)
     npu_hal_close(hal);
     hal = 0;
     options.normal_memory_size_mib = 0;
+    assert(npu_hal_open(&hal, &options) == 0);
+    {
+        /* A region smaller than twice the cap is halved, so the firmware still
+         * gets room and Buffers still get a pool. */
+        uint64_t pool_base = 0;
+        uint64_t pool_size = 0;
+
+        assert(npu_hal_firmware_pool(hal, &pool_base, &pool_size) == 0);
+        assert(pool_base == UINT64_C(0x80000000));
+        assert(pool_size == UINT64_C(0x02000000));
+    }
+    npu_hal_close(hal);
+    hal = 0;
     options.memory_regions = overlapping_regions;
     options.memory_region_count =
         sizeof(overlapping_regions) / sizeof(overlapping_regions[0]);

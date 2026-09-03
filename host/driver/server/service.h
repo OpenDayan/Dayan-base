@@ -233,10 +233,37 @@ const npu_service_options_t *npu_service_get_options(
 #define NPU_SERVICE_MMU_WRITE       (1U << 1)
 #define NPU_SERVICE_MMU_EXEC        (1U << 2)
 
-/* Mapping granularity; only 4 KiB pages are used. */
+/* Buffer mapping granularity.  The firmware window uses 2 MiB leaves, but
+ * that is internal to the page-table manager; everything mapped through this
+ * API is 4 KiB. */
 #define NPU_SERVICE_MMU_PAGE_SIZE   UINT64_C(0x1000)
 #define NPU_SERVICE_MMU_PAGE_MASK   UINT64_C(0xfff)
 
+/*
+ * Physical address behind a firmware virtual address.  The firmware's
+ * addresses are fixed by its linker script; the memory behind them is wherever
+ * the Host placed the firmware pool, so any Host access by address has to be
+ * converted here first.
+ *
+ * Returns -ENOTSUP with *pa_out = va when the MMU is off (FixMap makes the two
+ * identical), and -ERANGE when the range does not fit inside the window.
+ */
+int npu_service_mmu_fw_pa(npu_service_device_t *device, uint64_t va,
+                          uint64_t size, uint64_t *pa_out);
+/*
+ * The address a Device Core must use to reach @allocation - the inverse of
+ * npu_service_mmu_fw_pa().  Use this, not npu_hal_memory_address(), wherever
+ * an address is about to be handed to the Device; the HAL reports physical
+ * addresses because XDMA needs them.
+ *
+ * Returns -EFAULT for a Normal allocation outside the firmware window: that is
+ * a Buffer, whose virtual address comes from npu_service_mmu_reserve_va() and
+ * cannot be derived arithmetically.
+ */
+int npu_service_mmu_device_address(npu_service_device_t *device,
+                                   const npu_hal_allocation_t *allocation,
+                                   npu_hal_core_t viewer,
+                                   uint64_t *address_out);
 int npu_service_mmu_reserve_va(npu_service_device_t *device, uint64_t size,
                                uint64_t *base_out);
 void npu_service_mmu_release_va(npu_service_device_t *device, uint64_t base,

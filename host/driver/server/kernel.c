@@ -1033,8 +1033,8 @@ static int flush_dcache_core(npu_service_device_t *runtime,
         runtime, core, sizeof(request), &allocation);
     if (status < 0)
         return status;
-    status = npu_hal_memory_address(runtime->hal, allocation, core,
-                                    &request_address);
+    status = npu_service_mmu_device_address(runtime, allocation, core,
+                                            &request_address);
     if (status < 0 || request_address > RPC_COMMAND_ARG_MASK) {
         status = status < 0 ? status : -EOVERFLOW;
         goto out;
@@ -1174,7 +1174,8 @@ static int load_kernel_module(npu_service_device_t *runtime,
         UINT32_MAX, image_size, alignment, &allocation);
     if (status < 0)
         goto fail;
-    status = npu_hal_memory_address(runtime->hal, allocation, target, &base);
+    status = npu_service_mmu_device_address(runtime, allocation, target,
+                                            &base);
     if (status < 0)
         goto fail;
     for (index = 1; index < elf.header.e_shnum; ++index) {

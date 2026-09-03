@@ -327,7 +327,6 @@ int npu_buffer_create_view(npu_buffer_t *buffer, uint64_t offset,
                            uint64_t size, npu_buffer_t **view_out)
 {
     struct npu_buffer *view;
-    struct npu_buffer *root;
 
     if (!buffer || !view_out || !runtime_context_valid(buffer->context) ||
         !size || offset > buffer->size || size > buffer->size - offset)
@@ -336,16 +335,21 @@ int npu_buffer_create_view(npu_buffer_t *buffer, uint64_t offset,
     view = calloc(1, sizeof(*view));
     if (!view)
         return -ENOMEM;
-    root = buffer->parent ? buffer->parent : buffer;
     view->context = buffer->context;
-    view->id = root->id;
+    /*
+     * @buffer is either the root or a view of it, and a view already carries
+     * the root's Server id and an absolute @base_offset, so both cases flatten
+     * the same way.  Nothing walks to the root: it may already have been
+     * destroyed, which is exactly what made the old parent pointer unsafe.
+     */
+    view->id = buffer->id;
     view->size = size;
     view->base_offset = buffer->base_offset + offset;
     if (view->base_offset < buffer->base_offset) {
         free(view);
         return -EOVERFLOW;
     }
-    view->parent = root;
+    view->is_view = 1;
     *view_out = view;
     return 0;
 }
@@ -358,7 +362,7 @@ int npu_buffer_destroy(npu_buffer_t *buffer)
 
     if (!buffer || !runtime_context_valid(buffer->context))
         return -EINVAL;
-    if (buffer->parent) {
+    if (buffer->is_view) {
         free(buffer);
         return 0;
     }

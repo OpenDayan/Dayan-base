@@ -29,6 +29,14 @@ struct load_segment {
     uint64_t file_offset;
     uint64_t file_size;
     uint64_t memory_size;
+    /*
+     * Where the segment actually goes.  @address is what the ELF asks for and
+     * what the Device will use, which under the MMU is a virtual address in
+     * the firmware window; @physical is the memory behind it, and is what every
+     * Host-side reservation and copy must use.  They are equal when the MMU is
+     * off.
+     */
+    uint64_t physical;
     uint32_t flags;
 };
 
@@ -51,6 +59,25 @@ static int segment_compare(const void *left, const void *right)
     const struct load_segment *b = right;
 
     return a->address < b->address ? -1 : a->address != b->address;
+}
+
+/*
+ * An ELF program header carries firmware link addresses, which are virtual once
+ * the MMU is on.  npu_hal_address_valid() answers about physical addresses, so
+ * the link address has to be put through the firmware window first; checking it
+ * raw only agrees with reality while the pool offset happens to be zero.
+ */
+static int segment_address_valid(npu_service_device_t *device,
+                                 npu_hal_core_t viewer, uint64_t address,
+                                 uint64_t size)
+{
+    uint64_t physical = 0;
+    int status = npu_service_mmu_fw_pa(device, address, size, &physical);
+
+    /* -ENOTSUP is the MMU-off case and has already set physical = address. */
+    if (status < 0 && status != -ENOTSUP)
+        return 0;
+    return npu_hal_address_valid(device->hal, viewer, physical, size);
 }
 
 static int parse_segments(npu_service_device_t *device, npu_hal_core_t viewer,
@@ -94,7 +121,7 @@ static int parse_segments(npu_service_device_t *device, npu_hal_core_t viewer,
             program.p_offset > size ||
             program.p_filesz > size - program.p_offset ||
             program.p_vaddr != program.p_paddr ||
-            !npu_hal_address_valid(device->hal, viewer, program.p_paddr,
+            !segment_address_valid(device, viewer, program.p_paddr,
                                    program.p_memsz) ||
             (alignment > 1U &&
              ((alignment & (alignment - 1U)) ||
@@ -170,7 +197,7 @@ static int reserve_segment(npu_service_device_t *device, uint32_t cluster,
     request.owner = UINT32_MAX;
     request.size = segment->memory_size;
     request.alignment = 1;
-    request.fixed_address = segment->address;
+    request.fixed_address = segment->physical;
     for (pass = 0; pass < 2; ++pass) {
         uint32_t wanted_scope = pass == 0 ? NPU_HAL_MEMORY_CLUSTER :
                                             NPU_HAL_MEMORY_DEVICE;
@@ -184,11 +211,11 @@ static int reserve_segment(npu_service_device_t *device, uint32_t cluster,
                 region.scope != wanted_scope ||
                 (wanted_scope == NPU_HAL_MEMORY_CLUSTER &&
                  region.cluster != cluster) ||
-                !region_contains(&region, segment->address,
+                !region_contains(&region, segment->physical,
                                  segment->memory_size))
                 continue;
             if (wanted_scope == NPU_HAL_MEMORY_DEVICE &&
-                find_global_segment(device, segment->address,
+                find_global_segment(device, segment->physical,
                                     segment->memory_size))
                 return 0;
             request.scope = wanted_scope;
@@ -209,7 +236,7 @@ static int reserve_segment(npu_service_device_t *device, uint32_t cluster,
             tracking->scope = wanted_scope;
             tracking->cluster = wanted_scope == NPU_HAL_MEMORY_DEVICE ?
                 NPU_HAL_ANY_CLUSTER : cluster;
-            tracking->address = segment->address;
+            tracking->address = segment->physical;
             tracking->size = segment->memory_size;
             tracking->next = device->firmware_allocations;
             device->firmware_allocations = tracking;
@@ -217,6 +244,31 @@ static int reserve_segment(npu_service_device_t *device, uint32_t cluster,
         }
     }
     return status;
+}
+
+/*
+ * Fill in @physical for every segment.  The firmware window is mapped in full
+ * at init, so this is pure arithmetic - no allocation and no ordering
+ * requirement against the mapping itself.
+ */
+static int resolve_segment_addresses(npu_service_device_t *device,
+                                     struct load_segment *segments,
+                                     size_t count)
+{
+    size_t index;
+
+    for (index = 0; index < count; ++index) {
+        uint64_t physical = 0;
+        int status = npu_service_mmu_fw_pa(device, segments[index].address,
+                                          segments[index].memory_size,
+                                          &physical);
+
+        /* -ENOTSUP is the MMU-off case and has already set physical = va. */
+        if (status < 0 && status != -ENOTSUP)
+            return status;
+        segments[index].physical = physical;
+    }
+    return 0;
 }
 
 static void rollback_reservations(
@@ -248,7 +300,7 @@ static int load_segments(npu_service_device_t *device, uint32_t cluster,
 
         if (segments[index].file_size)
             status = npu_hal_copy_to_address(
-                device->hal, cluster, segments[index].address,
+                device->hal, cluster, segments[index].physical,
                 image + segments[index].file_offset,
                 (size_t)segments[index].file_size);
         while (status == 0 && zeroed < segments[index].memory_size) {
@@ -257,7 +309,7 @@ static int load_segments(npu_service_device_t *device, uint32_t cluster,
                                                    ELF_ZERO_CHUNK;
 
             status = npu_hal_copy_to_address(
-                device->hal, cluster, segments[index].address + zeroed,
+                device->hal, cluster, segments[index].physical + zeroed,
                 zeros, chunk);
             zeroed += chunk;
         }
@@ -478,6 +530,10 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
         goto out;
     stage = "parking the running BL1 in bootrom";
     status = halt_running_bl1(device, cluster, valid_mask, ready_mask);
+    if (status < 0)
+        goto out;
+    stage = "resolving BL1 segment physical addresses";
+    status = resolve_segment_addresses(device, segments, segment_count);
     if (status < 0)
         goto out;
     previous_head = device->firmware_allocations;

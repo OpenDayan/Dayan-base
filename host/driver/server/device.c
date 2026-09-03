@@ -858,6 +858,25 @@ static int tensor_context_valid(uint64_t value)
     return !(value >> 56) && dayan_context_fields_valid(&fields);
 }
 
+/*
+ * A kernel entry point is an address in the Device's own space - a firmware
+ * virtual address once the MMU is on - so it has to go through the firmware
+ * window before npu_hal_address_valid(), which answers about physical
+ * addresses.  With a zero pool offset the two agree, which is why checking the
+ * raw value looked correct.
+ */
+static int entry_address_valid(npu_service_device_t *device,
+                               npu_hal_core_t target, uint64_t entry)
+{
+    uint64_t physical = 0;
+    int status = npu_service_mmu_fw_pa(device, entry, 2, &physical);
+
+    /* -ENOTSUP is the MMU-off case and has already set physical = entry. */
+    if (status < 0 && status != -ENOTSUP)
+        return 0;
+    return npu_hal_address_valid(device->hal, target, physical, 2);
+}
+
 static int proc_name_valid(const char *name)
 {
     return name && name[0] &&
@@ -1282,7 +1301,7 @@ int npu_service_launch(npu_service_device_t *device,
         desc->resource_reserved || !tensor_context_valid(desc->tensor_context) ||
         !proc_name_valid(desc->name) ||
         !task_valid(desc) ||
-        !npu_hal_address_valid(device->hal, desc->target, desc->entry, 2))
+        !entry_address_valid(device, desc->target, desc->entry))
         return -EINVAL;
     *launch_out = 0;
     pthread_mutex_lock(&device->mutex);
@@ -1306,8 +1325,8 @@ int npu_service_launch(npu_service_device_t *device,
         device, desc->target, sizeof(request), &allocation);
     if (status < 0)
         goto fail;
-    status = npu_hal_memory_address(device->hal, allocation, desc->target,
-                                    &request_address);
+    status = npu_service_mmu_device_address(device, allocation, desc->target,
+                                            &request_address);
     if (status < 0 || request_address > RPC_COMMAND_ARG_MASK) {
         status = status < 0 ? status : -EOVERFLOW;
         goto fail;
@@ -1657,8 +1676,8 @@ int npu_service_rpc_ps(npu_service_device_t *device, npu_hal_core_t target,
         device, target, sizeof(snapshot), &allocation);
     if (status < 0)
         return status;
-    status = npu_hal_memory_address(device->hal, allocation, target,
-                                    &address);
+    status = npu_service_mmu_device_address(device, allocation, target,
+                                            &address);
     if (status < 0 || address > RPC_COMMAND_ARG_MASK) {
         status = status < 0 ? status : -EOVERFLOW;
         goto out;
@@ -1739,8 +1758,8 @@ static int npu_service_rpc_kill_timeout(
         device, target, sizeof(result), &allocation);
     if (status < 0)
         return status;
-    status = npu_hal_memory_address(device->hal, allocation, target,
-                                    &address);
+    status = npu_service_mmu_device_address(device, allocation, target,
+                                            &address);
     if (status < 0 || address > RPC_COMMAND_ARG_MASK) {
         status = status < 0 ? status : -EOVERFLOW;
         goto out;

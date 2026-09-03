@@ -13,9 +13,26 @@
 #define SERVER_SHARED_RESOURCE_SIZE UINT64_C(16)
 #define SERVER_URAM_ALIGNMENT       DAYAN_CONTEXT_URAM_GRANULE
 #define SERVER_TRAP_KILL_TIMEOUT_MS 30000U
+/*
+ * How long launch_query may keep failing on a Device that still reports itself
+ * healthy before the invocation is given up on.  Generous, because the retry
+ * is the normal cure for a transient RPC failure; finite, because nothing else
+ * ever ends the retry loop.
+ */
+#define SERVER_LAUNCH_QUERY_TIMEOUT_MS 30000U
 
 static int calculate_shared_size(const struct server_command *command,
                                  uint64_t *size_out);
+
+/* Monotonic, so a wall-clock step cannot shorten or extend a deadline. */
+static uint64_t server_now_ms(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
 
 static int event_terminal(const struct server_event *event)
 {
@@ -853,7 +870,7 @@ struct dispatch_result {
 static struct dispatch_result dispatch_group(
     dayan_server_t *server, struct server_command *command,
     const size_t *slots, const struct server_proc_resources *resources,
-    size_t count, uint64_t unit)
+    size_t count, uint64_t unit, uint64_t cookie)
 {
     const struct npu_package_kernel *metadata =
         command->data.launch.kernel->metadata;
@@ -938,7 +955,7 @@ static struct dispatch_result dispatch_group(
         desc.task_dim[2] = command->data.launch.config.task_dim.z;
         desc.task_mode = (uint32_t)command->data.launch.config.task_mode;
         unit_task_ids(command, unit, (uint32_t)lane, desc.task_id);
-        desc.cookie = command->data.launch.cookie + unit * count + lane;
+        desc.cookie = cookie + lane;
         status = fill_launch_arguments(server, command, target, &desc);
         if (status == 0)
             status = npu_service_launch(server->device, &desc,
@@ -1149,7 +1166,7 @@ static int handle_simple_action(dayan_server_t *server,
 static struct server_command *find_launch_to_dispatch_locked(
     dayan_server_t *server, size_t selected[4],
     struct server_proc_resources resources[4], size_t *count_out,
-    uint64_t *unit_out)
+    uint64_t *unit_out, uint64_t *cookie_out)
 {
     struct server_session *session;
 
@@ -1180,10 +1197,24 @@ static struct server_command *find_launch_to_dispatch_locked(
                         continue;
                     *count_out = 4;
                 }
-                *unit_out = command->data.launch.next_unit++;
+                /*
+                 * Claim the unit only once its slots are actually reserved.
+                 * Advancing next_unit first and then bailing out retires a
+                 * work unit that nothing ever dispatched, and because the
+                 * completion check below is on next_unit alone the launch then
+                 * reports success with that unit's output never written.
+                 */
                 if (reserve_slots_locked(server, command, selected,
                                          *count_out, resources) < 0)
                     continue;
+                *unit_out = command->data.launch.next_unit++;
+                /*
+                 * Reserve this group's Device cookies under the mutex, since
+                 * dispatch_group() runs with it dropped.  They must be unique
+                 * across the whole Server; see dayan_server::next_cookie.
+                 */
+                *cookie_out = server->next_cookie + 1U;
+                server->next_cookie += *count_out;
                 command->dispatching = 1;
                 command->running = 1;
                 command->event->state = NPU_EVENT_RUNNING;
@@ -1302,6 +1333,7 @@ static int poll_invocation(dayan_server_t *server,
     npu_service_kill_result_t kill_result;
     npu_hal_core_t target = server->slots[invocation->slot_index].target;
     uint32_t root_proc_id = invocation->proc_id;
+    uint64_t query_failed_since = invocation->query_failed_since;
     int64_t trap_status = invocation->trap_status;
     int kill_attempted = trap_status < 0 && !invocation->trap_handled &&
                          root_proc_id;
@@ -1344,18 +1376,43 @@ static int poll_invocation(dayan_server_t *server,
         status = npu_service_launch_release(invocation->launch);
         if (status < 0)
             completion = status;
-    } else if (status < 0 && npu_service_status(server->device) < 0) {
-        int release_status;
+        query_failed_since = 0;
+    } else if (!terminal && status < 0) {
+        /*
+         * A dead Device is terminal at once.  On a live one the query failure
+         * is presumed transient and retried, but only for as long as the
+         * deadline: an error that never clears would otherwise be retried
+         * forever, leaving the invocation non-terminal and the Host launch
+         * waiting on it with nothing left to make progress.
+         */
+        uint64_t now = server_now_ms();
+        int give_up = npu_service_status(server->device) < 0;
 
-        terminal = 1;
-        completion = status;
-        release_status = npu_service_launch_abandon(invocation->launch);
-        if (release_status < 0)
-            completion = release_status;
+        if (!query_failed_since)
+            query_failed_since = now;
+        else if (now - query_failed_since >=
+                 SERVER_LAUNCH_QUERY_TIMEOUT_MS)
+            give_up = 1;
+        if (give_up) {
+            int release_status;
+
+            fprintf(stderr,
+                    "dayan_server: launch query failed cluster=%u core=%u "
+                    "root_proc=%u status=%d; abandoning invocation\n",
+                    target.cluster, target.core, root_proc_id, status);
+            terminal = 1;
+            completion = status;
+            release_status = npu_service_launch_abandon(invocation->launch);
+            if (release_status < 0)
+                completion = release_status;
+        }
+    } else if (status == 0) {
+        query_failed_since = 0;
     }
     pthread_mutex_lock(&server->mutex);
     command->dispatching = 0;
     invocation->polling = 0;
+    invocation->query_failed_since = query_failed_since;
     if (kill_attempted)
         invocation->trap_handled = 1;
     if (status == 0 && info.proc_id) {
@@ -1432,6 +1489,7 @@ void *dayan_scheduler_main(void *argument)
         struct server_proc_resources resources[4];
         size_t count;
         uint64_t unit;
+        uint64_t cookie;
         int progressed = 0;
 
         while ((command = find_simple_action_locked(server)) != 0) {
@@ -1444,13 +1502,13 @@ void *dayan_scheduler_main(void *argument)
         if (server->stop && !server_has_pending_locked(server))
             break;
         command = server->stop ? 0 : find_launch_to_dispatch_locked(
-            server, selected, resources, &count, &unit);
+            server, selected, resources, &count, &unit, &cookie);
         if (command) {
             struct dispatch_result result;
 
             pthread_mutex_unlock(&server->mutex);
             result = dispatch_group(server, command, selected, resources,
-                                    count, unit);
+                                    count, unit, cookie);
             pthread_mutex_lock(&server->mutex);
             merge_dispatch_result_locked(server, command, selected, resources,
                                          count, result);
