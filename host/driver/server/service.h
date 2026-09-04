@@ -178,7 +178,7 @@ int npu_service_kernel_resolve(npu_service_device_t *device,
 int npu_service_kernel_forget(npu_service_device_t *device,
                               const void *object, size_t object_size);
 
-/* Queues PROC_CREATE on the target Core; query/wait observes submission. */
+/* Queues PROC_CREATE; completion is published by the Device's PROC_EXIT. */
 int npu_service_launch(npu_service_device_t *device,
                        const npu_service_launch_desc_t *desc,
                        npu_service_launch_t **launch_out);

@@ -271,7 +271,7 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
-有符号 status。当前 opcode 1–8 分别为字符串输出、清空输出缓冲、申请堆 region、
+有符号 status。当前 opcode 1–8 分别为字符串输出、刷新 Host 输出流、申请堆 region、
 归还堆 region、异常报告、张量中断报告、root proc 退出通知和 profile 满缓冲上报。
 异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
 稳定的 328-byte `struct trap_record`，Host 默认 trap 回调会原子地打印线程身份、
@@ -287,10 +287,11 @@ Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Devi
 base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
 回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_threads` 个静态 slot；
-子孙创建、退出与 join 不再经过 Host。每个 proc 退出都 flush/CLEAR 自己的输出；只有
-Host root 通过 32-byte `RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。随后
-scheduler 在自己的栈上调用 cleanup，把描述符从 `RUNNING` 更新为 `EXITED` 或
-`FAILED`。因此 Host 必须保留描述符直到终态，不能只把 create response 当作执行完成。
+子孙创建、退出与 join 不再经过 Host。每个 proc 退出都通过统一 flush 路径提交剩余输出；
+缓冲为空时直接返回，不发送 `WRITE` 或 `CLEAR`。只有 Host root 通过 32-byte
+`RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。Host 在成功响应前记录终态并释放
+create descriptor；Device 收到响应后立即由 scheduler 归还 Thread slot。普通 launch
+完成只依赖这次通知，不再用 `RPC_PROC_PS` 轮询确认。
 
 Host 管理目标 Hart 使用 `RPC_PROC_PS` (`0x0102`) 和 `RPC_PROC_KILL_ALL` (`0x0103`)，
 响应分别为 `0x8102`、`0x8103`。PS 固定返回三个系统 proc（RPC receive/send 与
@@ -468,10 +469,10 @@ section。
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度
 `fabsf/copysignf/fminf/fmaxf/sqrtf/rsqrtf/expf/logf`。浮点格式化暂未实现，
 `printf/puts/putchar` 共享当前 proc 在创建时配置的有限缓冲区；缓冲恰好填满时自动通过
-RPC 发送，未填满的内容跨调用保留，直到 `fflush(stdout)` 或 `fflush(NULL)`。RPC
-失败时普通 flush 会保留缓冲内容以便重试。proc 退出时会做一次 best-effort flush，
-随后发送 CLEAR 清理该 kernel root 的 Host 输出流；若要求确认尾部输出已经送达，仍应
-在返回前显式调用并检查 `fflush`。
+RPC 发送，未填满的内容跨调用保留，直到 `fflush(stdout)` 或 `fflush(NULL)`。统一 flush
+路径在 `output_size == 0` 时直接成功，RPC 失败时保留缓冲内容以便重试。Host 收到输出后
+立即交给输出回调，不保存按 Proc 拼接的流状态。proc 退出时只做一次 best-effort flush，
+不额外发送 CLEAR；若要求确认尾部输出已经送达，仍应在返回前显式调用并检查 `fflush`。
 
 ## Host 用户态驱动
 

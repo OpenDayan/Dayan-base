@@ -45,7 +45,7 @@ Socket 协议不属于公开 API。
   \code{NPU_SERVICE_PROC_NAME_SIZE} & Proc 名称占 16 字节，其中必须包含结尾空字符。 \\
   \code{NPU_SERVICE_PROC_MAX_RECORDS} & 一个 Hart 的快照最多包含 19 条 Proc 记录。 \\
   \code{NPU_SERVICE_PROFILE_DEFAULT_BUFFER_SIZE} & 默认性能采样缓冲区为 16 MiB，由整个 Device 共用。 \\
-  \code{NPU_SERVICE_OUTPUT_CLEAR} & 输出回调应清空该 Proc 已保存的 Host 输出。 \\
+  \code{NPU_SERVICE_OUTPUT_CLEAR} & 输出回调应刷新该 Proc 的下游输出流；Service 不拼接保存 Proc 输出。 \\
   \code{NPU_SERVICE_LAUNCH_SUBMITTED} / \code{NPU_SERVICE_LAUNCH_RUNNING} & 启动已经提交，或 Proc 正在运行。 \\
   \code{NPU_SERVICE_LAUNCH_EXITED} / \code{NPU_SERVICE_LAUNCH_FAILED} & Proc 已正常退出，或创建和执行过程失败。 \\
   \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统 Proc、Host 创建的根 Proc，以及 Device 创建的子 Thread。 \\
@@ -89,9 +89,9 @@ Socket 协议不属于公开 API。
   API & 行为 \\
   \code{npu_service_launch_desc_init} & 初始化描述符版本、默认栈、默认输出缓冲区、单任务网格和单 Core 模式。 \\
   \code{npu_service_launch} & 校验物理目标和所有内存分配，发送 \code{RPC_PROC_CREATE}，并返回启动句柄。 \\
-  \code{npu_service_launch_query} & 非阻塞读取启动状态和结果。 \\
-  \code{npu_service_launch_wait} & 等待 Proc 到达终态或发生超时。 \\
-  \code{npu_service_launch_release} & 在 Proc 正常退出或失败后释放创建描述符和启动句柄。 \\
+  \code{npu_service_launch_query} & 非阻塞读取 Host 缓存的启动状态和结果，不发送 PS RPC。 \\
+  \code{npu_service_launch_wait} & 等待 \code{RPC_PROC_EXIT} 发布终态或发生超时。 \\
+  \code{npu_service_launch_release} & 在 Proc 正常退出或失败后释放启动句柄；退出握手已释放 create descriptor。 \\
   \code{npu_service_launch_abandon} & 设备已经无法查询时，只释放 Host 侧内存和管理状态。 \\
 \end{dayantable}
 

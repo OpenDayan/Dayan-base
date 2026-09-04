@@ -1385,8 +1385,7 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
         for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
             if (HART_RUNTIME(hart).slot_owner[TASK_INDEX(slot)] != root)
                 continue;
-            if (slot_state_get(slot) != SLOT_RESERVED &&
-                HART_RUNTIME(hart).output_size[TASK_INDEX(slot)])
+            if (slot_state_get(slot) != SLOT_RESERVED)
                 (void)thread_output_flush(thread_slot_get(slot));
         }
         thread_run_cleanup(&task->thread);
@@ -1567,10 +1566,7 @@ _Noreturn void thread_exit_status(int64_t status)
     if (thread_join_all() < 0 &&
         HART_RUNTIME(hart).result[TASK_INDEX(slot)] >= 0)
         HART_RUNTIME(hart).result[TASK_INDEX(slot)] = -EIO;
-    if (HART_RUNTIME(hart).output_size[TASK_INDEX(slot)])
-        (void)thread_output_flush(thread);
-    HART_RUNTIME(hart).output_size[TASK_INDEX(slot)] = 0;
-    (void)rpc_clear_proc(task->thread.id);
+    (void)thread_output_flush(thread);
     if (thread->type == THREAD_TYPE_TASK_PROC) {
         thread_run_cleanup(thread);
         (void)rpc_proc_exit(

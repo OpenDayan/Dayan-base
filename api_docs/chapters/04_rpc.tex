@@ -26,12 +26,12 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
 \begin{dayantable}{Device 到 Host 的操作码}{tab:api-rpc-d2h-opcode}{X[40,l] X[60,l]}
   Opcode & 请求 \\
   \code{RPC_WRITE} & 向指定 Hart/Proc 的 Host 输出流追加字节。 \\
-  \code{RPC_CLEAR} & 清空指定 Hart/Proc 的 Host 输出缓冲。 \\
+  \code{RPC_CLEAR} & 请求输出回调刷新指定 Hart/Proc 的下游输出流；正常退出不发送。 \\
   \code{RPC_HEAP_ACQUIRE} & 从 Host 管理的 Device 堆取得一段内存。 \\
   \code{RPC_HEAP_RELEASE} & 将此前取得的 Device 堆区间交还 Host。 \\
   \code{RPC_TRAP_REPORT} & 上报异常记录；具体结构属于内部异常 ABI。 \\
   \code{RPC_TENSOR_INTERRUPT_REPORT} & 上报当前 Hart 捕获的张量中断快照；低 48 位参数指向已写回缓存的 \code{tensor_interrupt_record}。 \\
-  \code{RPC_PROC_EXIT} & 上报 Host 创建的根 Proc 的返回值和调用方标识。 \\
+  \code{RPC_PROC_EXIT} & 上报根 Proc 的返回值；Host 响应后 Device 立即释放对应 Thread。 \\
   \code{RPC_PROFILE_FLUSH} & 将当前 Hart 的一批性能采样数据交给 Host。 \\
 \end{dayantable}
 
@@ -40,7 +40,7 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
   \code{RPC_PROC_CREATE} / \code{RPC_PROC_CREATE_RESPONSE} & 在指定 Hart 创建一个由 Host 管理的根 Proc。 \\
   \code{RPC_ICACHE_FLUSH} / \code{RPC_ICACHE_FLUSH_RESPONSE} & 使已加载代码的指令缓存更新可见。 \\
   \code{RPC_DCACHE_FLUSH} / \code{RPC_DCACHE_FLUSH_RESPONSE} & 失效指定普通内存范围的本 Hart 数据缓存。 \\
-  \code{RPC_PROC_PS} / \code{RPC_PROC_PS_RESPONSE} & 获取该 Hart 的完整 Proc 快照。 \\
+  \code{RPC_PROC_PS} / \code{RPC_PROC_PS_RESPONSE} & 获取该 Hart 的管理/诊断快照，不参与普通 launch 完成。 \\
   \code{RPC_PROC_KILL_ALL} / \code{RPC_PROC_KILL_ALL_RESPONSE} & 终止该 Hart 上全部非系统 Proc。 \\
   \code{RPC_PROFILE_CONFIG} / \code{RPC_PROFILE_CONFIG_RESPONSE} & 启动或停止该 Hart 的性能采样。 \\
 \end{dayantable}
@@ -170,11 +170,11 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
   API & 行为 \\
   \code{rpc_write_proc} & 为显式 Proc ID 发送输出字节；空数据直接成功。 \\
   \code{rpc_write} & 以当前 Proc 对 Host 可见的 ID 发送输出字节。 \\
-  \code{rpc_clear_proc} & 要求 Host 清空显式 Proc ID 的输出缓冲。 \\
-  \code{rpc_clear} & 要求 Host 清空当前 Proc 的输出缓冲。 \\
+  \code{rpc_clear_proc} & 要求输出回调刷新显式 Proc ID 的下游输出流。 \\
+  \code{rpc_clear} & 要求输出回调刷新当前 Proc 的下游输出流。 \\
   \code{rpc_heap_acquire} & 申请 Host 管理的 Device 堆区间。 \\
   \code{rpc_heap_release} & 释放指定的 Device 堆区间。 \\
-  \code{rpc_proc_exit} & 上报 Host 创建的根 Proc 的返回值；当前实现要求根 Proc 标志有效且父 Proc ID 为零。 \\
+  \code{rpc_proc_exit} & 同步上报根 Proc 返回值；Host 确认终态并释放 create descriptor 后响应，随后 Device 可释放 Thread。 \\
   \code{rpc_profile_flush} & 同步提交一批性能采样字节，并取得 Host 的继续或停止决定。 \\
 \end{dayantable}
 

@@ -1,6 +1,7 @@
 #include "service_internal.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +31,89 @@ static int device_pa(npu_service_device_t *device, uint64_t address,
 
     /* -ENOTSUP is the MMU-off case and has already set *pa_out = address. */
     return status == -ENOTSUP ? 0 : status;
+}
+
+static const char *rpc_opcode_name(uint16_t opcode)
+{
+    switch (opcode) {
+    case RPC_WRITE:
+        return "write";
+    case RPC_CLEAR:
+        return "clear";
+    case RPC_HEAP_ACQUIRE:
+        return "heap-acquire";
+    case RPC_HEAP_RELEASE:
+        return "heap-release";
+    case RPC_TRAP_REPORT:
+        return "trap-report";
+    case RPC_TENSOR_INTERRUPT_REPORT:
+        return "tensor-interrupt-report";
+    case RPC_PROC_EXIT:
+        return "proc-exit";
+    case RPC_PROFILE_FLUSH:
+        return "profile-flush";
+    case RPC_PROC_CREATE:
+        return "proc-create";
+    case RPC_ICACHE_FLUSH:
+        return "icache-flush";
+    case RPC_PROC_PS:
+        return "proc-ps";
+    case RPC_PROC_KILL_ALL:
+        return "proc-kill-all";
+    case RPC_PROFILE_CONFIG:
+        return "profile-config";
+    case RPC_DCACHE_FLUSH:
+        return "dcache-flush";
+    case RPC_PROC_CREATE_RESPONSE:
+        return "proc-create-response";
+    case RPC_ICACHE_FLUSH_RESPONSE:
+        return "icache-flush-response";
+    case RPC_PROC_PS_RESPONSE:
+        return "proc-ps-response";
+    case RPC_PROC_KILL_ALL_RESPONSE:
+        return "proc-kill-all-response";
+    case RPC_PROFILE_CONFIG_RESPONSE:
+        return "profile-config-response";
+    case RPC_DCACHE_FLUSH_RESPONSE:
+        return "dcache-flush-response";
+    default:
+        return "unknown";
+    }
+}
+
+void npu_rpc_debug_begin(npu_service_device_t *device, const char *direction,
+                         npu_hal_core_t core, uint16_t opcode,
+                         uint64_t argument)
+{
+    if (!device->rpc_debug)
+        return;
+    flockfile(stderr);
+    fprintf(stderr,
+            "dayan_server: [rpc] %s begin C%u/H%u "
+            "opcode=%s(0x%04x) argument=0x%012llx\n",
+            direction, core.cluster, core.core, rpc_opcode_name(opcode),
+            opcode, (unsigned long long)argument);
+    fflush(stderr);
+    funlockfile(stderr);
+}
+
+void npu_rpc_debug_end(npu_service_device_t *device, const char *direction,
+                       npu_hal_core_t core, uint16_t opcode,
+                       uint64_t argument, int status)
+{
+    if (!device->rpc_debug)
+        return;
+    flockfile(stderr);
+    fprintf(stderr,
+            "dayan_server: [rpc] %s end C%u/H%u "
+            "opcode=%s(0x%04x) argument=0x%012llx status=%d",
+            direction, core.cluster, core.core, rpc_opcode_name(opcode),
+            opcode, (unsigned long long)argument, status);
+    if (status < 0)
+        fprintf(stderr, " (%s)", strerror(-status));
+    fputc('\n', stderr);
+    fflush(stderr);
+    funlockfile(stderr);
 }
 
 static int range_valid(npu_service_device_t *device, npu_hal_core_t core,
@@ -327,7 +411,8 @@ static int service_tensor_interrupt(npu_service_device_t *device,
 }
 
 static int service_proc_exit(npu_service_device_t *device,
-                             npu_hal_core_t core, uint64_t argument)
+                             npu_hal_core_t core, uint64_t argument,
+                             struct rpc_proc_exit_request *proc_exit_out)
 {
     struct rpc_proc_exit_request request;
     struct rpc_packet packet;
@@ -350,14 +435,15 @@ static int service_proc_exit(npu_service_device_t *device,
         status = -EPROTO;
         goto finish;
     }
-    device->options.proc_exit(device->options.callback_context,
-                              core.cluster, core.core, request.proc_id,
-                              request.result, request.cookie);
-    status = 0;
+    /* The Device may release its Proc slot as soon as this packet succeeds. */
+    status = npu_service_launch_complete(device, core, request.proc_id,
+                                         request.result, request.cookie);
 
 finish:
     if (finish_packet(device, core, argument, status) < 0 && status == 0)
         status = -EIO;
+    if (status == 0 && proc_exit_out)
+        *proc_exit_out = request;
     return status;
 }
 
@@ -408,32 +494,47 @@ finish:
 }
 
 int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
-                     uint64_t command)
+                     uint64_t command,
+                     struct rpc_proc_exit_request *proc_exit_out)
 {
     uint16_t opcode = rpc_command_opcode(command);
     uint64_t argument = rpc_command_arg(command);
+    int status;
 
+    npu_rpc_debug_begin(device, "device->host", core, opcode, argument);
     switch (opcode) {
     case RPC_WRITE:
-        return service_print(device, core, argument, 0);
+        status = service_print(device, core, argument, 0);
+        break;
     case RPC_CLEAR:
-        return service_print(device, core, argument,
-                             NPU_SERVICE_OUTPUT_CLEAR);
+        status = service_print(device, core, argument,
+                               NPU_SERVICE_OUTPUT_CLEAR);
+        break;
     case RPC_HEAP_ACQUIRE:
-        return service_heap_acquire(device, core, argument);
+        status = service_heap_acquire(device, core, argument);
+        break;
     case RPC_HEAP_RELEASE:
-        return service_heap_release(device, core, argument);
+        status = service_heap_release(device, core, argument);
+        break;
     case RPC_TRAP_REPORT:
-        return service_trap(device, core, argument);
+        status = service_trap(device, core, argument);
+        break;
     case RPC_TENSOR_INTERRUPT_REPORT:
-        return service_tensor_interrupt(device, core, argument);
+        status = service_tensor_interrupt(device, core, argument);
+        break;
     case RPC_PROC_EXIT:
-        return service_proc_exit(device, core, argument);
+        status = service_proc_exit(device, core, argument, proc_exit_out);
+        break;
     case RPC_PROFILE_FLUSH:
-        return service_profile_flush(device, core, argument);
+        status = service_profile_flush(device, core, argument);
+        break;
     default:
-        return -ENOSYS;
+        status = -ENOSYS;
+        break;
     }
+    npu_rpc_debug_end(device, "device->host", core, opcode, argument,
+                      status);
+    return status;
 }
 
 static int pending_response(npu_service_device_t *device,
@@ -485,6 +586,7 @@ void *npu_rpc_worker(void *arg)
             npu_hal_core_t core = { cluster, core_index };
             uint32_t mask = UINT32_C(1) << core_index;
             uint64_t command;
+            struct rpc_proc_exit_request proc_exit = { 0 };
             int is_response;
 
             if (!(pending & mask))
@@ -503,7 +605,7 @@ void *npu_rpc_worker(void *arg)
             is_response = pending_response(device, core, command);
             pthread_mutex_unlock(&device->mutex);
             if (!is_response)
-                (void)npu_rpc_dispatch(device, core, command);
+                (void)npu_rpc_dispatch(device, core, command, &proc_exit);
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
             if (npu_hal_irq_ack(device->hal, cluster, mask) < 0) {
                 int fatal_status = npu_hal_device_status(device->hal);
@@ -526,6 +628,11 @@ void *npu_rpc_worker(void *arg)
                     pthread_cond_broadcast(&device->condition);
                 }
                 pthread_mutex_unlock(&device->mutex);
+            } else if (proc_exit.proc_id) {
+                /* Do not let the scheduler reuse the slot before the ack. */
+                npu_service_launch_publish(
+                    device, core, proc_exit.proc_id, proc_exit.result,
+                    proc_exit.cookie);
             }
         }
     }

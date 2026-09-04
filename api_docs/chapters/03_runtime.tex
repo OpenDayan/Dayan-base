@@ -68,7 +68,7 @@ Runtime 不访问寄存器或中断设备。公开入口由
 \begin{dayantable}{Runtime 标志与状态}{tab:api-runtime-enums}{X[48,l] X[52,l]}
   API & 含义 \\
   \code{NPU_TASK_MODE_SINGLE_CORE} / \code{NPU_TASK_MODE_FOUR_CORE} & C API 的单 Core 模式和四 Core 模式；C++ 对应 \code{kSingleCore} 与 \code{kFourCore}。 \\
-  \code{NPU_RUNTIME_OUTPUT_CLEAR} / \code{NPU_RUNTIME_OUTPUT_CONTINUED} & 输出回调中的清空事件和分片延续标志。 \\
+  \code{NPU_RUNTIME_OUTPUT_CLEAR} / \code{NPU_RUNTIME_OUTPUT_CONTINUED} & 输出回调中的下游刷新事件和分片延续标志。 \\
   \code{NPU_BUFFER_DEVICE_LOCAL} / \code{NPU_BUFFER_COHERENT} & 请求 Device-local 或 coherent Buffer。 \\
   \code{NPU_BUFFER_READ} / \code{NPU_BUFFER_WRITE} & Buffer 允许作为 Device read source 或 write destination。 \\
   \code{NPU_KERNEL_ARG_VALUE} / \code{NPU_KERNEL_ARG_BUFFER} & 立即数参数或 Buffer+offset 参数。 \\

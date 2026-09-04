@@ -201,12 +201,14 @@ struct npu_service_device {
     pthread_t worker;
     struct npu_pending_call *calls;
     struct npu_service_launch_agent *launch_agents;
+    struct npu_service_launch *launches;
     size_t launch_agent_count;
     struct npu_rpc_queue_entry *rpc_queue_head;
     struct npu_rpc_queue_entry *rpc_queue_tail;
     size_t rpc_queue_count;
     size_t rpc_queue_capacity;
     size_t rpc_queue_waiters;
+    uint32_t rpc_debug;
     struct npu_service_cluster *clusters;
     struct npu_service_heap_allocation *heap_allocations;
     struct npu_service_firmware_allocation *firmware_allocations;
@@ -246,13 +248,18 @@ struct npu_service_launch {
     npu_hal_core_t target;
     npu_hal_allocation_t *request_allocation;
     struct npu_service_launch *queue_next;
+    struct npu_service_launch *next;
     uint64_t request_address;
     uint64_t cookie;
+    int64_t result;
     uint32_t task_id[3];
     uint32_t task_mode;
+    uint32_t proc_id;
     uint32_t submit_started;
     uint32_t submit_done;
     uint32_t accepted;
+    uint32_t exit_received;
+    uint32_t completed;
     uint32_t descriptor_may_be_live;
     uint32_t abandoned;
     int submit_status;
@@ -297,10 +304,23 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
                          uint32_t timeout_ms,
                          int *argument_may_be_live_out);
+int npu_service_launch_complete(npu_service_device_t *device,
+                                npu_hal_core_t core, uint32_t proc_id,
+                                int64_t result, uint64_t cookie);
+void npu_service_launch_publish(npu_service_device_t *device,
+                                npu_hal_core_t core, uint32_t proc_id,
+                                int64_t result, uint64_t cookie);
+void npu_rpc_debug_begin(npu_service_device_t *device, const char *direction,
+                         npu_hal_core_t core, uint16_t opcode,
+                         uint64_t argument);
+void npu_rpc_debug_end(npu_service_device_t *device, const char *direction,
+                       npu_hal_core_t core, uint16_t opcode,
+                       uint64_t argument, int status);
 void npu_service_kernel_state_destroy(npu_service_device_t *device);
 void *npu_rpc_worker(void *arg);
 int npu_rpc_dispatch(npu_service_device_t *device, npu_hal_core_t core,
-                     uint64_t command);
+                     uint64_t command,
+                     struct rpc_proc_exit_request *proc_exit_out);
 int npu_service_profile_copy(npu_service_device_t *device,
                              npu_hal_core_t target, uint64_t generation,
                              uint64_t address, uint32_t capacity,

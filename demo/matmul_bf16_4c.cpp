@@ -501,12 +501,11 @@ static inline void issue_dram_load(LocalBuffer *local,
         dram += handled_bytes;
         major_bytes -= handled_bytes;
     }
-    dayan_wait_lsu();
-
     if (remote_active)
-        require_status(dayan_shared_resource_produce(&remote->resource));
+        require_status(dayan_shared_resource_wait_lsu_produce(
+            &remote->resource));
     if (local_consumers)
-        require_status(dayan_resource_produce(&local->resource));
+        require_status(dayan_resource_wait_lsu_produce(&local->resource));
 }
 
 template <long LoadGroup>
@@ -521,9 +520,9 @@ static inline void issue_remote_copy(LocalBuffer *local,
     configure_lsu_tcsr<LoadGroup * LSU_GROUPSZ + LSU_DIM1>(
         rows - 1, configured_dim1);
     __tx_lsu_dma_d2u<LoadGroup>((long)local->uram, (long)source_uram);
-    dayan_wait_lsu();
-    require_status(dayan_shared_resource_consume(&remote->resource));
-    require_status(dayan_resource_produce(&local->resource));
+    require_status(dayan_shared_resource_wait_lsu_consume(
+        &remote->resource));
+    require_status(dayan_resource_wait_lsu_produce(&local->resource));
 }
 
 template <bool ProducerLoadsA, long LoadGroup>
@@ -701,6 +700,7 @@ static void dram_loader(void *argument)
                 &configured);
         }
     }
+    dayan_wait_lsu();
 }
 
 template <bool ProducerLoadsA, long LoadGroup>
@@ -834,6 +834,7 @@ static void remote_copy(void *argument)
                 state, generation, tile_m, tile_n, &configured.dim1);
         }
     }
+    dayan_wait_lsu();
 }
 
 template <bool ProducerLoadsA, long GroupBase, int Slice>
@@ -913,17 +914,16 @@ static void execute_mat_job(MatmulState *state, const MatJob &job,
                                 (long)b->uram);
     /*
      * The next worker may enqueue only after this command.  The MAT command
-     * stream remains strictly ordered, while each worker waits for its own
-     * completion token and at most two commands can be outstanding.
+     * stream remains strictly ordered; deferred resource transitions publish
+     * completion without unconditionally parking this worker.
      */
     pass_mat_turn(state, worker);
-    dayan_wait_mat();
 
     if (job.tile_k + 1 == state->count_k)
-        require_status(dayan_resource_produce(&state->c[Slice]));
+        require_status(dayan_resource_wait_mat_produce(&state->c[Slice]));
 
-    require_status(dayan_resource_consume(&a->resource));
-    require_status(dayan_resource_consume(&b->resource));
+    require_status(dayan_resource_wait_mat_consume(&a->resource));
+    require_status(dayan_resource_wait_mat_consume(&b->resource));
 }
 
 template <bool ProducerLoadsA>
@@ -999,16 +999,7 @@ static void mat_worker(void *argument)
             pass_mat_turn(state, worker);
         }
     }
-}
-
-static inline void complete_c_store_batch(MatmulState *state,
-                                          uint32_t active_mask)
-{
-    dayan_wait_lsu();
-    for (int slice = 0; slice < Constants::kSlices; ++slice) {
-        if (active_mask & (1U << slice))
-            require_status(dayan_resource_consume(&state->c[slice]));
-    }
+    dayan_wait_mat();
 }
 
 template <bool ProducerLoadsA>
@@ -1038,8 +1029,6 @@ static void c_store_worker(void *argument)
     for (uint64_t output = 0; output < output_count; ++output) {
         const int tile_m = (int)(output / (uint64_t)state->count_n);
         const int tile_n = (int)(output % (uint64_t)state->count_n);
-        uint32_t active_mask = 0;
-        int issued = 0;
 
         for (int slice = 0; slice < Constants::kSlices; ++slice) {
             const int rows = rows_for_slice<ProducerLoadsA>(
@@ -1049,7 +1038,6 @@ static void c_store_worker(void *argument)
 
             if (!rows || !columns)
                 continue;
-            active_mask |= 1U << slice;
             require_status(dayan_resource_wait_ready(&state->c[slice]));
             configure_lsu_tcsr<
                 Constants::kCStore * LSU_GROUPSZ + LSU_DIM1>(
@@ -1076,15 +1064,11 @@ static void c_store_worker(void *argument)
 
             __tx_lsu_dma_u2d<Constants::kCStore>(
                 (long)c_dram, (long)c_uram);
-            if (++issued == 2) {
-                complete_c_store_batch(state, active_mask);
-                active_mask = 0;
-                issued = 0;
-            }
+            require_status(
+                dayan_resource_wait_lsu_consume(&state->c[slice]));
         }
-        if (active_mask)
-            complete_c_store_batch(state, active_mask);
     }
+    dayan_wait_lsu();
 }
 
 static inline int config_valid(const MatmulBf16Config *config)

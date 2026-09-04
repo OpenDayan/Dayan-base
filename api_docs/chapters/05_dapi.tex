@@ -172,8 +172,9 @@ token；若完成时资源状态不允许对应的 produce/consume，固件按�
   \code{vsnprintf} & \code{va_list} 版本的 snprintf。 \\
 \end{dayantable}
 
-Proc 的格式化输出缓冲区容量固定，写满时自动提交；Proc 结束时也会提交剩余内容，Host
-随后清空该 Proc 的输出状态。
+Proc 的格式化输出缓冲区容量固定，写满时自动提交；
+\code{fflush} 和 Proc 退出共用同一提交路径，缓冲为空时不会发送 RPC。Host 收到数据后
+立即交给输出回调，不保存按 Proc 拼接的输出状态。
 
 \subsection{Device 动态内存}
 

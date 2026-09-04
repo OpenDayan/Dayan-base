@@ -170,7 +170,11 @@ mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 
 后端优先等待 `_events_0`；事件接口缺失或不支持阻塞等待时，兼容轮询也只存在于 HAL
 内部。
 
-- Device→Host：输出、清屏、Device heap acquire/release、trap report、root proc
+`run_server.sh` 默认设置 `DAYAN_RPC_DEBUG=1`，打印双向 RPC 的 begin/end、Cluster/Hart、
+opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关闭。直接启动
+`dayan_server` 时默认关闭，可显式设置 `DAYAN_RPC_DEBUG=1` 开启。
+
+- Device→Host：输出、显式输出 flush、Device heap acquire/release、trap report、root proc
   exit 和 profile FIFO flush；退出通知携带返回值与 cookie，子 Thread 不发送 Host 生命周期消息。子 Thread 的
   独立 Device printf buffer 使用所属 Host root ID 输出；Cluster、Core 与 root proc ID
   由 Server 归属到发起任务的 Runtime Session。Runtime
@@ -190,9 +194,10 @@ printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、
 创建有独立名称的子 Thread，返回正的 ID 并继承 logical task、`shared/gp` 和 URAM；
 TCSR 资源由参数显式声明并形成独立 Context。
 `dayan_thread_join`/`dayan_thread_join_all` 回收直属子 Thread；父
-执行对象返回前隐式等待全部子 Thread，因而 root 的终态覆盖整棵子树。每个执行对象退出会
-flush/CLEAR 输出；只有 root 主动向 Host 上报返回值。最后由 scheduler 栈归还整组静态
-slot，并把描述符置为 `EXITED` 或 `FAILED`。
+执行对象返回前隐式等待全部子 Thread，因而 root 的终态覆盖整棵子树。每个执行对象退出
+统一调用输出 flush，空缓冲不会产生 RPC，也不再额外发送 CLEAR。只有 root 主动向 Host
+上报返回值；Host 在响应 `RPC_PROC_EXIT` 前记录终态并释放 create descriptor，Device
+收到响应后立即由 scheduler 栈归还整组静态 slot。普通完成路径不调用 `RPC_PROC_PS`。
 
 `RPC_PROC_PS` 返回目标 Hart 的系统/算子 proc 快照，每条记录包含相同的 16-byte
 名称。系统 Proc 分别命名为 `rpc-receive`、`rpc-send` 和 `profile-flush`。

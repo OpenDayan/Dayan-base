@@ -17,6 +17,7 @@ socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-server.sock}
 wait_seconds=${DAYAN_DEVICE_WAIT_SECONDS:-30}
 build_jobs=${DAYAN_BUILD_JOBS:-4}
 skip_build=${DAYAN_SKIP_BUILD:-0}
+rpc_debug=${DAYAN_RPC_DEBUG:-1}
 
 status()
 {
@@ -47,6 +48,7 @@ Environment:
   DAYAN_DEVICE_WAIT_SECONDS  device wait timeout (default: 30)
   DAYAN_BUILD_JOBS           build parallelism (default: 4)
   DAYAN_SKIP_BUILD           set to 1 to use existing artifacts
+  DAYAN_RPC_DEBUG            Host RPC debug output, 0 or 1 (default: 1)
 
 Command-line dayan_server options override the corresponding environment
 values; unrecognized options are forwarded unchanged.
@@ -142,6 +144,11 @@ case "$skip_build" in
     0|1) ;;
     *) echo "DAYAN_SKIP_BUILD must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$rpc_debug" in
+    0) rpc_debug_state=disabled ;;
+    1) rpc_debug_state=enabled ;;
+    *) echo "DAYAN_RPC_DEBUG must be 0 or 1" >&2; exit 2 ;;
+esac
 
 cluster_count=$((10#$cluster_count))
 cluster_stride=$((10#$cluster_stride))
@@ -225,4 +232,6 @@ server_args+=("${extra_args[@]}")
 
 status "starting dayan_server: socket=$socket_path clusters=$cluster_count core_mask=$core_mask"
 status "firmware=$firmware api_elf=$api_elf"
+status "Host RPC debug output: $rpc_debug_state"
+export DAYAN_RPC_DEBUG="$rpc_debug"
 exec "$server_bin" "${server_args[@]}"
