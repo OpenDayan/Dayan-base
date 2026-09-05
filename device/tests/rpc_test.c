@@ -33,7 +33,8 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *input)
     assert(create_step++ == 1);
     assert(input == &request);
     assert(input->args[0] == 0x1234 && strcmp(input->name, "create-test") == 0);
-    task.thread.id = 0x101;
+    task.thread.slot = 1;
+    task.thread.generation = 1;
     return no_slots ? 0 : &task;
 }
 
@@ -54,7 +55,7 @@ void thread_schedule(struct thread *thread)
 {
     assert(create_step++ == 4);
     assert(thread == &task.thread);
-    assert(host_request.proc_id == task.thread.id);
+    assert(host_request.proc_id == thread_id(&task.thread));
     assert(host_request.state == RPC_PROC_RUNNING && !host_request.status);
 }
 

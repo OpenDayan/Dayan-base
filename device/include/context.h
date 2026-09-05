@@ -1,17 +1,29 @@
 #ifndef NPU_CONTEXT_H
 #define NPU_CONTEXT_H
 
+#include "config.h"
+
+#ifdef __ASSEMBLER__
+.set cpu_local_shift, 0
+.rept 63
+    .if (CONFIG_CPU_LOCAL_SIZE >> cpu_local_shift) > 1
+        .set cpu_local_shift, cpu_local_shift + 1
+    .endif
+.endr
+#endif
+
 #define THREAD_STATE_OFFSET     1
+#define THREAD_SLOT_OFFSET      0
 #define THREAD_SP_OFFSET        8
 #define THREAD_PC_OFFSET       16
 #define THREAD_TENSOR_CONTEXT_OFFSET 24
 #define THREAD_RESOURCE_CONTEXT_OFFSET 32
 #define THREAD_TOKEN_EXT_OFFSET 36
 #define THREAD_REAP_DEFERRED_OFFSET 37
+#define CPU_PROFILER_OFFSET     0
 
 #define THREAD_RUNNING_VALUE            0
 #define THREAD_WAIT_EXIT_VALUE          5
-#define THREAD_KILL_WAIT_PRODUCE_VALUE  7
 
 #define SWITCH_FRAME_RA         0
 #define SWITCH_FRAME_S0         8

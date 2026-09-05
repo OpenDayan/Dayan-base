@@ -94,7 +94,7 @@ if $nm --defined-only --format=posix "$elf" | \
 fi
 grep -Eq 'beqz[[:space:]]+tp,' <<<"$switch_dump" ||
     fail "first dispatch must skip saving a boot thread"
-for encoding in 0000128b 0006d38b 0002028b 0002228b; do
+for encoding in 0000130b 0006d38b 0002028b 0002228b; do
     grep -Fq "$encoding" <<<"$switch_raw" ||
         fail "switch_context hardware instruction $encoding is missing"
 done
@@ -123,17 +123,31 @@ for load in \
     grep -Eq "$load" <<<"$switch_dump" ||
         fail "switch_context must interleave target context loads with spills"
 done
-kill_ra_save_line=$(grep -n -m1 'sd[[:space:]]\+ra, 0x0(sp)' \
-    <<<"$switch_dump" | cut -d: -f1)
-kill_call_line=$(grep -n -m1 'jalr.*<scheduler_kill_token>' \
-    <<<"$switch_dump" | cut -d: -f1)
-kill_ra_restore_line=$(grep -n -m1 'ld[[:space:]]\+ra, 0x0(sp)' \
-    <<<"$switch_dump" | cut -d: -f1)
-[ -n "$kill_ra_save_line" ] && [ -n "$kill_call_line" ] &&
-    [ -n "$kill_ra_restore_line" ] &&
-    [ "$kill_ra_save_line" -lt "$kill_call_line" ] &&
-    [ "$kill_call_line" -lt "$kill_ra_restore_line" ] ||
-    fail "kill-token handling must preserve the interrupted thread return address"
+profile_dump=$($objdump --disassemble --no-show-raw-insn \
+    --disassemble-symbols=profile_record_thread_state "$elf")
+profile_stack_line=$(grep -n -m1 'addi[[:space:]]\+sp, sp,' \
+    <<<"$profile_dump" | cut -d: -f1)
+[ -n "$profile_stack_line" ] || fail "profile full path must preserve its caller"
+profile_fast=$(sed -n "1,$((profile_stack_line - 1))p" <<<"$profile_dump")
+if grep -Eq '(^|[[:space:],(])(sp|s[0-9]+)([[:space:],)]|$)|[[:space:]]jalr[[:space:]]' \
+        <<<"$profile_fast"; then
+    fail "profile recording must not use a stack, saved registers or C calls"
+fi
+if grep -Eq '[[:space:]]mul[[:space:]]' <<<"$profile_dump"; then
+    fail "profile CPU-local addressing must use a constant shift"
+fi
+if grep -Eq '(jal|jalr).*<profile_record_thread_state' <<<"$switch_dump"; then
+    fail "context switch must branch to profile recording without a function call"
+fi
+grep -Eq 'bnez[[:space:]]+a1,' <<<"$switch_dump" &&
+    ! grep -Eq 'beqz[[:space:]]+a1,' <<<"$switch_dump" ||
+    fail "disabled profiling must fall through without taking a branch"
+if grep -Eq 'lbu[[:space:]]+t0, 0x1\(t1\)|<scheduler_kill_token>' \
+        <<<"$switch_dump"; then
+    fail "kill handling must use the redirected PC, not a dispatch state check"
+fi
+grep -Eq 'lhu[[:space:]]+t4, 0x0\(t1\)' <<<"$profile_fast" ||
+    fail "profile slot/state must use one aligned halfword load"
 
 if ! $objdump --disassemble --no-show-raw-insn \
         "$api_compile" "$api_cxx_compile" | \

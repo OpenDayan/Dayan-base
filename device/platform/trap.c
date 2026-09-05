@@ -20,13 +20,12 @@ void trap_report_complete(void)
     cpu_self()->trap.active = 0;
 }
 
-_Noreturn void trap_handle(const struct trap_frame *frame)
+void trap_handle(const struct trap_frame *frame)
 {
     struct cpu *cpu;
     struct trap_record *record;
     uintptr_t hart;
     size_t i;
-    int status;
 
     if (!current)
         platform_halt();
@@ -37,7 +36,7 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     hart = platform_hart_id();
     record = &trap_records[hart].record;
     record->hart_id = (uint32_t)hart;
-    record->thread_id = current->id;
+    record->thread_id = thread_id(current);
     record->thread_type = current->type;
     record->thread_state = current->state;
     record->mstatus = frame->mstatus;
@@ -56,13 +55,17 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
         struct thread *parent = current->parent == THREAD_SLOT_NONE ? 0 :
                                 thread_slot_get(current->parent);
 
-        record->host_proc_id = task->thread.id;
-        record->parent_proc_id = parent ? parent->id : 0;
+        record->host_proc_id = thread_id(&task->thread);
+        record->parent_proc_id = parent ? thread_id(parent) : 0;
         record->cookie = task->descriptor.cookie;
     }
 
-    status = rpc_report_trap(record);
-    if (status < 0)
+}
+
+_Noreturn void trap_exit(void)
+{
+    /* Reporting and joining may switch threads; use the faulting thread's stack. */
+    if (rpc_report_trap(&trap_records[platform_hart_id()].record) < 0)
         platform_halt();
     if (current->type == THREAD_TYPE_TASK_PROC ||
         current->type == THREAD_TYPE_TASK_THREAD)

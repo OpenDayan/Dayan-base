@@ -47,7 +47,7 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     record = tensor_interrupt_record_get(state->pending);
     memset(record, 0, sizeof(*record));
     record->hart_id = (uint32_t)platform_hart_id();
-    record->thread_id = current->id;
+    record->thread_id = thread_id(current);
     record->thread_type = current->type;
     record->thread_state = current->state;
     record->recent_count = (uint32_t)((control >> 9) & 0x1fU);

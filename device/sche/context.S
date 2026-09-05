@@ -1,4 +1,5 @@
 #include "context.h"
+#include "profile.h"
 
 .section .text.switch_context, "ax", @progbits
 .align 2
@@ -6,34 +7,31 @@
 .type switch_context, @function
 switch_context:
 .Lschedule:
-    /* RPC MSIP has strict priority over the unified hardware token queue. */
+    /* RPC MSIP has priority; otherwise fall through to the hardware queue. */
     csrr    t0, mip
     andi    t0, t0, 8
-    beqz    t0, .Lpop_token
-    csrr    t0, mhartid
-    la      t1, scheduler_rpc_receive_threads
-    slli    t0, t0, 3
-    add     t1, t1, t0
-    ld      t1, 0(t1)
-    li      t2, 0
-    j       .Lselected
+    bnez    t0, .Lrpc_receive
 
-.Lpop_token:
-    /* BASE Produce/Bar[0] pop, result in t0 (x5). */
-    .insn   4, 0x0000128b
-    beqz    t0, .Lschedule
-    mv      t1, t0
+    /* BASE Produce/Bar[0] pop, result in t1 (x6). */
+    .insn   4, 0x0000130b
+    beqz    t1, .Lschedule
     /* TOKEN_EXT read, result in t2 (x7), before the next queue pop. */
     .insn   4, 0x0006d38b
 
 .Lselected:
-    lbu     t0, THREAD_STATE_OFFSET(t1)
-    li      t3, THREAD_KILL_WAIT_PRODUCE_VALUE
-    beq     t0, t3, .Lkill_token
     sb      t2, THREAD_TOKEN_EXT_OFFSET(t1)
     li      t0, THREAD_RUNNING_VALUE
     sb      t0, THREAD_STATE_OFFSET(t1)
+    csrr    a2, mhartid
+    slli    a2, a2, cpu_local_shift
+    la      t0, __cpu_start
+    add     a2, a2, t0
+    csrrci  t5, mstatus, 8
+    ld      a1, CPU_PROFILER_OFFSET(a2)
+    bnez    a1, .Lprofile_switch
+.Lprofile_done:
     beq     t1, tp, .Lsame_thread
+    mv      a3, t5
     beqz    tp, .Lfirst_thread
 
     /* next is known before any callee-saved register is spilled. */
@@ -65,6 +63,7 @@ switch_context:
 
 .Lload_context:
     mv      sp, t2
+    /* IRQs stay masked from profiling through the hardware context/tp update. */
     mv      t0, t3
     /* Context1: BASE unit, address 0x010, source t0 (x5). */
     .insn   4, 0x0002028b
@@ -73,8 +72,23 @@ switch_context:
     .insn   4, 0x0002228b
     mv      a0, tp
     mv      tp, t1
+    andi    a3, a3, 8
+    csrs    mstatus, a3
     li      t0, THREAD_WAIT_EXIT_VALUE
-    bne     t6, t0, .Ljump_next
+    beq     t6, t0, .Lreap_thread
+.Ljump_next:
+    jr      t5
+
+.Lrpc_receive:
+    csrr    t0, mhartid
+    la      t1, scheduler_rpc_receive_threads
+    slli    t0, t0, 3
+    add     t1, t1, t0
+    ld      t1, 0(t1)
+    li      t2, 0
+    j       .Lselected
+
+.Lreap_thread:
     lbu     t0, THREAD_REAP_DEFERRED_OFFSET(a0)
     bnez    t0, .Ljump_next
 
@@ -84,20 +98,11 @@ switch_context:
     call    scheduler_reap_thread
     ld      t5, 0(sp)
     addi    sp, sp, 16
-
-.Ljump_next:
     jr      t5
 
-.Lkill_token:
-    addi    sp, sp, -16
-    sd      ra, 0(sp)
-    mv      a0, t1
-    call    scheduler_kill_token
-    ld      ra, 0(sp)
-    addi    sp, sp, 16
-    j       .Lschedule
-
 .Lsame_thread:
+    andi    t5, t5, 8
+    csrs    mstatus, t5
     ret
 
 .Lfirst_thread:
@@ -107,8 +112,78 @@ switch_context:
     ld      t5, THREAD_PC_OFFSET(t1)
     li      t6, THREAD_RUNNING_VALUE
     j       .Lload_context
+
+.Lprofile_switch:
+    la      a3, .Lprofile_done
+    j       .Lprofile_record
 .size switch_context, . - switch_context
 
+.section .text.profile_record, "ax", @progbits
+.align 2
+.globl profile_record_thread_state
+.type profile_record_thread_state, @function
+/* C entry for READY/WAIT/EXIT records; restore the caller's interrupt state. */
+profile_record_thread_state:
+    mv      t1, a0
+    csrr    a2, mhartid
+    slli    a2, a2, cpu_local_shift
+    la      t0, __cpu_start
+    add     a2, a2, t0
+    csrrci  t5, mstatus, 8
+    ld      a1, CPU_PROFILER_OFFSET(a2)
+    bnez    a1, .Lprofile_state
+.Lprofile_return:
+    andi    t5, t5, 8
+    csrs    mstatus, t5
+    ret
+
+.Lprofile_state:
+    la      a3, .Lprofile_return
+/*
+ * Append one timestamp48/slot8/state8 record. Enter with IRQs masked,
+ * a non-null profiler and room for a record; names are defined in C.
+ * t1 = thread, a1 = profiler, a2 = cpu, a3 = continuation, t5 = saved mstatus.
+ * Preserve t1, t5 and ra; other caller-saved registers may be clobbered.
+ * Return through a3 with IRQs still masked. No stack use on the normal path.
+ * Pause below 32 free bytes, reserving room for the next name + state pair.
+ */
+.Lprofile_record:
+    ld      t0, PROFILE_NEXT_OFFSET(a1)
+    ld      t2, PROFILE_END_OFFSET(a1)
+    rdcycle t3
+    slli    t3, t3, 16
+    srli    t3, t3, 16
+    lhu     t4, THREAD_SLOT_OFFSET(t1)
+    slli    t4, t4, 48
+    or      t3, t3, t4
+    sd      t3, 0(t0)
+    addi    t0, t0, 8
+    sd      t0, PROFILE_NEXT_OFFSET(a1)
+    addi    t2, t2, -32
+    bltu    t2, t0, .Lprofile_full
+    jr      a3
+
+.Lprofile_full:
+    sd      zero, CPU_PROFILER_OFFSET(a2)
+    li      t0, 1
+    sb      t0, PROFILE_FULL_PENDING_OFFSET(a1)
+    /* Disable recording before wake_one can recursively record READY. */
+    addi    sp, sp, -32
+    sd      ra, 24(sp)
+    sd      t1, 16(sp)
+    sd      t5, 8(sp)
+    sd      a3, 0(sp)
+    addi    a0, a1, PROFILE_WAKE_OFFSET
+    call    thread_event_wake_one
+    ld      a3, 0(sp)
+    ld      t5, 8(sp)
+    ld      t1, 16(sp)
+    ld      ra, 24(sp)
+    addi    sp, sp, 32
+    jr      a3
+.size profile_record_thread_state, . - profile_record_thread_state
+
+.section .text.switch_context_restore, "ax", @progbits
 .align 2
 .globl switch_context_restore
 .type switch_context_restore, @function

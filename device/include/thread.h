@@ -28,9 +28,11 @@ enum thread_type {
 
 /* The fixed prefix addressed by tp for every execution context. */
 struct thread {
-    uint8_t type;
+    /* Little-endian halfword: slot[7:0], state[15:8] for profiling. */
+    uint8_t slot;
     uint8_t state;
-    uint16_t id;
+    uint8_t generation;
+    uint8_t type;
     uint8_t parent;
     struct thread_list_node node;
     uintptr_t sp;
@@ -40,7 +42,13 @@ struct thread {
     uint8_t token_ext;
     uint8_t reap_deferred;
     char name[THREAD_NAME_SIZE];
+    uint8_t profile_defined;
 };
+
+static inline uint16_t thread_id(const struct thread *thread)
+{
+    return (uint16_t)((thread->generation << THREAD_ID_SLOT_BITS) | thread->slot);
+}
 
 void switch_context(void);
 

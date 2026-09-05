@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "context.h"
 #include "list.h"
 #include "rbtree.h"
 #include "rpc_internal.h"
@@ -20,7 +21,7 @@ struct mem_state {
 };
 
 struct cpu {
-    uint32_t profile_enabled;
+    struct profile_state *profiler;
     struct mem_state mem;
     struct rpc_state rpc;
     struct trap_state trap;
@@ -29,6 +30,11 @@ struct cpu {
 
 extern uint8_t __cpu_start[];
 
+_Static_assert(CONFIG_CPU_LOCAL_SIZE > 0 &&
+                   !(CONFIG_CPU_LOCAL_SIZE & (CONFIG_CPU_LOCAL_SIZE - 1)),
+               "CPU local size must be a power of two");
+_Static_assert(offsetof(struct cpu, profiler) == CPU_PROFILER_OFFSET,
+               "assembly profiler pointer offset");
 _Static_assert(sizeof(struct cpu) <= CONFIG_CPU_LOCAL_SIZE,
                "cpu state exceeds its linker reservation");
 

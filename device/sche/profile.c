@@ -32,16 +32,13 @@ _Static_assert((uint32_t)THREAD_KILL_WAIT_PRODUCE ==
                    RPC_PROFILE_PROC_KILL_WAIT_PRODUCE,
                "profile kill-wait-produce state ABI");
 
-struct profile_state {
-    unsigned char *buffer;
-    uint64_t generation;
-    uint32_t capacity;
-    uint32_t count;
-    struct thread_list wake;
-    uint8_t enabled;
-    uint8_t full_pending;
-    uint8_t defined_generation[RPC_PROFILE_SLOT_COUNT];
-} __attribute__((aligned(64)));
+_Static_assert(RPC_PROFILE_RECORD_SIZE == 8 &&
+                   RPC_PROFILE_SLOT_DEFINE_SIZE == 24 &&
+                   RPC_PROFILE_COUNTER_BITS == 48 &&
+                   RPC_PROFILE_SLOT_SHIFT == 48 &&
+                   RPC_PROFILE_STATE_SHIFT == 56 &&
+                   RPC_PROFILE_RECORD_SLOT_DEFINE == 0x80,
+               "assembly profile record encoding");
 
 static struct profile_state profile_states[CONFIG_HART_COUNT]
     __attribute__((section(".profile_state"), aligned(64)));
@@ -51,84 +48,23 @@ static inline struct profile_state *profile_self(void)
     return &profile_states[platform_hart_id()];
 }
 
-static inline uint64_t profile_counter(void)
-{
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, cycle" : "=r"(cycle));
-    return cycle & RPC_PROFILE_COUNTER_MASK;
-}
-
-static void profile_queue_record(struct profile_state *state,
-                                 uint64_t counter, uint8_t slot,
-                                 uint8_t record_state)
-{
-    uint64_t value = rpc_profile_record_pack(counter, slot, record_state);
-
-    memcpy(state->buffer + state->count, &value, sizeof(value));
-    state->count += sizeof(value);
-}
-
-static void profile_mark_full(struct profile_state *state)
-{
-    state->full_pending = 1;
-    cpu_self()->profile_enabled = 0;
-    (void)thread_event_wake_one(&state->wake);
-}
-
-static int profile_reserve(struct profile_state *state, uint32_t required)
-{
-    if (state->full_pending)
-        return 0;
-    if (required > state->capacity - state->count) {
-        profile_mark_full(state);
-        return 0;
-    }
-    return 1;
-}
-
-static void profile_finish_record(struct profile_state *state)
-{
-    if (state->capacity - state->count <
-        RPC_PROFILE_SLOT_DEFINE_SIZE + RPC_PROFILE_RECORD_SIZE)
-        profile_mark_full(state);
-}
-
 void profile_record_thread_start(struct thread *thread)
 {
-    struct profile_state *state = profile_self();
-    uint8_t slot = thread_slot_id(thread);
-    uint64_t counter;
+    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
+    struct profile_state *state = cpu_self()->profiler;
+    uint64_t cycle;
 
-    state->defined_generation[slot] = 0;
-    if (!profile_reserve(state, RPC_PROFILE_SLOT_DEFINE_SIZE +
-                                RPC_PROFILE_RECORD_SIZE))
-        return;
-    counter = profile_counter();
-    profile_queue_record(state, counter, slot, RPC_PROFILE_RECORD_SLOT_DEFINE);
-    memcpy(state->buffer + state->count, thread->name, sizeof(thread->name));
-    state->count += sizeof(thread->name);
-    profile_queue_record(state, counter, slot, thread->state);
-    state->defined_generation[slot] = (uint8_t)(thread->id >>
-                                                THREAD_ID_SLOT_BITS);
-    profile_finish_record(state);
-}
-
-void profile_record_thread_state(struct thread *thread)
-{
-    struct profile_state *state = profile_self();
-    uint8_t slot = thread_slot_id(thread);
-
-    if (state->defined_generation[slot] !=
-        (uint8_t)(thread->id >> THREAD_ID_SLOT_BITS)) {
-        profile_record_thread_start(thread);
-        return;
+    if (state) {
+        __asm__ volatile("rdcycle %0" : "=r"(cycle));
+        *(uint64_t *)state->next = rpc_profile_record_pack(
+            cycle, thread_slot_id(thread), RPC_PROFILE_RECORD_SLOT_DEFINE);
+        memcpy(state->next + RPC_PROFILE_RECORD_SIZE,
+               thread->name, sizeof(thread->name));
+        state->next += RPC_PROFILE_SLOT_DEFINE_SIZE;
+        thread->profile_defined = 1;
+        profile_record_thread_state(thread);
     }
-    if (!profile_reserve(state, RPC_PROFILE_RECORD_SIZE))
-        return;
-    profile_queue_record(state, profile_counter(), slot,
-                         thread->state);
-    profile_finish_record(state);
+    resource_scheduler_interrupt_restore(interrupt_state);
 }
 
 static void profile_main(void)
@@ -145,35 +81,30 @@ static void profile_main(void)
             thread_prepare_wait(&state->wake);
             resource_scheduler_interrupt_restore(interrupt_state);
             switch_context();
-        } else {
-            resource_scheduler_interrupt_restore(interrupt_state);
-        }
-        /* STOP may have consumed the buffer after this thread was woken. */
-        if (!state->enabled) {
-            state->full_pending = 0;
             continue;
         }
-        platform_cache_flush(state->buffer, state->count);
+        resource_scheduler_interrupt_restore(interrupt_state);
+        platform_cache_flush(state->buffer, state->next - state->buffer);
         memset(&request, 0, sizeof(request));
         request.hart_id = (uint32_t)platform_hart_id();
         request.buffer_addr = (uintptr_t)state->buffer;
-        request.count = state->count;
-        request.capacity = state->capacity;
+        request.count = state->next - state->buffer;
+        request.capacity = state->end - state->buffer;
         request.generation = state->generation;
         memset(&response, 0, sizeof(response));
         response.generation = state->generation;
         response.status = -EIO;
         status = rpc_call(RPC_PROFILE_FLUSH, &request, sizeof(request),
                            &response, sizeof(response));
-        state->count = 0;
+        state->next = state->buffer;
         state->full_pending = 0;
-        if (status < 0 || response.flags || response.status ||
-            response.generation != state->generation ||
-            response.continue_profile != 1U) {
-            state->enabled = 0;
-            cpu_self()->profile_enabled = 0;
-        } else {
-            cpu_self()->profile_enabled = 1;
+        if (status >= 0 && !response.flags && !response.status &&
+            response.generation == state->generation &&
+            response.continue_profile == 1U) {
+            interrupt_state = resource_scheduler_interrupt_disable();
+            cpu_self()->profiler = state;
+            proc_profile_snapshot(0);
+            resource_scheduler_interrupt_restore(interrupt_state);
         }
     }
 }
@@ -181,6 +112,7 @@ static void profile_main(void)
 int profile_configure(struct rpc_profile_config *config)
 {
     struct profile_state *state = profile_self();
+    uintptr_t interrupt_state;
     int status = -EINVAL;
 
     if (config->flags || config->hart_id != platform_hart_id() ||
@@ -193,40 +125,41 @@ int profile_configure(struct rpc_profile_config *config)
             status = -EBUSY;
             break;
         }
-        if (!config->generation || (config->buffer_addr & 7U) ||
-            (config->capacity & 7U) ||
+        if (!config->generation ||
+            (config->buffer_addr & (CONFIG_CACHE_LINE_SIZE - 1U)) ||
+            (config->capacity & (CONFIG_CACHE_LINE_SIZE - 1U)) ||
             config->capacity < RPC_PROFILE_SNAPSHOT_MAX_BYTES ||
             config->buffer_addr < CONFIG_RAM_BASE ||
             config->capacity > UINT64_MAX - config->buffer_addr)
             break;
         state->buffer = (unsigned char *)(uintptr_t)config->buffer_addr;
-        state->capacity = config->capacity;
-        state->count = 0;
+        state->next = state->buffer;
+        state->end = state->buffer + config->capacity;
         state->generation = config->generation;
         state->full_pending = 0;
-        state->enabled = 1;
-        cpu_self()->profile_enabled = 1;
-        proc_profile_snapshot();
+        interrupt_state = resource_scheduler_interrupt_disable();
+        cpu_self()->profiler = state;
+        proc_profile_snapshot(1);
+        resource_scheduler_interrupt_restore(interrupt_state);
         status = 0;
         break;
     case RPC_PROFILE_STOP:
         if (!state->buffer || config->generation != state->generation ||
             config->buffer_addr != (uintptr_t)state->buffer ||
-            config->capacity != state->capacity)
+            config->capacity != (uintptr_t)(state->end - state->buffer))
             break;
-        state->enabled = 0;
-        cpu_self()->profile_enabled = 0;
-        platform_cache_flush(state->buffer, state->count);
-        config->count = state->count;
+        cpu_self()->profiler = 0;
+        platform_cache_flush(state->buffer, state->next - state->buffer);
+        config->count = state->next - state->buffer;
         state->buffer = 0;
-        state->capacity = 0;
-        state->count = 0;
+        state->next = 0;
+        state->end = 0;
         state->generation = 0;
         state->full_pending = 0;
         status = 0;
         break;
     }
-    config->enabled = state->enabled;
+    config->enabled = cpu_self()->profiler != 0 || state->full_pending;
     config->status = status;
     return status;
 }

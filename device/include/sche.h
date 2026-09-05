@@ -51,11 +51,12 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
 void thread_schedule(struct thread *thread);
 int thread_create_child(const char *name, thread_fn entry, void *argument,
                         const struct dayan_thread_resources *resources);
-int thread_join(uint32_t thread_id, int64_t *result);
+int thread_join(uint32_t id, int64_t *result);
 int thread_join_all(void);
 int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot);
 /* Emits a slot definition and initial state for every existing proc. */
-void proc_profile_snapshot(void);
+/* START and resume hold IRQs disabled until definitions are published. */
+void proc_profile_snapshot(int reset);
 int proc_kill_all(struct rpc_proc_kill_result *result);
 void thread_system_wait_set(struct thread *thread, void *wait);
 int thread_output_enabled(const struct thread *thread);
@@ -74,7 +75,6 @@ uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
                                int8_t qos);
 void thread_wait_rpc(void);
 void scheduler_reap_thread(struct thread *thread);
-void scheduler_kill_token(struct thread *thread);
 _Noreturn void thread_exit_defer(void *wait);
 void thread_exit_deferred_complete(struct thread *thread);
 _Noreturn void thread_exit(void);

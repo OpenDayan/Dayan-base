@@ -99,7 +99,8 @@ _Static_assert(offsetof(struct trap_record, x) == 56,
 _Static_assert(offsetof(struct trap_record, host_proc_id) == 312,
                "trap record proc identity offset");
 
-_Noreturn void trap_handle(const struct trap_frame *frame);
+void trap_handle(const struct trap_frame *frame);
+_Noreturn void trap_exit(void);
 void trap_report_complete(void);
 
 #endif

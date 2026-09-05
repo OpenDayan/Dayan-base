@@ -31,6 +31,7 @@ enum slot_state {
     SLOT_RESERVED,
     SLOT_CHILD,
     SLOT_ZOMBIE,
+    SLOT_KILLED, /* Token queued or cleanup running; cleared only after switch. */
 };
 
 static union thread_slot
@@ -49,6 +50,10 @@ struct thread *scheduler_rpc_receive_threads[CONFIG_HART_COUNT] SLOT_ARRAY;
 
 _Static_assert(offsetof(struct thread, state) == THREAD_STATE_OFFSET,
                "assembly thread state offset");
+_Static_assert(offsetof(struct thread, slot) == THREAD_SLOT_OFFSET &&
+                   THREAD_STATE_OFFSET == THREAD_SLOT_OFFSET + 1 &&
+                   !(THREAD_SLOT_OFFSET & 1),
+               "assembly profile slot/state halfword");
 _Static_assert(offsetof(struct thread, sp) == THREAD_SP_OFFSET,
                "assembly thread sp offset");
 _Static_assert(offsetof(struct thread, pc) == THREAD_PC_OFFSET,
@@ -92,7 +97,7 @@ struct thread *thread_slot_get(uint8_t slot)
 
 uint8_t thread_slot_id(const struct thread *thread)
 {
-    return thread->id & THREAD_ID_SLOT_MASK;
+    return thread->slot;
 }
 
 static enum slot_state slot_state_get(uint8_t slot)
@@ -169,12 +174,7 @@ static size_t task_child_stack_size(const struct task_proc *task)
 static void thread_state_set(struct thread *thread, uint8_t state)
 {
     thread->state = state;
-    if (__builtin_expect(cpu_self()->profile_enabled, 0)) {
-        uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
-
-        profile_record_thread_state(thread);
-        resource_scheduler_interrupt_restore(interrupt_state);
-    }
+    profile_record_thread_state(thread);
 }
 
 void thread_schedule(struct thread *thread)
@@ -205,8 +205,8 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
         ++runtime->generation[slot];
     thread->type = type;
     thread->state = THREAD_WAIT_START;
-    thread->id = (uint16_t)((runtime->generation[slot] << THREAD_ID_SLOT_BITS) |
-                            slot);
+    thread->slot = slot;
+    thread->generation = runtime->generation[slot];
     thread->parent = THREAD_SLOT_NONE;
     frame->entry = (uintptr_t)entry;
     frame->ra = (uintptr_t)thread_exit;
@@ -221,12 +221,7 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
         runtime->output_size[TASK_INDEX(slot)] = 0;
         thread_list_init(&runtime->wait_exit[TASK_INDEX(slot)]);
     }
-    if (cpu_self()->profile_enabled) {
-        uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
-
-        profile_record_thread_start(thread);
-        resource_scheduler_interrupt_restore(interrupt_state);
-    }
+    profile_record_thread_start(thread);
     if (slot == RPC_PROFILE_SLOT_RPC_RECEIVE)
         thread_state_set(thread, THREAD_WAIT_POLL);
     else if (type == THREAD_TYPE_SYSTEM)
@@ -400,13 +395,13 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
     child->resource_context = dayan_resource_context_pack(&child_resources);
     runtime->slot_state[child_slot] = SLOT_CHILD;
     thread_schedule(child);
-    return child->id;
+    return thread_id(child);
 }
 
-int thread_join(uint32_t thread_id, int64_t *result)
+int thread_join(uint32_t id, int64_t *result)
 {
     struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
-    uint8_t slot = thread_id & THREAD_ID_SLOT_MASK;
+    uint8_t slot = id & THREAD_ID_SLOT_MASK;
     uint8_t parent_slot = thread_slot_id(current);
     struct thread *child;
 
@@ -417,7 +412,7 @@ int thread_join(uint32_t thread_id, int64_t *result)
          runtime->slot_state[slot] != SLOT_ZOMBIE))
         return -ECHILD;
     child = thread_slot_get(slot);
-    if (child->id != thread_id || child->parent != parent_slot)
+    if (thread_id(child) != id || child->parent != parent_slot)
         return -ECHILD;
     if (runtime->slot_state[slot] != SLOT_ZOMBIE)
         thread_wait_event(&runtime->wait_exit[TASK_INDEX(slot)]);
@@ -440,7 +435,7 @@ int thread_join_all(void)
         if ((runtime->slot_state[slot] == SLOT_CHILD ||
              runtime->slot_state[slot] == SLOT_ZOMBIE) &&
             child->parent == parent_slot)
-            (void)thread_join(child->id, 0);
+            (void)thread_join(thread_id(child), 0);
     }
     return 0;
 }
@@ -472,8 +467,8 @@ int thread_output_flush(struct thread *thread)
     size = &HART_RUNTIME(hart).output_size[TASK_INDEX(slot)];
     if (!*size)
         return 0;
-    if (rpc_write_proc(task->thread.id, hart_thread_printf[hart][TASK_INDEX(slot)],
-                        *size) < 0)
+    if (rpc_write_proc(thread_id(&task->thread),
+                        hart_thread_printf[hart][TASK_INDEX(slot)], *size) < 0)
         return -1;
     *size = 0;
     return 0;
@@ -507,12 +502,13 @@ static void snapshot_thread(struct rpc_proc_info *record,
                             thread_slot_get(thread->parent);
 
     memset(record, 0, sizeof(*record));
-    record->proc_id = thread->id;
-    record->parent_proc_id = parent ? parent->id : 0;
+    record->proc_id = thread_id(thread);
+    record->parent_proc_id = parent ? thread_id(parent) : 0;
     record->state = thread->state;
     record->flags = flags;
     for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
-        record->live_children += slot_state_get(slot) == SLOT_CHILD &&
+        record->live_children += (slot_state_get(slot) == SLOT_CHILD ||
+                                  slot_state_get(slot) == SLOT_KILLED) &&
             thread_slot_get(slot)->parent == thread_slot_id(thread);
     record->slot_index = slot_index;
     record->result = task ? HART_RUNTIME(platform_hart_id()).result[
@@ -521,7 +517,7 @@ static void snapshot_thread(struct rpc_proc_info *record,
     memcpy(record->name, thread->name, sizeof(record->name));
     if (task) {
         record->task_mode = task->descriptor.task_mode;
-        record->host_proc_id = task->thread.id;
+        record->host_proc_id = thread_id(&task->thread);
         memcpy(record->task_id, task->descriptor.task_id,
                sizeof(record->task_id));
         memcpy(record->task_dim, task->descriptor.task_dim,
@@ -535,7 +531,11 @@ static uint32_t snapshot_slot_flags(uint8_t slot)
     enum slot_state state = slot_state_get(slot);
     uint32_t flags;
 
-    if (state == SLOT_ROOT) {
+    if (state == SLOT_KILLED) {
+        return RPC_PROC_INFO_KILL_WAIT_PRODUCE |
+            (thread_slot_get(slot)->type == THREAD_TYPE_TASK_PROC ?
+                 RPC_PROC_INFO_HOST_ROOT : RPC_PROC_INFO_CHILD);
+    } else if (state == SLOT_ROOT) {
         flags = RPC_PROC_INFO_HOST_ROOT;
     } else if (state == SLOT_CHILD) {
         flags = RPC_PROC_INFO_CHILD;
@@ -544,8 +544,6 @@ static uint32_t snapshot_slot_flags(uint8_t slot)
     } else {
         return 0;
     }
-    if (thread_slot_get(slot)->state == THREAD_KILL_WAIT_PRODUCE)
-        flags |= RPC_PROC_INFO_KILL_WAIT_PRODUCE;
     return flags;
 }
 
@@ -582,32 +580,53 @@ int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot)
     return 0;
 }
 
-void proc_profile_snapshot(void)
+void proc_profile_snapshot(int reset)
 {
-    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
     uint8_t slot;
 
     for (slot = SYSTEM_SLOT_FIRST; slot < THREAD_SLOT_COUNT; ++slot) {
         struct thread *thread = thread_slot_get(slot);
 
-        profile_record_thread_start(thread);
+        if (reset || !thread->profile_defined)
+            profile_record_thread_start(thread);
     }
     for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
-        if (snapshot_slot_flags(slot))
-            profile_record_thread_start(thread_slot_get(slot));
+        if (snapshot_slot_flags(slot)) {
+            struct thread *thread = thread_slot_get(slot);
+
+            if (reset || !thread->profile_defined)
+                profile_record_thread_start(thread);
+        }
     }
-    resource_scheduler_interrupt_restore(interrupt_state);
+}
+
+/* Entered via the redirected PC on a fresh stack; no old frame is restored. */
+static _Noreturn void thread_kill_resume(void)
+{
+    thread_state_set(current, THREAD_WAIT_EXIT);
+    switch_context();
+    __builtin_unreachable();
 }
 
 static void kill_mark_thread(struct thread *thread, int64_t status)
 {
+    uintptr_t hart = platform_hart_id();
+    struct thread_runtime *runtime = &HART_RUNTIME(hart);
     uint8_t slot = thread_slot_id(thread);
     int waiting_token = thread->state == THREAD_READY ||
                         thread->state == THREAD_WAIT_PRODUCE;
 
-    HART_RUNTIME(platform_hart_id()).result[TASK_INDEX(slot)] = status;
+    runtime->result[TASK_INDEX(slot)] = status;
     if (thread->state == THREAD_WAIT_EVENT)
         thread_list_remove(thread);
+    if (waiting_token) {
+        /* Keep the slot pending until the redirected thread leaves its stack. */
+        runtime->slot_state[slot] = SLOT_KILLED;
+        thread->sp = ((uintptr_t)hart_thread_stacks[hart][TASK_INDEX(slot)] +
+                       task_child_stack_size(task_proc_for(thread))) &
+                      ~(uintptr_t)0xf;
+        thread->pc = (uintptr_t)thread_kill_resume;
+    }
     thread_state_set(thread, waiting_token ? THREAD_KILL_WAIT_PRODUCE :
                                              THREAD_WAIT_EXIT);
 }
@@ -619,8 +638,7 @@ static uint32_t family_pending_produce(uint8_t root)
 
     for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
         count += runtime->slot_owner[TASK_INDEX(slot)] == root &&
-                 runtime->slot_state[slot] != SLOT_RESERVED &&
-                 thread_slot_get(slot)->state == THREAD_KILL_WAIT_PRODUCE;
+                 runtime->slot_state[slot] == SLOT_KILLED;
     return count;
 }
 
@@ -661,8 +679,7 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
 
         if (runtime->slot_state[root] != SLOT_ROOT ||
             thread->state == THREAD_WAIT_EXIT ||
-            thread->state == THREAD_KILL_WAIT_PRODUCE ||
-            (selector && thread->id != selector))
+            (selector && thread_id(thread) != selector))
             continue;
         for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
             if (slot != root && runtime->slot_owner[TASK_INDEX(slot)] == root &&
@@ -698,6 +715,10 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
                     list_del_init(&transaction->node);
                     transaction->status = -ECANCELED;
                     transaction->completed = 1;
+                } else if (transaction->status >= 0 &&
+                           rpc_command_opcode(transaction->command) == RPC_WRITE) {
+                    /* The sender got the ack before this print waiter resumed. */
+                    runtime->output_size[TASK_INDEX(slot)] = 0;
                 }
                 thread_system_wait_set(thread, 0);
             }
@@ -708,15 +729,6 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
         result->released_slots += killed_family_release(root);
     }
     return 0;
-}
-
-void scheduler_kill_token(struct thread *thread)
-{
-    uint8_t slot = thread_slot_id(thread);
-    uint8_t root = HART_RUNTIME(platform_hart_id()).slot_owner[TASK_INDEX(slot)];
-
-    thread_state_set(thread, THREAD_WAIT_EXIT);
-    (void)killed_family_release(root);
 }
 
 size_t thread_event_wake_one(struct thread_list *event)
@@ -781,7 +793,7 @@ uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
 {
     struct thread *thread = current;
 
-    thread_state_set(thread, THREAD_READY);
+    thread_state_set(thread, THREAD_WAIT_PRODUCE);
     resource_scheduler_submit(wait_free, wait_ready, qos, (uintptr_t)thread);
     switch_context();
     return thread->token_ext;
@@ -850,8 +862,18 @@ _Noreturn void thread_exit(void)
 
 void scheduler_reap_thread(struct thread *thread)
 {
-    if (thread->type == THREAD_TYPE_TASK_PROC)
-        (void)task_proc_release(thread_slot_id(thread));
+    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    uint8_t slot = thread_slot_id(thread);
+
+    if (runtime->slot_state[slot] == SLOT_KILLED) {
+        uint8_t root = runtime->slot_owner[TASK_INDEX(slot)];
+
+        runtime->slot_state[slot] = thread->type == THREAD_TYPE_TASK_PROC ?
+                                       SLOT_ROOT : SLOT_ZOMBIE;
+        (void)killed_family_release(root);
+    } else if (thread->type == THREAD_TYPE_TASK_PROC) {
+        (void)task_proc_release(slot);
+    }
 }
 
 void sche_init(void)
@@ -859,7 +881,7 @@ void sche_init(void)
     uintptr_t hart = platform_hart_id();
     struct thread_runtime *runtime = &HART_RUNTIME(hart);
 
-    cpu_self()->profile_enabled = 0;
+    cpu_self()->profiler = 0;
     scheduler_rpc_receive_threads[hart] =
         thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE);
     resource_scheduler_local_init();

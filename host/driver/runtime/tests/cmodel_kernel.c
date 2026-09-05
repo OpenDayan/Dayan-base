@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h>
 
 #include <dayan_sys.h>
 
@@ -154,16 +155,52 @@ void grid_kernel(uint64_t *output, uint64_t base)
     dayan_thread_exit((int64_t)expected);
 }
 
-void kill_kernel(uint64_t *output, uint64_t value)
+static void trap_child(void *argument)
 {
-    *output = value;
+    (void)argument;
+    __asm__ volatile(".word 0");
+}
+
+static void kill_yield_child(void *argument)
+{
+    (void)argument;
     for (;;)
         dayan_yield();
 }
 
-static void trap_child(void *argument)
+static void kill_produce_child(void *argument)
 {
     (void)argument;
+    for (;;)
+        dayan_wait_lsu();
+}
+
+void kill_kernel(uint64_t *output, uint64_t value)
+{
+    uintptr_t pending;
+
+    *output = value;
+    output[8] = 0;
+    dayan_cache_flush(output, 72);
+    if (dayan_create_thread("kill-yield", kill_yield_child, 0, 0) < 0 ||
+        dayan_create_thread("kill-produce", kill_produce_child, 0, 0) < 0)
+        dayan_thread_exit(-1);
+    for (;;) {
+        dayan_cache_invalidate(output, sizeof(*output));
+        if (*output != value)
+            break;
+        dayan_yield();
+    }
+
+    /* Host has finished PS. Keep the new child unstarted until kill's MSIP. */
+    if (dayan_create_thread("kill-unstarted", trap_child, 0, 0) < 0)
+        dayan_thread_exit(-1);
+    output[8] = 1;
+    dayan_cache_flush(&output[8], sizeof(output[8]));
+    do {
+        __asm__ volatile("csrr %0, mip" : "=r"(pending));
+    } while (!(pending & 8U));
+    dayan_yield();
     __asm__ volatile(".word 0");
 }
 
@@ -176,6 +213,29 @@ void trap_kernel(void)
         if (child < 0)
             dayan_thread_exit(child);
     }
+    for (;;)
+        dayan_yield();
+}
+
+void interrupt_kernel(uint64_t *output, uint64_t base)
+{
+    uint32_t x = dayan_task_id(DAYAN_TASK_X);
+    uint64_t expected = base + (uint64_t)dayan_task_mode() * 100U + x;
+    uintptr_t mstatus;
+
+    __asm__ volatile("csrr %0, mstatus" : "=r"(mstatus));
+    if (!(mstatus & 8U))
+        dayan_thread_exit(-1);
+    /* LSU group 1, DIM0: outside the single assigned group, raises source 12. */
+    __builtin_riscv_tx_lsu_tcsr_write(0x2aU, 33);
+    output[x] = expected;
+    dayan_thread_exit((int64_t)expected);
+}
+
+void print_kill_kernel(void)
+{
+    puts("print-before-kill");
+    fflush(stdout);
     for (;;)
         dayan_yield();
 }

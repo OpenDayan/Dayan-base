@@ -257,11 +257,6 @@ int snprintf(char *restrict dst, size_t size,
     return result;
 }
 
-static int thread_flush(struct thread *thread)
-{
-    return thread_output_flush(thread);
-}
-
 static int thread_put(void *context, char ch)
 {
     struct thread *thread = context;
@@ -318,5 +313,5 @@ int fflush(FILE *stream)
 {
     if (stream && stream != stdout)
         return EOF;
-    return thread_flush(thread_self()) < 0 ? EOF : 0;
+    return thread_output_flush(thread_self()) < 0 ? EOF : 0;
 }

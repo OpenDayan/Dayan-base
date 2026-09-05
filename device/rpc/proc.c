@@ -42,7 +42,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
         status = task ? 0 : -ENOMEM;
     }
     request->status = status;
-    request->proc_id = task ? task->thread.id : 0;
+    request->proc_id = task ? thread_id(&task->thread) : 0;
     request->hart_id = (uint32_t)platform_hart_id();
     request->state = task ? RPC_PROC_RUNNING : RPC_PROC_FAILED;
     /* Return every descriptor cache line to Host before replying. */

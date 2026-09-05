@@ -163,6 +163,7 @@ $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 		-mno-relax -msmall-data-limit=0 -ffreestanding -fno-builtin \
 		-fno-common -fno-pic -fno-stack-protector -ffunction-sections \
 		-fdata-sections -O2 -Wall -Wextra -Werror \
+		-Xclang -target-feature -Xclang +txlsu \
 		-I$(ROOT)/device/include/api -c $< -o $@
 
 $(BUILD)/tests/cmodel_smoke: runtime/tests/cmodel_smoke.c \

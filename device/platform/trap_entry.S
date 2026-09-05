@@ -54,30 +54,18 @@ trap_entry:
     sd      t0, TRAP_FRAME_FCSR(sp)
     sd      zero, TRAP_FRAME_RESERVED(sp)
 
-    /* RPC uses MSIP as a polled doorbell. Resume any stale latched IRQ. */
+    /* MSIP is a polled doorbell; only the receive thread may acknowledge it. */
     ld      t0, TRAP_FRAME_MCAUSE(sp)
     li      t1, 0x8000000000000003
-    beq     t0, t1, .Ltrap_resume_msip
+    beq     t0, t1, .Ltrap_restore
     li      t1, 0x800000000000000b
     beq     t0, t1, .Ltrap_resume_tensor
 
-    /* Rearm the dedicated stack before C switches away from this proc. */
-    addi    t0, sp, TRAP_FRAME_SIZE
-    csrw    mscratch, t0
     mv      a0, sp
     call    trap_handle
-
-.Ltrap_halt:
-    wfi
-    j       .Ltrap_halt
-
-.Ltrap_resume_msip:
-    /* The receive thread already consumed this polled doorbell. */
-    call    platform_rpc_receive_ack
-
-    /* mret copies MPIE to MIE, so clear both bits before resuming. */
-    li      t0, 0x88
-    csrc    mstatus, t0
+    /* Leave the trap stack and restore MIE before any blocking RPC or join. */
+    la      t0, trap_exit
+    csrw    mepc, t0
     j       .Ltrap_restore
 
 .Ltrap_resume_tensor:

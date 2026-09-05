@@ -15,6 +15,9 @@
 #include "npu_runtime.h"
 #include "backend/xdma/npu_hal_xdma.h"
 #include "server_internal.h"
+#include "service_internal.h"
+#include "tensor_interrupt.h"
+#include "platform_regs.h"
 
 #define LOCK_TEST_CHILD_THREADS 2U
 #define LOCK_TEST_STARTED_MASK ((UINT64_C(1) << LOCK_TEST_CHILD_THREADS) - 1U)
@@ -46,7 +49,78 @@ struct proc_exit_capture {
     unsigned cancelled;
     unsigned failed;
     unsigned bad;
+    unsigned interrupt_mask;
 };
+
+static struct {
+    npu_service_device_t *device;
+    npu_service_output_fn output;
+    pthread_t worker;
+    npu_hal_core_t core;
+    uint32_t proc;
+    unsigned count;
+    int started;
+    int status;
+    int bad;
+} print_kill;
+
+static void *kill_print_waiter(void *argument)
+{
+    npu_service_kill_result_t result;
+
+    (void)argument;
+    print_kill.status = npu_service_rpc_kill_family(
+        print_kill.device, print_kill.core, print_kill.proc, -EIO, &result);
+    return 0;
+}
+
+static void capture_print(void *context, uint32_t cluster, uint32_t core,
+                           uint32_t proc, const void *data, size_t size,
+                           uint32_t flags)
+{
+    static const char message[] = "print-before-kill\n";
+    uint32_t pending = 0;
+    uint64_t deadline;
+
+    print_kill.output(context, cluster, core, proc, data, size, flags);
+    if (size != sizeof(message) - 1U || memcmp(data, message, size))
+        return;
+    if (__atomic_add_fetch(&print_kill.count, 1U, __ATOMIC_RELAXED) != 1U)
+        return;
+    print_kill.core = (npu_hal_core_t){ cluster, core };
+    print_kill.proc = proc;
+    if (pthread_create(&print_kill.worker, 0, kill_print_waiter, 0)) {
+        print_kill.bad = 1;
+        return;
+    }
+    __atomic_store_n(&print_kill.started, 1, __ATOMIC_RELEASE);
+    /* Keep WRITE unacknowledged until kill has reached the Device mailbox. */
+    deadline = npu_now_ms() + 5000U;
+    while (!pending && npu_now_ms() < deadline) {
+        const struct timespec delay = { 0, 1000000L };
+
+        if (npu_hal_copy_from_address(print_kill.device->hal, cluster,
+                                      &pending, DAYAN_CLINT_MSIP(core),
+                                      sizeof(pending)) < 0)
+            break;
+        if (!pending)
+            (void)nanosleep(&delay, 0);
+    }
+    if (!pending)
+        print_kill.bad = 1;
+}
+
+static void capture_tensor_interrupt(void *context, uint32_t cluster,
+                                      uint32_t core,
+                                      const struct tensor_interrupt_record *record)
+{
+    struct proc_exit_capture *capture = context;
+
+    if (cluster || core >= 4 || record->hart_id != core ||
+        record->mcause != UINT64_C(0x800000000000000b))
+        __atomic_add_fetch(&capture->bad, 1U, __ATOMIC_RELAXED);
+    __atomic_fetch_or(&capture->interrupt_mask, 1U << core, __ATOMIC_RELAXED);
+}
 
 static void capture_proc_exit(void *context, uint32_t cluster,
                               uint32_t core, uint32_t proc,
@@ -71,7 +145,10 @@ static void capture_proc_exit(void *context, uint32_t cluster,
     __atomic_add_fetch(&capture->count, 1U, __ATOMIC_RELAXED);
 }
 
+static int wait_and_destroy(npu_event_t *event);
+
 static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
+                         npu_stream_t *transfer_stream,
                          npu_kernel_t *kernel, npu_buffer_t *buffer)
 {
     npu_service_kill_result_t killed;
@@ -79,8 +156,11 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
     npu_launch_desc_t launch;
     npu_event_info_t info;
     npu_event_t *event = 0;
+    npu_event_t *transfer = 0;
     npu_hal_core_t target = { 0, 0 };
     uint64_t value = UINT64_C(0x9876543210);
+    uint64_t release = ~value;
+    uint64_t ready = 0;
     unsigned attempt;
     uint32_t root_proc_id = 0;
     int found = 0;
@@ -91,7 +171,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
     launch.config.task_mode = (NPUTaskMode)1;
     launch.arg_count = 2;
     npu_kernel_arg_buffer(&launch.args[0], buffer, 0,
-                          NPU_KERNEL_ARG_WRITE);
+                          NPU_KERNEL_ARG_READ | NPU_KERNEL_ARG_WRITE);
     npu_kernel_arg_value(&launch.args[1], value, sizeof(value));
     status = npu_kernel_launch(stream, kernel, &launch, &event);
     if (status < 0) {
@@ -118,14 +198,33 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
                 for (record = 0; record < snapshot.count; ++record) {
                     if (snapshot.records[record].flags &
                         NPU_SERVICE_PROC_HOST_ROOT) {
+                        unsigned child_states = 0;
+
                         if (snapshot.records[record].host_proc_id !=
                                 snapshot.records[record].proc_id ||
                             snapshot.records[record].parent_proc_id ||
                             strcmp(snapshot.records[record].name,
                                    "kill-test") != 0 ||
-                            snapshot.reserved_slots != 1U ||
-                            snapshot.global_free_slots != 15U)
+                            snapshot.reserved_slots != 4U ||
+                            snapshot.global_free_slots != 12U)
                             return -EIO;
+                        for (uint32_t child = 0; child < snapshot.count; ++child) {
+                            if (snapshot.records[child].parent_proc_id !=
+                                snapshot.records[record].proc_id)
+                                continue;
+                            if (!strcmp(snapshot.records[child].name,
+                                        "kill-yield") &&
+                                snapshot.records[child].state ==
+                                    NPU_PROFILE_PROC_READY)
+                                child_states |= 1U;
+                            if (!strcmp(snapshot.records[child].name,
+                                        "kill-produce") &&
+                                snapshot.records[child].state ==
+                                    NPU_PROFILE_PROC_WAIT_PRODUCE)
+                                child_states |= 2U;
+                        }
+                        if (child_states != 3U)
+                            continue;
                         found = 1;
                         root_proc_id = snapshot.records[record].proc_id;
                         break;
@@ -145,14 +244,35 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         fprintf(stderr, "kill test proc was not visible through rpc_ps\n");
         return -ETIMEDOUT;
     }
+    /* Publish the final child, then issue kill without an intervening PS. */
+    status = npu_memcpy_h2d_async(transfer_stream, buffer, 0,
+                                  &release, sizeof(release), &transfer);
+    if (status == 0)
+        status = wait_and_destroy(transfer);
+    if (status < 0)
+        return status;
+    for (attempt = 0; attempt < 5000U && !ready; ++attempt) {
+        const struct timespec delay = { 0, 1000000L };
+
+        status = npu_memcpy_d2h_async(transfer_stream, &ready, buffer, 64,
+                                      sizeof(ready), &transfer);
+        if (status == 0)
+            status = wait_and_destroy(transfer);
+        if (status < 0)
+            return status;
+        if (!ready)
+            (void)nanosleep(&delay, 0);
+    }
+    if (ready != 1U)
+        return -ETIMEDOUT;
     status = npu_service_rpc_kill_family(server->device, target,
                                          root_proc_id, -EIO, &killed);
     if (status < 0) {
         fprintf(stderr, "kill test rpc_kill_family failed: %d\n", status);
         return status;
     }
-    if (killed.killed_roots != 1U || killed.killed_children ||
-        killed.released_slots != 0U || killed.waiting_produce != 1U)
+    if (killed.killed_roots != 1U || killed.killed_children != 3U ||
+        killed.released_slots != 0U || killed.waiting_produce != 4U)
         return -EIO;
     /* Blocking receive replies before the dispatcher can consume old tokens. */
     for (attempt = 0; attempt < 1000U; ++attempt) {
@@ -178,15 +298,15 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
     return npu_event_destroy(event);
 }
 
-static int run_trap_test(npu_stream_t *stream, npu_kernel_t *kernel,
-                         unsigned core_count)
+static int run_failed_launch(npu_stream_t *stream, npu_kernel_t *kernel,
+                              unsigned core_count, const char *name)
 {
     npu_launch_desc_t launch;
     npu_event_info_t info;
     npu_event_t *event = 0;
     int status;
 
-    npu_launch_desc_init(&launch, "trap-test");
+    npu_launch_desc_init(&launch, name);
     if (core_count == 4U) {
         launch.config.task_dim = (NPUTaskDim3){ 4, 1, 1 };
         launch.config.task_mode = (NPUTaskMode)4;
@@ -591,6 +711,8 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
     uint32_t first_hart_mask = 0;
     unsigned first_hart_count = 0;
     int saw_running = 0;
+    int saw_root_running = 0;
+    int saw_child_running = 0;
     int saw_ready = 0;
     int saw_wait = 0;
     int saw_exit = 0;
@@ -664,6 +786,10 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
             switch (state) {
             case NPU_PROFILE_PROC_RUNNING:
                 saw_running = 1;
+                saw_root_running |=
+                    strcmp(slot_names[batch.hart][slot], "grid-kernel") == 0;
+                saw_child_running |=
+                    strcmp(slot_names[batch.hart][slot], "child-write") == 0;
                 break;
             case NPU_PROFILE_PROC_READY:
                 saw_ready = 1;
@@ -688,15 +814,16 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
     }
     if (!record_count || first_hart_count != core_count || !saw_running ||
         !saw_ready || !saw_wait || !saw_exit || !saw_full ||
-        !saw_named_root || !saw_named_child)
+        !saw_named_root || !saw_named_child ||
+        !saw_root_running || !saw_child_running)
         return -EIO;
     return npu_profile_destroy(profile);
 }
 
 int main(int argc, char **argv)
 {
-    npu_package_argument_t arguments[3];
-    npu_package_kernel_desc_t kernel_desc[6];
+    npu_package_argument_t arguments[4];
+    npu_package_kernel_desc_t kernel_desc[8];
     dayan_server_options_t server_options;
     npu_hal_xdma_options_t xdma_options;
     npu_runtime_options_t runtime_options;
@@ -709,6 +836,8 @@ int main(int argc, char **argv)
     npu_kernel_t *kernel = 0;
     npu_kernel_t *killable_kernel = 0;
     npu_kernel_t *trap_kernel = 0;
+    npu_kernel_t *interrupt_kernel = 0;
+    npu_kernel_t *print_kernel = 0;
     npu_kernel_t *locked_kernel = 0;
     npu_kernel_t *normal_kernel = 0;
     npu_kernel_t *sequence_kernel = 0;
@@ -716,7 +845,7 @@ int main(int argc, char **argv)
     npu_profile_t *profile = 0;
     dayan_server_t *server = 0;
     struct run_state run;
-    struct proc_exit_capture exits = { 0, 0, 0, 0, 0 };
+    struct proc_exit_capture exits = { 0 };
     pthread_t server_thread;
     void *object = 0;
     void *package = 0;
@@ -754,6 +883,7 @@ int main(int argc, char **argv)
     arguments[1].size = 8;
     arguments[2] = arguments[0];
     arguments[2].access = NPU_PACKAGE_ARG_READ | NPU_PACKAGE_ARG_WRITE;
+    arguments[3] = arguments[1];
     memset(kernel_desc, 0, sizeof(kernel_desc));
     kernel_desc[0].name = "grid_kernel";
     kernel_desc[0].entry_symbol = "grid_kernel";
@@ -767,7 +897,8 @@ int main(int argc, char **argv)
     kernel_desc[1] = kernel_desc[0];
     kernel_desc[1].name = "kill_kernel";
     kernel_desc[1].entry_symbol = "kill_kernel";
-    kernel_desc[1].max_child_threads = 0;
+    kernel_desc[1].max_child_threads = 3;
+    kernel_desc[1].arguments = &arguments[2];
     kernel_desc[2].name = "locked_kernel";
     kernel_desc[2].entry_symbol = "locked_kernel";
     kernel_desc[2].supported_task_modes =
@@ -796,7 +927,17 @@ int main(int argc, char **argv)
     kernel_desc[5].max_tasks_per_core = 1;
     kernel_desc[5].max_child_threads = 1;
     kernel_desc[5].atomic_cache_size = 64;
-    status = npu_package_build(object, object_size, kernel_desc, 6, 0,
+    kernel_desc[6] = kernel_desc[4];
+    kernel_desc[6].name = "interrupt_kernel";
+    kernel_desc[6].entry_symbol = "interrupt_kernel";
+    kernel_desc[6].supported_task_modes = NPU_PACKAGE_TASK_MODE_ALL;
+    kernel_desc[6].max_tasks_per_core = 1;
+    kernel_desc[6].lsu_tcsr_count = 1;
+    kernel_desc[7].name = "print_kill_kernel";
+    kernel_desc[7].entry_symbol = "print_kill_kernel";
+    kernel_desc[7].supported_task_modes = NPU_PACKAGE_TASK_MODE_SINGLE_CORE;
+    kernel_desc[7].max_tasks_per_core = 1;
+    status = npu_package_build(object, object_size, kernel_desc, 8, 0,
                                &package, &package_size);
     free(object);
     if (status < 0)
@@ -828,6 +969,7 @@ int main(int argc, char **argv)
     }
     xdma_options.device_directory = device_prefix;
     server_options.service.proc_exit = capture_proc_exit;
+    server_options.service.tensor_interrupt = capture_tensor_interrupt;
     server_options.service.callback_context = &exits;
     status = dayan_server_create(&server, &server_options);
     if (status < 0) {
@@ -868,6 +1010,9 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    print_kill.device = server->device;
+    print_kill.output = server->device->options.output;
+    server->device->options.output = capture_print;
     run.server = server;
     run.status = -1;
     assert(pthread_create(&server_thread, 0, run_server, &run) == 0);
@@ -879,9 +1024,21 @@ int main(int argc, char **argv)
 
         stage = "profile start";
         npu_profile_options_init(&options);
-        /* Exactly 1024 bytes/Hart fits the snapshot and forces a flush. */
-        options.buffer_size = (uint64_t)core_count * 1024U;
+        /* Round each 1032-byte slice down to an isolated 1024-byte buffer. */
+        options.buffer_size = (uint64_t)core_count * 1032U;
         status = npu_profile_start(runtime, &options, &profile);
+        if (status == 0) {
+            pthread_mutex_lock(&server->device->mutex);
+            for (size_t i = 0; i < server->device->profile_core_count; ++i) {
+                const struct npu_service_profile_core *core =
+                    &server->device->profile_cores[i];
+
+                if (core->configured &&
+                    ((core->address & 63U) || core->capacity != 1024U))
+                    status = -EIO;
+            }
+            pthread_mutex_unlock(&server->device->mutex);
+        }
     }
     if (status == 0) {
         stage = "context create";
@@ -923,6 +1080,16 @@ int main(int argc, char **argv)
         stage = "trap kernel lookup";
         status = npu_module_get_kernel(module, "trap_kernel",
                                        &trap_kernel);
+    }
+    if (status == 0) {
+        stage = "interrupt kernel lookup";
+        status = npu_module_get_kernel(module, "interrupt_kernel",
+                                       &interrupt_kernel);
+    }
+    if (status == 0) {
+        stage = "print kernel lookup";
+        status = npu_module_get_kernel(module, "print_kill_kernel",
+                                       &print_kernel);
     }
     if (status == 0) {
         stage = "locked kernel lookup";
@@ -975,11 +1142,34 @@ int main(int argc, char **argv)
     }
     if (status == 0) {
         stage = "trap propagation";
-        status = run_trap_test(stream, trap_kernel, core_count);
+        status = run_failed_launch(stream, trap_kernel, core_count, "trap-test");
+    }
+    if (status == 0) {
+        unsigned count = core_count == 4 ? 4 : 1;
+
+        stage = "tensor interrupt after synchronous trap";
+        status = run_grid(stream, interrupt_kernel, buffer,
+                          (NPUTaskDim3){ count, 1, 1 }, count,
+                          UINT64_C(0x4567890000006000), output, count);
+        if (status == 0 &&
+            __atomic_load_n(&exits.interrupt_mask, __ATOMIC_RELAXED) !=
+                (1U << count) - 1U)
+            status = -EIO;
+    }
+    if (status == 0) {
+        stage = "kill after print ack";
+        status = run_failed_launch(stream, print_kernel, 1, "print-kill");
+        if (__atomic_load_n(&print_kill.started, __ATOMIC_ACQUIRE))
+            assert(pthread_join(print_kill.worker, 0) == 0);
+        if (status == 0 &&
+            (print_kill.status || print_kill.bad ||
+             __atomic_load_n(&print_kill.count, __ATOMIC_RELAXED) != 1U))
+            status = -EIO;
     }
     if (status == 0) {
         stage = "rpc kill family";
-        status = run_kill_test(server, stream, killable_kernel, buffer);
+        status = run_kill_test(server, stream, transfer_stream,
+                               killable_kernel, buffer);
     }
     if (status == 0) {
         stage = "profile stop and drain";
@@ -990,15 +1180,17 @@ int main(int argc, char **argv)
     if (status == 0 &&
         (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.count, __ATOMIC_RELAXED) !=
-                 9U + (core_count == 1 ? 2U : 0U) +
+                 10U + (core_count == 1 ? 2U : 0U) +
+                     (core_count == 4 ? 4U : 1U) +
                      (core_count == 4 ? 8U : 0U) + consecutive_launches +
                      (core_count == 4 ? 4U : 1U) ||
          __atomic_load_n(&exits.returned, __ATOMIC_RELAXED) !=
                  8U + (core_count == 1 ? 2U : 0U) +
+                     (core_count == 4 ? 4U : 1U) +
                      (core_count == 4 ? 8U : 0U) + consecutive_launches ||
          __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.failed, __ATOMIC_RELAXED) !=
-             (core_count == 4 ? 5U : 2U))) {
+             (core_count == 4 ? 6U : 3U))) {
         stage = "root-only proc exit notification";
         status = -EIO;
     }
@@ -1011,6 +1203,10 @@ int main(int argc, char **argv)
         (void)npu_kernel_release(killable_kernel);
     if (trap_kernel)
         (void)npu_kernel_release(trap_kernel);
+    if (interrupt_kernel)
+        (void)npu_kernel_release(interrupt_kernel);
+    if (print_kernel)
+        (void)npu_kernel_release(print_kernel);
     if (locked_kernel)
         (void)npu_kernel_release(locked_kernel);
     if (normal_kernel)

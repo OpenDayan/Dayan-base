@@ -40,8 +40,7 @@ static void rpc_transaction_send(struct rpc_transaction *transaction)
 
     platform_rpc_send(transaction->command);
     transaction->completed = 1;
-    if (transaction->cleanup)
-        transaction->cleanup(transaction);
+    transaction->cleanup(transaction);
     if (terminal_thread)
         thread_exit_deferred_complete(terminal_thread);
     else
@@ -242,7 +241,7 @@ long rpc_proc_exit(struct task_proc *task, int64_t result)
     struct rpc_proc_exit_request request;
 
     request.hart_id = (uint32_t)platform_hart_id();
-    request.proc_id = task->thread.id;
+    request.proc_id = thread_id(&task->thread);
     request.parent_proc_id = 0;
     request.flags = RPC_PROC_EXIT_ROOT;
     request.result = result;

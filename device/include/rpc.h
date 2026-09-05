@@ -287,7 +287,7 @@ static inline uint8_t rpc_profile_record_state(uint64_t value)
     return (uint8_t)(value >> RPC_PROFILE_STATE_SHIFT);
 }
 
-/* Host-owned descriptor used by RPC_PROFILE_CONFIG; BL1 cleans final fields. */
+/* Host-owned descriptor; each hart's buffer address and capacity are 64B aligned. */
 struct rpc_profile_config {
     uint32_t command;
     uint32_t flags;

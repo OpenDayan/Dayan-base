@@ -148,8 +148,7 @@ int npu_service_profile_copy(npu_service_device_t *device,
         index < device->profile_core_count &&
         profile_core_matches(device, &device->profile_cores[index], target,
                              generation, address, capacity);
-    if (device->profile_readers)
-        --device->profile_readers;
+    --device->profile_readers;
     pthread_cond_broadcast(&device->condition);
     pthread_mutex_unlock(&device->mutex);
     return callback_status;
@@ -159,7 +158,7 @@ static int allocate_profile(npu_service_device_t *device,
                             uint64_t buffer_size,
                             npu_hal_allocation_t **allocation_out,
                             struct npu_service_profile_core **cores_out,
-                            size_t *core_slots_out, uint64_t *usable_out)
+                            size_t *core_slots_out)
 {
     npu_hal_memory_request_t request;
     struct npu_service_profile_core *cores;
@@ -194,7 +193,9 @@ static int allocate_profile(npu_service_device_t *device,
         free(booted_cores);
         return -ENODEV;
     }
-    slice_size = (buffer_size / booted_count) & ~UINT64_C(7);
+    /* Different harts must never write back the same cache line. */
+    slice_size = (buffer_size / booted_count) &
+                 ~(uint64_t)(RPC_DESCRIPTOR_GRANULE - 1U);
     if (slice_size < RPC_PROFILE_SNAPSHOT_MAX_BYTES ||
         slice_size > UINT32_MAX) {
         status = -EINVAL;
@@ -245,7 +246,6 @@ static int allocate_profile(npu_service_device_t *device,
     }
     *cores_out = cores;
     *core_slots_out = core_slots;
-    *usable_out = usable_size;
     free(booted_cores);
     return 0;
 
@@ -293,7 +293,6 @@ int npu_service_profile_start(npu_service_device_t *device,
     npu_hal_allocation_t *allocation = 0;
     struct npu_service_profile_core *cores = 0;
     size_t core_slots = 0;
-    uint64_t usable_size = 0;
     uint64_t generation;
     size_t index;
     int cleanup_remaining = 0;
@@ -313,7 +312,7 @@ int npu_service_profile_start(npu_service_device_t *device,
     pthread_mutex_unlock(&device->mutex);
 
     status = allocate_profile(device, buffer_size, &allocation, &cores,
-                              &core_slots, &usable_size);
+                              &core_slots);
     if (status < 0)
         goto fail_uninstalled;
     pthread_mutex_lock(&device->mutex);
