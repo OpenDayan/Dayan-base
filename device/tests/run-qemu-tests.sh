@@ -82,6 +82,7 @@ compile_c "$build/mem_test.o" "$script_dir/mem_test.c" \
     -I"$script_dir/include"
 compile_c "$build/math_test.o" "$script_dir/math_test.c"
 compile_c "$build/rpc_test.o" "$script_dir/rpc_test.c"
+compile_c "$build/proc.o" "$device_root/rpc/proc.c"
 compile_c "$build/printf_test.o" "$script_dir/printf_test.c" \
     -I"$script_dir/printf_include"
 
@@ -100,7 +101,7 @@ link_test rbtree_test "$build/rbtree_test.o" "$build/rbtree.o"
 link_test mem_test "$build/mem_test.o" "$build/mem.o" \
     "$build/rbtree.o" "$build/string.o"
 link_test math_test "$build/math_test.o" "$build/math.o"
-link_test rpc_test "$build/rpc_test.o"
+link_test rpc_test "$build/rpc_test.o" "$build/proc.o" "$build/string.o"
 link_test printf_test "$build/printf_test.o" "$build/printf.o" \
     "$build/string.o"
 

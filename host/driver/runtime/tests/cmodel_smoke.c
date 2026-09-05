@@ -152,12 +152,22 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         return status;
     }
     if (killed.killed_roots != 1U || killed.killed_children ||
-        killed.released_slots != 1U || killed.waiting_produce != 1U)
+        killed.released_slots != 0U || killed.waiting_produce != 1U)
         return -EIO;
-    status = npu_service_rpc_ps(server->device, target, &snapshot);
-    if (status < 0 || snapshot.count != 3U ||
-        snapshot.global_free_slots != 16U || snapshot.reserved_slots)
-        return status < 0 ? status : -EIO;
+    /* Blocking receive replies before the dispatcher can consume old tokens. */
+    for (attempt = 0; attempt < 1000U; ++attempt) {
+        const struct timespec delay = { 0, 1000000L };
+
+        status = npu_service_rpc_ps(server->device, target, &snapshot);
+        if (status < 0)
+            return status;
+        if (snapshot.count == 3U && snapshot.global_free_slots == 16U &&
+            !snapshot.reserved_slots)
+            break;
+        (void)nanosleep(&delay, 0);
+    }
+    if (attempt == 1000U)
+        return -ETIMEDOUT;
     status = npu_event_wait(event, 10000, &info);
     if (status < 0) {
         fprintf(stderr, "kill test event wait failed: %d\n", status);

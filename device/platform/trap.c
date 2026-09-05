@@ -28,15 +28,13 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
     size_t i;
     int status;
 
-    if (!frame || !current)
+    if (!current)
         platform_halt();
     cpu = cpu_self();
     if (cpu->trap.active)
         platform_halt();
     cpu->trap.active = 1;
     hart = platform_hart_id();
-    if (hart >= CONFIG_HART_COUNT)
-        platform_halt();
     record = &trap_records[hart].record;
     record->hart_id = (uint32_t)hart;
     record->thread_id = current->id;
@@ -58,14 +56,12 @@ _Noreturn void trap_handle(const struct trap_frame *frame)
         struct thread *parent = current->parent == THREAD_SLOT_NONE ? 0 :
                                 thread_slot_get(current->parent);
 
-        if (!task)
-            platform_halt();
         record->host_proc_id = task->thread.id;
         record->parent_proc_id = parent ? parent->id : 0;
         record->cookie = task->descriptor.cookie;
     }
 
-    status = rpc_report_trap(record, sizeof(*record));
+    status = rpc_report_trap(record);
     if (status < 0)
         platform_halt();
     if (current->type == THREAD_TYPE_TASK_PROC ||

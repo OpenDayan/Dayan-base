@@ -60,11 +60,8 @@ __attribute__((weak)) void platform_cache_flush(const void *addr, size_t size)
     if (!size)
         return;
     line = (uintptr_t)addr & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
-    if (size - 1 > UINTPTR_MAX - (uintptr_t)addr)
-        last = UINTPTR_MAX & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
-    else
-        last = ((uintptr_t)addr + size - 1) &
-               ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
+    last = ((uintptr_t)addr + size - 1) &
+           ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
 
     for (;;) {
         __asm__ volatile(".insn i 0x0f, 2, x0, %0, 0x002"
@@ -83,11 +80,8 @@ __attribute__((weak)) void platform_cache_invalidate(void *addr, size_t size)
     if (!size)
         return;
     line = (uintptr_t)addr & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
-    if (size - 1 > UINTPTR_MAX - (uintptr_t)addr)
-        last = UINTPTR_MAX & ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
-    else
-        last = ((uintptr_t)addr + size - 1) &
-               ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
+    last = ((uintptr_t)addr + size - 1) &
+           ~(uintptr_t)(CONFIG_CACHE_LINE_SIZE - 1);
 
     for (;;) {
         __asm__ volatile(".insn i 0x0f, 2, x0, %0, 0x000"
@@ -146,20 +140,13 @@ _Noreturn void platform_rpc_halt(void)
      * Resource table.  The next BL1 instance must not inherit runnable tp
      * values from this one.
      */
-    resource_scheduler_drain();
+    while (__builtin_riscv_tx_base_tcsr_read(0, PRODUCE_BAR_GLOBAL))
+        ;
     resource_scheduler_local_init();
     __asm__ volatile("fence.i" ::: "memory");
     /* Bootrom consumes and acknowledges the pending opcode-0 request. */
     bootrom();
     platform_halt();
-}
-
-int platform_rpc_receive_pending(void)
-{
-    uintptr_t mip;
-
-    __asm__ volatile("csrr %0, mip" : "=r"(mip));
-    return (mip & (1U << 3)) != 0;
 }
 
 uint64_t platform_rpc_receive(void)
@@ -179,7 +166,7 @@ void platform_rpc_receive_ack(void)
     __asm__ volatile("fence iorw, iorw" ::: "memory");
 }
 
-int platform_rpc_send_ready(void)
+static int rpc_send_ready(void)
 {
     uint32_t status;
 
@@ -191,10 +178,14 @@ int platform_rpc_send_ready(void)
 
 void platform_rpc_send(uint64_t command)
 {
+    while (!rpc_send_ready())
+        ;
     *rpc_mailbox(DAYAN_IRQ_MAILBOX_BASE) = command;
     __asm__ volatile("fence iorw, iorw" ::: "memory");
     *rpc_interrupt_reg(DAYAN_IRQ_STATUS_SET) = rpc_interrupt_mask();
     __asm__ volatile("fence iorw, iorw" ::: "memory");
+    while (!rpc_send_ready())
+        ;
 }
 
 __attribute__((weak)) void platform_idle(void)

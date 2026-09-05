@@ -148,6 +148,7 @@ void grid_kernel(uint64_t *output, uint64_t base)
         child_result != (int64_t)expected ||
         dayan_thread_join((uint32_t)children[1], 0) < 0 ||
         dayan_create_thread("nested-write", nested_write, work, 0) < 0 ||
+        dayan_thread_join((uint32_t)children[0], 0) >= 0 ||
         dayan_thread_join_all() < 0)
         output[linear] = TEST_FAILURE;
     dayan_thread_exit((int64_t)expected);

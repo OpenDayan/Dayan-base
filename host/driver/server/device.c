@@ -1210,9 +1210,10 @@ static int launch_request_valid(const npu_service_launch_t *launch,
                    sizeof(request->task_id)) &&
            proc_name_valid(request->name) &&
            !memcmp(request->name, launch->name, sizeof(request->name)) &&
-           (request->state == RPC_PROC_RUNNING ||
-            request->state == RPC_PROC_EXITED ||
-            request->state == RPC_PROC_FAILED);
+           ((request->state == RPC_PROC_RUNNING && request->proc_id &&
+             !request->status) ||
+            (request->state == RPC_PROC_FAILED && !request->proc_id &&
+             request->status < 0));
 }
 
 static void launch_submission_complete(npu_service_launch_t *launch,
@@ -1279,7 +1280,11 @@ static void submit_launch(npu_service_launch_t *launch)
                 (int)sizeof(request.name), request.name, launch->name);
         status = -EPROTO;
     }
-    launch_submission_complete(launch, status, status == 0, 1,
+    /* The agent owns this until submit_done. Failed frees retry at release. */
+    if (npu_hal_memory_free(launch->device->hal,
+                            launch->request_allocation) == 0)
+        launch->request_allocation = 0;
+    launch_submission_complete(launch, status, status == 0, 0,
                                status == 0 ? &request : 0);
 }
 
@@ -1359,6 +1364,16 @@ int npu_service_launch(npu_service_device_t *device,
     status = uram_address(device, desc, &uram_base);
     if (status < 0)
         return status;
+    {
+        struct dayan_context_fields context =
+            dayan_context_unpack(desc->tensor_context);
+        uint64_t offset = uram_base & (DAYAN_CONTEXT_URAM_WINDOW - 1U);
+
+        if (context.uram_lo != offset / DAYAN_CONTEXT_URAM_GRANULE ||
+            context.uram_hi != (offset + desc->uram_size) /
+                               DAYAN_CONTEXT_URAM_GRANULE)
+            return -EINVAL;
+    }
     launch = calloc(1, sizeof(*launch));
     if (!launch)
         return -ENOMEM;
@@ -1475,7 +1490,6 @@ int npu_service_launch_complete(npu_service_device_t *device,
                                 npu_hal_core_t core, uint32_t proc_id,
                                 int64_t result, uint64_t cookie)
 {
-    npu_hal_allocation_t *allocation;
     npu_service_launch_t *candidate = 0;
     npu_service_launch_t *launch;
     int ambiguous = 0;
@@ -1516,20 +1530,6 @@ int npu_service_launch_complete(npu_service_device_t *device,
         status = device->abort_status;
     else if (!candidate->accepted || candidate->submit_status < 0)
         status = -EPROTO;
-    if (status < 0)
-        goto out;
-    allocation = candidate->request_allocation;
-    candidate->request_allocation = 0;
-    pthread_mutex_unlock(&device->mutex);
-
-    status = npu_hal_memory_free(device->hal, allocation);
-    if (status < 0) {
-        pthread_mutex_lock(&device->mutex);
-        candidate->request_allocation = allocation;
-        pthread_mutex_unlock(&device->mutex);
-    }
-    return status;
-
 out:
     pthread_mutex_unlock(&device->mutex);
     return status;

@@ -20,8 +20,6 @@ void init(void)
     sche_init();
     if (mem_init(heap, CONFIG_HEAP_SIZE) < 0)
         platform_halt();
-    if (rpc_init() < 0)
-        platform_halt();
-    if (profile_init() < 0)
-        platform_halt();
+    rpc_init();
+    profile_init();
 }

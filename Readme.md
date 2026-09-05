@@ -2,7 +2,7 @@
 
 这是一个面向 RISC-V NPU Device 的最小裸机系统骨架。当前版本已经建立启动、
 每核资源隔离、协作式调度、mailbox RPC、同步异常处理、张量外部中断、基础 libc
-和堆管理。系统不使用时钟抢占：mailbox 的 MSIP 由专用 proc 协作式轮询；张量错误
+和堆管理。系统不使用时钟抢占：上下文切换时通过 `mip.MSIP` 选择 RPC 接收线程；张量错误
 通过机器外部中断进入 trap，同步异常仍通过 `mtvec` 处理。
 
 源码按运行位置组织：`device/` 包含 BL0/BL1、Dayan OS、Device API 和 Device
@@ -12,20 +12,20 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
 ## 启动流程
 
 1. `device/bl0/bootrom.S` 从当前 hart 的 mailbox 读取入口地址，并把 hart id 留在 `a0`。
-2. `device/bl1/bl1.S` 为该 hart 选择独立栈，令 `tp/current` 指向 CPU-local 中的 init
-   thread，清零该区，将 `gp/shared` 置空，配置独立 trap 栈与 `mtvec`，仅启用张量
+2. `device/bl1/bl1.S` 为该 hart 选择独立启动栈，清零 CPU-local，将 `tp/current` 和
+   `gp/shared` 置空，配置独立 trap 栈与 `mtvec`，仅启用张量
    机器外部中断并初始化浮点状态。
 3. `device/boot/boot.c:init()` 初始化平台、调度器、该 hart 的链接期初始堆，以及 RPC
    收发 proc 和 profile proc。
-4. BL1 调用 `device/sche/sche.c:scheduler()`，此后不再返回。
+4. BL1 直接进入 `device/sche/context.S:switch_context()`，首次分派不保存启动上下文。
 
 默认构建假设四个 hart 运行四份相互独立的 OS 状态：
 
 | 区域 | 默认配置 | 用途 |
 | --- | --- | --- |
 | RAM | `0x80000000`, 64 MiB | 镜像、CPU-local、每核栈和每核初始堆 |
-| CPU-local | 4 KiB / hart | 每核 scheduler、allocator、RPC、trap 状态与 init thread |
-| init 栈 | 64 KiB / hart | BL1、初始化和 scheduler 的每核栈 |
+| CPU-local | 4 KiB / hart | 每核 profile 开关、allocator、RPC、trap 状态 |
+| 启动栈 | 64 KiB / hart | BL1 和初始化，首次分派后不再使用 |
 | RPC 栈 | 4 KiB × 2 / hart | RPC receive proc 和 send proc 的私有栈 |
 | profile 栈 | 4 KiB / hart | proc profile 满缓冲上报 proc 的私有栈 |
 | trap 栈 | 4 KiB / hart | 同步异常入口使用的独立栈 |
@@ -37,21 +37,19 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
 创建 proc 时把分配基址交给内核。`COHERENT_BASE=0x00400000` 和 4 MiB 的
 `COHERENT_SIZE` 只描述硬件窗口并用于运行时地址校验，不会传给链接器或产生本地预留。
 
-`tp` 通过全局寄存器变量 `current` 始终解释为布局固定的 `struct thread *`，而不是
-`struct cpu *`。公共 thread
-依次保存 32-bit ID、32-bit state、`sp`、恢复 `pc` 和 32-bit type。
-init thread 的 ID 与 type 都是 0；其它类型把 `struct thread` 作为结构体首成员，并
-使用非零 type。每个独立 OS 实例的 scheduler 从 1 开始统一分配后续 ID。上下文切换
+启动完成后，`tp/current` 指向布局固定的 `struct thread`，保存 type、state、16-bit ID、
+父 slot、事件链表节点、`sp/pc`、Context1/Context2 和退出信息。ID 由 slot 和 generation
+组成；系统没有独立的 init/scheduler thread。上下文切换
 同步切换 `tp`；内存分配器等每核服务根据 `mhartid` 定位 CPU-local 私有状态。proc
 一旦绑定到某个 hart，当前版本不允许迁移。
 由于 `tp` 已承担 `current` ABI，固件和算子都不能使用 ELF TLS；构建会拒绝
 TP-relative/TLS relocation，链接脚本也会拒绝 `.tdata` 和 `.tbss`。
 
 thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始，其余值
-表示不同等待原因。`thread_init()` 构造期间短暂使用 `THREAD_WAIT_START`；proc 初始化
-完成后直接进入 `THREAD_READY`，运行期使用 `THREAD_WAIT_POLL`、
+表示不同等待原因。`thread_start()` 构造后使用 `THREAD_WAIT_START`；root 提交无依赖 Wait 后
+进入 `THREAD_READY`，创建回复完成后才可能被选中执行。运行期使用 `THREAD_WAIT_POLL`、
 `THREAD_WAIT_EVENT`、`THREAD_WAIT_PRODUCE`、`THREAD_KILL_WAIT_PRODUCE` 和
-`THREAD_WAIT_EXIT`。CPU 私有结构聚合 scheduler、allocator、RPC 和 trap 状态；hart ID
+`THREAD_WAIT_EXIT`。CPU 私有结构聚合 profile 开关、allocator、RPC 和 trap 状态；hart ID
 由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
 
 普通 `.data`/`.bss` 会被链接脚本拒绝，以免不一致缓存下多个 hart 意外共享
@@ -83,7 +81,7 @@ Host↔Device 完整链路仍由 `host/driver/run_cmodel_smoke.sh` 在 RVTNG cmo
 扩展。固件输出位于 `build/device/`：
 
 `gp` 专用于全局寄存器变量 `shared`，表示当前 proc 的 Host coherent allocation
-基址；它不再承担 RISC-V small-data global pointer 的传统职责。BL1 为 scheduler/init
+基址；它不再承担 RISC-V small-data global pointer 的传统职责。BL1 在启动时将它
 设为 0，新 proc 从启动帧装入 Host 给定值，之后随上下文保存和恢复。链接脚本不定义
 `__global_pointer$`，固件和运行时加载的算子 `.o` 均须使用
 `-mno-relax -msmall-data-limit=0`，并且不得包含 GP-relative relocation；普通数据以及
@@ -259,17 +257,16 @@ Device 发送前后都轮询 `IRQ_STATUS` (`0x2000`) 中自己的 bit，只有 H
 (`0x2010`) 使能对应的 Host IRQ 输出。上述 doorbell 只用于握手，不会触发 NPU 上的
 抢占：BL1 用 `csrw mie, 0x800` 仅启用张量机器外部中断，RPC MSIP 保持轮询。
 
-每个 hart 有三个系统 Thread。receive Thread 处于 `THREAD_WAIT_POLL` 时，由
-`switch_context()` 优先检查本核 `mip.MSIP` 并直接选择，避免读取 CLINT MMIO；收到
-doorbell 后读取 Host 命令，调用弱的
-`rpc_receive(opcode, arg, &response)` 分派接口，并在需要回复时把响应加入发送队列，最后
-向 CLINT `msip` 写 0 清除 pending。send proc 独占本核发送队列；队列为空时使用
-event wait，有事务时写 Device → Host mailbox，等待 Host 清除状态位，再执行
-事务 cleanup 并唤醒调用者。receive handler 返回 1 表示发送 `response`，返回 0 表示
+每个 hart 有三个系统 Thread。`switch_context()` 仅根据本核 `mip.MSIP` 直接选择
+receive Thread；它调用 `rpc_receive(opcode, arg, &response)`，同步发送回复并等待 Host
+确认，最后清除 `msip`。整个接收事务不会挂起，也不向硬件队列提交接收线程 token。
+send Thread 在发送队列为空时使用 event wait，有事务时阻塞写 Device → Host mailbox，
+忙等 Host 清除状态位，再执行事务 cleanup 并唤醒调用者。空队列与待上报中断的检查和
+等待登记在同一短临界区完成，防止 tensor 中断丢失唤醒。receive handler 返回 1 表示发送 `response`，返回 0 表示
 无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行；若它发起阻塞式
-反向 RPC，Host 必须在等待 response 的同时继续服务 Device→Host mailbox。仓库内置的
-create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套扩堆，配套
-`host/driver/server` Service 支持这一流程，并用 `(cluster, core)` 标识请求来源。
+反向 RPC，Host 必须在等待 response 的同时继续服务 Device→Host mailbox。
+create-proc 只使用静态 slot 和栈，不扩堆、不等待其它线程。配套 Service 用
+`(cluster, core)` 标识请求来源，并串行化同核的创建事务。
 
 `rpc_call()` 是 Device 主动请求的统一入口。其低 48 位参数指向固定 40-byte 的
 `struct rpc_packet`，字段依次是 request 地址/长度、response 地址/长度和 Host 回填的
@@ -277,8 +274,9 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 归还堆 region、异常报告、张量中断报告、root proc 退出通知和 profile 满缓冲上报。
 异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
 稳定的 328-byte `struct trap_record`，Host 默认 trap 回调会原子地打印线程身份、
-`mstatus/mepc/mcause/mtval/fcsr` 和 x0–x31；后者直接指向 176-byte
-`struct tensor_interrupt_record`。输出和清空操作的 packet request 指向固定
+`mstatus/mepc/mcause/mtval/fcsr` 和 x0–x31；后者直接指向 472-byte
+`struct tensor_interrupt_record`。tensor 报告由 send Thread 使用双缓冲直接同步发送，
+不创建通用 RPC transaction。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
@@ -286,28 +284,33 @@ create-proc handler 在初始堆不足时可能通过 `RPC_HEAP_ACQUIRE` 嵌套�
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
 224-byte `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
 0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
-base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及完成状态。BL1 校验
-task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
-回复 opcode `0x8100`。Device 先把响应交给 RPC send 队列，再向硬件提交 root Thread，
-避免不会主动 yield 的新 kernel 阻塞创建响应。root 创建时会物理摘下
+base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及创建状态。Host 校验
+启动参数，BL1 只检查本固件的栈/输出容量及空闲 slot。Device invalidate 描述符，
+把启动数据复制到静态 slot 和启动帧，完整 flush 创建结果，执行 `fence.i` 并提交 root token。
+接收线程同步回复 `0x8100`、清除 `msip` 后才切换，因此新 kernel 不会抢在回复前执行。
+Host 读取回复后即可释放创建描述符；运行结果只通过 `RPC_PROC_EXIT` 上报。root 创建时会摘下
 `1 + max_child_threads` 个静态 slot；
 子孙创建、退出与 join 不再经过 Host。每个 proc 退出都通过统一 flush 路径提交剩余输出；
 缓冲为空时直接返回，不发送 `WRITE` 或 `CLEAR`。只有 Host root 通过 32-byte
-`RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。Host 在成功响应前记录终态并释放
-create descriptor；Device 收到响应后立即由 scheduler 归还 Thread slot。普通 launch
+`RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。Host 在成功响应前记录终态；
+Device 收到响应后立即由 sender 归还 Thread slot。普通 launch
 完成只依赖这次通知，不再用 `RPC_PROC_PS` 轮询确认。
 
 Host 管理目标 Hart 使用 `RPC_PROC_PS` (`0x0102`) 和 `RPC_PROC_KILL_ALL` (`0x0103`)，
 响应分别为 `0x8102`、`0x8103`。PS 固定返回三个系统 proc（RPC receive/send 与
 profile）和至多 16 个算子 proc 的名称、状态、父 ID、直属子计数、logical task、返回值与
-cookie。kill-all 保留 init/RPC/profile proc，摘除 event/system-wait 节点；尚未回到软件的
+cookie。kill-all 保留 RPC/profile proc，摘除 event/system-wait 节点；尚未回到软件的
 硬件 token 进入 `THREAD_KILL_WAIT_PRODUCE`，token 返回后再释放对应 slot。这里也包括
 `dayan_yield()` 提交的无依赖 Wait token，不只包括执行单元 Produce。
+kill 回复中的 `released_slots` 只统计当时已经释放的 slot；尚有 token 的 family
+在接收事务结束、dispatcher 取回全部旧 token 后释放。
 
 Host 覆盖动态模块前，先通过 `RPC_DCACHE_FLUSH` (`0x0105`) 让所有已启动 Hart
-失效目标模块的 D-cache 范围；全部返回 `0x8105` 后才写入新的 text/rodata。写入完成后
-再使用 `RPC_ICACHE_FLUSH` (`0x0101`) 发布代码，并等待 `0x8101` 响应。`fence.i` 只作用于
-当前 hart，因此两阶段发布都逐个处理所有已启动 hart；创建 proc 不再重复刷新 cache。
+失效目标模块的 D-cache 范围；全部返回 `0x8105` 后才写入新的 text/rodata。模块首尾按
+64-byte 对齐，避免误失效邻接分配。模块加载器受互斥锁保护，上传后才发布 entry；
+每次 `RPC_PROC_CREATE` 在目标 Hart 执行 `fence.i`，无需额外 I-cache RPC。
+上传前的 D-cache 失效不能挪到创建时，否则旧脏行可能在 Host 写入后回写并破坏代码。
+失效请求超时时，描述符和目标模块范围都保留到 HAL 关闭，防止延迟失效命中复用后的内存。
 
 双向标量 RPC descriptor 都隔离 cache line。Device 发起的 packet、request、response
 各占一个独立的 64-byte 对齐 slot；Host 只写 response/status，Device 在收到确认后
@@ -315,19 +318,20 @@ invalidate 并复制回调用者。Host-owned 控制描述符（proc create、PS
 config 和 D-cache flush）
 从 64-byte 对齐地址开始，allocation 大小也向上取整到 64-byte 粒度，避免与其它对象共享
 cache line；opcode 唯一确定描述符布局和长度。Device 在解析前 invalidate，
-请求字段在生命周期内保持只读，只在 RPC 响应或 proc family 终态写入结果和 state，并在
-通知 Host 前 clean。Host 读取到响应或终态后才能释放对应 allocation；提交前失败可立即
+请求字段在事务内保持只读，只在 RPC 响应前写入结果和 state，并完整 flush。
+Device 回复后不再访问描述符；Host 读取响应后即可释放对应 allocation。提交前失败可立即
 释放，一旦尝试发布命令却未收到匹配响应，allocation 不再进入分配池，只在 HAL 关闭时
 统一回收。
 
 同步异常从 `mtvec` 进入独立的每核 trap 栈，保存 x0–x31（其中 x2 为异常前的 sp）、
 `mstatus`、`mepc`、`mcause`、`mtval` 和 `fcsr`。C handler 再附加版本、记录大小、
 hart ID 与当前 thread 的 ID/type/state，异步排入 RPC 发送队列，然后把故障 proc 置为
-退出状态并回到 scheduler。init/scheduler 上下文异常、嵌套异常，或缺少有效
+退出状态并切换上下文。启动阶段异常、嵌套异常，或缺少有效
 `current` 时无法安全恢复，系统会停机；异常报告无法入队时也会停机，避免静默丢失
 故障信息。
 
-`device/sche/` 是有独立 Thread 栈的非抢占式调度器。`switch_context()` 先用临时寄存器
+`device/sche/` 管理 Thread 生命周期和非抢占式上下文切换，不设独立 scheduler Thread。
+`switch_context()` 先用临时寄存器
 检查 `mip.MSIP` 或弹出 BASE Produce/Bar[0]，选定目标且确认不同于当前 `tp` 后，才在当前
 栈保存 `ra`、`s0-s11`、`gp` 和 `fcsr`。旧寄存器 store 与目标 Thread 的 `sp/pc`、
 Context1/Context2 load 交错执行；恢复旧 Thread 时从切换帧恢复 `gp/shared`，首次执行时
@@ -335,13 +339,14 @@ Context1/Context2 load 交错执行；恢复旧 Thread 时从切换帧恢复 `gp
 没有需要跨 C 调用保存的 F 寄存器；有存活浮点值时，编译器会在调用 `thread_yield()` 等
 函数前自行溢出，Thread 的浮点控制状态由 `fcsr` 保存。
 
-内部 `thread_start()` 初始化 Thread 后提交一个无依赖硬件 Wait。运行中的 Thread 通过
-`thread_yield()` 提交同类 Wait 主动让出；`thread_wait_poll()` 在调用方检查 predicate，
-未满足时反复 yield。`thread_wait_event()` 仅把短 slot node 挂入 join/RPC/profile 等明确
-事件链表，唤醒操作会为目标 Thread 提交硬件 Wait。scheduler 本身不维护或扫描 ready、
+内部 `thread_start()` 初始化 Thread，`thread_schedule()` 提交无依赖硬件 Wait。
+运行中的 Thread 通过 `thread_yield()` 提交同类 Wait 主动让出。
+`thread_wait_event()` 把短 slot node 挂入 join/RPC/profile 事件链表，条件满足时由事件
+所有者摘下并提交无依赖硬件 Wait。join 挂在目标子 Thread 的退出链表上，只在目标退出时
+唤醒，不轮询条件。scheduler 本身不维护或扫描 ready、
 poll、resource 队列。入口正常返回等价于 `thread_exit()`。Host RPC 创建的 root Proc 按
 资源描述符预留 `1 + max_children`
-个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init、两个 RPC
+个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，两个 RPC
 proc 和 profile proc 不计入，因此单个 kernel 最多声明 15 个子 Thread。
 `dayan_create_thread(name, entry, argument, resources)` 创建的子 Thread 保持在同一 hart，
 拥有不超过 15 bytes 的名称，继承 logical task、`gp/shared` 与 URAM，并返回正的 Thread
@@ -353,6 +358,10 @@ join-all，因此 root 进入终态时整棵子树已经完成。`dayan_thread_e
 设置 64-bit 返回值。
 托管 cleanup 在退出后把 slot 归还静态池；slot 的 64 KiB 栈和 4 KiB 输出缓冲在
 固件链接时已经按 Hart 预留，不走运行时堆分配。当前没有抢占或跨 hart 迁移。
+
+固件 C 代码直接调用 RVT 的 `__builtin_riscv_tx_base_tcsr_read/write`，地址必须是编译期
+常量；它们也是 `rvt_intrinsics.h` 中 C++ template 的底层接口。无依赖唤醒和 yield
+利用 `WAIT` 提交后自动清零的语义，不再重复写入零掩码。
 
 ## 算子 API 与同步
 
@@ -405,7 +414,7 @@ Hart 上交错执行，从而提高 LSU 与计算单元的利用率。
 
 `dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前
 `shared` allocation 内的零初始化 16-byte 对象。每个 lane 通过 `AMOADD.D`
-领取单调 ticket，并等待到达计数跨过本轮边界，因此不需要 AMOSWAP、LR/SC 或清零
+领取单调 ticket，直接忙等到达计数跨过本轮边界，不切出当前 Thread，因此不需要 AMOSWAP、LR/SC 或清零
 计数，同一对象也可以跨多轮复用。Server 在启动任何 lane 前，会把本次 launch 的
 整个 shared allocation 初始化为零；不会清空可能仍被其它 kernel 使用的全局
 Atomic Cache backing。

@@ -29,6 +29,19 @@ fail()
     exit 1
 }
 
+has_tcsr()
+{
+    local expected=$1 word
+
+    # The builtin selects the GPR in bits 11:7; all other fields must match.
+    while read -r word; do
+        if (( (16#$word & 0xfffff07f) == expected )); then
+            return 0
+        fi
+    done < <(awk 'length($2) == 8 && $2 ~ /^[[:xdigit:]]+$/ {print $2}')
+    return 1
+}
+
 for file in "$elf" "$api_elf" "$api_compile" "$api_cxx_compile"; do
     [ -f "$file" ] || fail "missing build artifact: $file"
 done
@@ -59,8 +72,8 @@ if $readelf --relocations "${relocation_objects[@]}" | \
 fi
 icache_fence_calls=$($readelf --relocations --wide "$build/rpc/proc.o" | \
     grep -c 'platform_instruction_fence' || true)
-[ "$icache_fence_calls" -eq 1 ] ||
-    fail "icache fence must exist only in the explicit flush RPC"
+[ "$icache_fence_calls" -eq 2 ] ||
+    fail "icache fence must cover PROC_CREATE and the explicit flush RPC"
 if $nm "$elf" | grep -Fq '__global_pointer$'; then
     fail 'firmware must not define __global_pointer$'
 fi
@@ -75,15 +88,12 @@ switch_dump=$($objdump --disassemble --no-show-raw-insn \
     --disassemble-symbols=switch_context "$elf")
 switch_raw=$($objdump --disassemble \
     --disassemble-symbols=switch_context "$elf")
-scheduler_dump=$($objdump --disassemble --no-show-raw-insn \
-    --disassemble-symbols=scheduler "$elf")
-[ "$(grep -Ec '^[[:space:]]*[[:xdigit:]]+:' <<<"$scheduler_dump")" -eq 3 ] &&
-    grep -Eq 'jalr.*<switch_context>' <<<"$scheduler_dump" ||
-    fail "scheduler must contain only call switch_context and its loop branch"
-if grep -Eq '(^|[[:space:],(])s(0|1|2|3|4|5|6|7|8|9|10|11)([[:space:],)]|$)' \
-        <<<"$scheduler_dump"; then
-    fail "scheduler must not use callee-saved registers"
+if $nm --defined-only --format=posix "$elf" | \
+        grep -Eq '^(scheduler|thread_wait_poll) '; then
+    fail "firmware must not have a scheduler thread or polling wait API"
 fi
+grep -Eq 'beqz[[:space:]]+tp,' <<<"$switch_dump" ||
+    fail "first dispatch must skip saving a boot thread"
 for encoding in 0000128b 0006d38b 0002028b 0002228b; do
     grep -Fq "$encoding" <<<"$switch_raw" ||
         fail "switch_context hardware instruction $encoding is missing"
@@ -157,21 +167,10 @@ grep -Eq 'frcsr[[:space:]]+t0' <<<"$trap_dump" ||
 tensor_interrupt_raw=$($objdump --disassemble \
     --disassemble-symbols=tensor_interrupt_handle \
     "$build/platform/tensor_interrupt.o")
-for encoding in 0000350b 0000550b 0000750b 0000950b; do
-    grep -Fq "$encoding" <<<"$tensor_interrupt_raw" ||
+for encoding in 0x0000300b 0x0000500b 0x0000700b 0x0000900b; do
+    has_tcsr "$encoding" <<<"$tensor_interrupt_raw" ||
         fail "tensor interrupt Barrier $encoding is missing"
 done
-
-rpc_receive_pending_dump=$($objdump --disassemble --no-show-raw-insn \
-    --disassemble-symbols=platform_rpc_receive_pending \
-    "$build/platform/platform.o")
-grep -Eq 'csrr[[:space:]]+[^,]+,[[:space:]]*mip' \
-    <<<"$rpc_receive_pending_dump" ||
-    fail "RPC receive polling must read mip.MSIP through the CSR"
-if grep -Eq '(^|[[:space:]])(lb|lbu|lh|lhu|lw|lwu|ld)([[:space:]]|$)' \
-        <<<"$rpc_receive_pending_dump"; then
-    fail "RPC receive polling must not read CLINT through MMIO"
-fi
 
 rpc_halt_dump=$($objdump --disassemble --no-show-raw-insn \
     --disassemble-symbols=platform_rpc_halt \
@@ -179,9 +178,9 @@ rpc_halt_dump=$($objdump --disassemble --no-show-raw-insn \
 rpc_halt_raw=$($objdump --disassemble \
     --disassemble-symbols=platform_rpc_halt \
     "$build/platform/platform.o")
-grep -Fq '0000150b' <<<"$rpc_halt_raw" ||
+has_tcsr 0x0000100b <<<"$rpc_halt_raw" ||
     fail "RPC halt must drain stale hardware scheduler tokens"
-grep -Fq '0006a50b' <<<"$rpc_halt_raw" ||
+has_tcsr 0x0006a00b <<<"$rpc_halt_raw" ||
     fail "RPC halt must initialize Local Resource state"
 halt_pop_line=$(grep -n -m1 'tx\.sb\.get\.any' <<<"$rpc_halt_dump" |
     cut -d: -f1)
@@ -232,12 +231,12 @@ proc_printf_end=$(symbol_address __proc_printf_end)
 dapi_raw=$($objdump --disassemble "$build/sche/dapi.o")
 dapi_dump=$($objdump --disassemble --no-show-raw-insn \
     "$build/sche/dapi.o")
-for encoding in 0000220b 0000420b 0000620b 0000820b; do
-    grep -Fq "$encoding" <<<"$dapi_raw" ||
+for encoding in 0x0000200b 0x0000400b 0x0000600b 0x0000800b; do
+    has_tcsr "$encoding" <<<"$dapi_raw" ||
         fail "Produce instruction $encoding is missing"
 done
-for encoding in 0004250b 0004450b 0004650b 0004850b; do
-    grep -Fq "$encoding" <<<"$dapi_raw" ||
+for encoding in 0x0004200b 0x0004400b 0x0004600b 0x0004800b; do
+    has_tcsr "$encoding" <<<"$dapi_raw" ||
         fail "Resource Produce instruction $encoding is missing"
 done
 if grep -Eq '(^|[[:space:]])fence([[:space:]]|$)' <<<"$dapi_dump" ||
@@ -257,6 +256,9 @@ barrier_dump=$($objdump --no-show-raw-insn \
     --disassemble-symbols=dayan_cluster_barrier "$build/sche/dapi.o")
 grep -Eq 'amoadd\.d([[:space:]]|$)' <<<"$barrier_dump" ||
     fail "cluster barrier must use a native 64-bit AMOADD ticket"
+if grep -Eq 'thread_wait|thread_yield|switch_context' <<<"$barrier_dump"; then
+    fail "cluster barrier must busy-wait without scheduling"
+fi
 if grep -Eq 'amoswap\.[wd]([[:space:]]|$)' <<<"$barrier_dump"; then
     fail "cluster barrier must not use an atomic spin lock"
 fi

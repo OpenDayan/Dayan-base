@@ -98,6 +98,10 @@ CONFIG_STAMP := $(BUILD)/.config
 API_COMPILE_TEST := $(BUILD)/tests/api_compile.o
 API_CXX_COMPILE_TEST := $(BUILD)/tests/api_compile.cxx.o
 
+$(BUILD)/sche/sche.o $(BUILD)/sche/dapi.o $(BUILD)/platform/platform.o \
+$(BUILD)/platform/tensor_interrupt.o: \
+    CFLAGS += $(RVT_ISA_FLAGS)
+
 .PHONY: all clean check FORCE bl0
 
 all: $(ELF) $(API_ELF) $(BIN) $(DUMP) bl0
@@ -156,7 +160,7 @@ $(API_CXX_COMPILE_TEST): tests/api_compile.c $(wildcard include/api/*.h) \
 $(CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
 	@printf '%s\n' '$(CLANG)' '$(CLANGXX)' '$(CPPFLAGS)' '$(CFLAGS)' \
-		'$(LDFLAGS)' > $@.tmp
+		'$(LDFLAGS)' '$(RVT_ISA_FLAGS)' > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
 
 FORCE:

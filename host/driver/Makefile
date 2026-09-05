@@ -107,6 +107,10 @@ $(BUILD)/tests/mmu_test: server/tests/mmu_test.c $(BUILD)/server/mmu.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+$(BUILD)/tests/kernel_cache_test: server/tests/kernel_cache_test.c $(BUILD)/server/kernel.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
 $(BUILD)/tests/socket_test: runtime/tests/socket_test.c $(PROTOCOL_OBJECT) \
 		$(HAL_IO_OBJECTS) $(HAL_CONTROL_OBJECTS) $(HAL_DATA_OBJECTS) \
 		$(SERVICE_OBJECTS) \
@@ -145,11 +149,12 @@ layer-check: $(RUNTIME_STATIC)
 
 check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
-	$(BUILD)/tests/mmu_test $(BUILD)/tests/public_headers.o
+	$(BUILD)/tests/mmu_test $(BUILD)/tests/kernel_cache_test $(BUILD)/tests/public_headers.o
 	$(BUILD)/tests/hal_test
 	$(BUILD)/tests/package_test
 	$(BUILD)/tests/socket_test
 	$(BUILD)/tests/mmu_test
+	$(BUILD)/tests/kernel_cache_test
 
 $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 	@mkdir -p $(dir $@)

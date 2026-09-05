@@ -96,8 +96,8 @@ TRAP REPORT 不使用 \code{rpc_packet}；command argument 直接指向 328-byte
 
 \subsection{创建 proc}
 
-Host 把 224-byte \code{rpc_proc_create_request} 放在普通 Device RAM，并保持到请求进入
-\code{EXITED} 或 \code{FAILED}：
+Host 把 224-byte \code{rpc_proc_create_request} 放在独占 cache line 的普通 Device RAM，
+并保持到收到创建回复、读回 \code{RUNNING} 或 \code{FAILED}：
 
 \begin{dayantable}{proc create 描述符}{tab:kernel-064}{X[26,l] X[18,l] X[56,l]}
   字段组 & offset & 含义 \\
@@ -111,11 +111,12 @@ Host 把 224-byte \code{rpc_proc_create_request} 放在普通 Device RAM，并�
   proc name & 208--223 & 固定 16-byte root proc 名称。 \\
 \end{dayantable}
 
-Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot 池取得 root，把状态改为
-\code{RUNNING}，并返回 opcode \code{0x8100} 与同一描述符地址。Device 先把响应提交给
-RPC send 队列，再向硬件提交 root Thread，避免不会主动 yield 的 kernel 阻塞创建响应。
-该响应表示创建完成，不表示 kernel 已退出。scheduler cleanup 最后写入 \code{EXITED}
-或 \code{FAILED}。
+Host Service 校验启动参数，Dayan OS 只检查固件的静态容量，从本 Hart 的 slot 池取得
+root 和子 slot，并把所有启动参数复制到私有对象。Device 将状态改为 \code{RUNNING}，
+完整 flush 描述符，执行 \code{fence.i} 后提交 root token。接收线程同步回复 opcode
+\code{0x8100} 与原描述符地址、清除 MSIP 后才切换，新 kernel 不会阻塞创建回复。
+该响应只表示创建完成，Host 读回后即可释放描述符。退出结果通过 \code{RPC_PROC_EXIT}
+单独发送，Device 不保留创建描述符指针。
 
 stack size 范围为 1--64 KiB，printf buffer 不超过 4 KiB，参数数量不超过 8。
 root 与最多 15 个子 Thread 共用 16 个算子 slot；init、RPC 与 profile proc 不计入。
@@ -139,7 +140,7 @@ transaction 的栈会保留到 Host 清除 doorbell；随后由 send Thread 完�
 并回收 slot。
 
 张量机器外部中断使用 opcode 6（\code{RPC_TENSOR_INTERRUPT_REPORT}）。command argument
-直接指向 176-byte \code{tensor_interrupt_record}，包含 Hart/Thread、当前 Tensor
+直接指向 472-byte \code{tensor_interrupt_record}，包含 Hart/Thread、当前 Tensor
 Context、中断控制值、累计计数、最近 16 条记录和软件丢弃计数。Service 校验
 来源 Hart 与 recent count 后调用 tensor-interrupt callback；该报告不改变 Proc 生命周期。
 
@@ -151,7 +152,7 @@ kill-wait flags、直属子计数、slot、Host root ID、logical task、返回�
 
 \code{RPC_PROC_KILL_ALL} 使用 40-byte result，返回 killed root/child 数、已经释放的
 slot 数和仍处于 Produce 延迟回收的数量。系统 proc 永不被终止；每个被终止 root 以
-\code{-ECANCELED} 完成 Host 描述符并发送一次 root exit callback。这里的
+\code{-ECANCELED} 发送一次 root exit callback。这里的
 \code{waiting_produce} 是尚未返回的硬件调度 token 数，也会计入 yield 提交的无依赖
 Wait。Service 对应接口为 \code{npu_service_rpc_kill_all(device,target,...)}。
 
@@ -174,11 +175,11 @@ command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返�
 40-byte \code{rpc_dcache_flush_request} 向全部已启动 Hart 发布模块地址和长度，并等待
 \code{RPC_DCACHE_FLUSH_RESPONSE}；Device 对描述符本身先 invalidate，再逐行失效目标范围。
 
-\code{fence.i} 只同步执行它的 hart。Host 完成新 text/rodata 写入后，必须
-对所有可能执行该 text 的已启动 hart 分别发送 \code{RPC_ICACHE_FLUSH}，等待对应的
-\code{0x8101} 响应后，才能发布 entry 或发送 \code{RPC_PROC_CREATE}。command argument
-是由 Host 选择并由 Device 原样返回的 48-bit token；无需额外描述符。当前模块加载器
-以模块基址作为 token，并严格执行 D-cache invalidate、Host write、I-cache flush 的顺序。
+模块首尾按 64-byte 对齐，失效范围不会包含邻接对象；Host 的 loader 互斥锁覆盖失效、
+写入和 entry 发布。每次 \code{RPC_PROC_CREATE} 都在目标 Hart 执行 \code{fence.i}，
+因此模块加载器无需单独发送 I-cache RPC，顺序为 D-cache invalidate、Host write、
+CREATE 中的 \code{fence.i}、kernel 执行。独立 \code{RPC_ICACHE_FLUSH} 仍保留作显式
+同步接口。失效 RPC 超时后，其描述符和目标模块范围都保留到 HAL 关闭。
 
 \code{RPC_PROC_CREATE} 本身不再执行 \code{fence.i}。create 描述符的请求字段由 Host
 保持不变，因此 Device invalidate 后直接通过 \code{request->field} 校验和初始化；只有

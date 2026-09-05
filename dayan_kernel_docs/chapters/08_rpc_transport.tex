@@ -35,24 +35,23 @@ Device 地址；发送前必须确认高 16 位为 0。
 每个 hart 有 receive、send 和 profile 三个内部 proc，各使用独立的 4 KiB 栈；profile
 proc 不参与普通 mailbox 收发，只在 trace FIFO 满时发起 \code{RPC_PROFILE_FLUSH}。
 
-receive proc 轮询 \code{msip}，读取 Host command，调用
+receive proc 由 \code{switch_context} 根据 \code{mip.MSIP} 直接选择，读取 Host command，调用
 \code{rpc_receive(opcode,arg,response)}。handler 返回值的含义为：正数表示发送
-response，0 表示无响应，负数表示请求已消费但处理失败。receive proc 随后清除
-\code{msip}；有 response 时，它等待 send transaction 完成后再接收下一条 Host
-command。
+response，0 表示无响应，负数表示请求已消费但处理失败。receive proc 同步发送 response，
+忙等 Host 确认后清除 \code{msip}，整个事务期间不挂起；随后才切换到下一个上下文。
 
 send proc 独占本 hart 的发送队列。队列为空时等待事件；取到 transaction 后，先等待
-outbound bit 清零，写 mailbox 并置位，再等待 Host 清零。最后执行 cleanup，标记事务
+outbound bit 清零，写 mailbox 并置位，再忙等 Host 清零，发送期间不切出。最后执行 cleanup，标记事务
 完成并唤醒调用者。root 自然退出使用 terminal transaction：调用者不再被唤醒，send
 proc 在 Host 确认和 cleanup 之后直接回收已停止运行的 root，保证 transaction 所在栈
 在握手完成前保持有效。
 
 \code{rpc_call} 在调用 proc 的栈上保存 transaction，并给 packet、request、response
-分别保留独占的 64-byte 对齐 slot。调用者等待 send proc 完成，期间 scheduler 可以运行
-其它 proc。send proc 本身不能调用 \code{rpc_call}，
-否则会等待自己处理的队列。kill-all 摘除这类调用者的 event node：仍在 send queue 的
-transaction 可直接取消；已经由 send proc 持有的 transaction 必须完成后，调用者的
-静态 slot 才能复用，避免 system proc 引用已释放的栈。
+分别保留独占的 64-byte 对齐 slot。用户 Thread 等待 send proc 的完成事件，期间可以运行
+其它 proc；系统 Thread 直接同步发送。内部调用者保证 opcode、结构体大小和参数有效，
+\code{rpc_call} 不再重复检查这些约定。kill-all 摘除调用者的 event node，并取消仍在
+send queue 的 transaction。发送期间不会切到 receive Thread，因此 kill 不会遇到
+已发出但未完成握手的 transaction；已经返回硬件队列的调用者仍需消费 token 后才回收。
 
 \subsection{Host 侧处理}
 
@@ -68,15 +67,15 @@ Service 启动独立后台 worker，调用 \code{npu_hal_irq_wait} 等待 outbou
   \item 唤醒等待 Host--Device response 的线程。
 \end{enumerate}
 
-Service 发出 \code{RPC_PROC_CREATE} 后仍要继续处理反向 RPC。创建 proc 时的 Device
-allocator 可能通过 \code{RPC_HEAP_ACQUIRE} 扩堆；若等待 response 的线程同时停止
-RPC worker，会形成循环等待。仓库的 Service 使用独立 worker，允许这类嵌套。
+Service 用每 Hart 的 launch agent 串行提交 CREATE，并由独立 RPC worker 接收回复
+和退出通知。快速 kernel 的退出通知可能先于 launch agent 读完创建结果；两者通过
+同一 mutex/condition 交接 \code{submit_done}，退出通知不会访问创建描述符。
+Device 创建 proc 只使用静态 slot 和栈，不扩堆、不切出。
 
 Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块范围的
-\code{RPC_DCACHE_FLUSH}，全部完成后搬运新的 text/rodata，再发送
-\code{RPC_ICACHE_FLUSH} 并等待响应，最后才把模块 entry 交给 launch 路径。cache
-同步是代码发布操作，不属于 proc 创建操作；重复创建同一模块的 proc 不会重复执行
-\code{fence.i}。
+\code{RPC_DCACHE_FLUSH}，全部完成后搬运新的 text/rodata，再把模块 entry 交给 launch
+路径。每次 CREATE 在目标 Hart 执行 \code{fence.i} 后才允许 kernel 运行；模块复用时
+不再失效 D-cache 或上传代码，也不需要单独的 I-cache RPC。
 
 \subsection{cache ownership}
 
@@ -87,7 +86,7 @@ Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块
   Device packet/request & 各占独立 64-B slot；Device clean 后置 outbound bit & Host 只读；处理完成后写 packet status 并清 bit。 \\
   Device response & 独占 64-B slot；Device 提交前 clean & Host 写入；Device 收到确认后 invalidate 并复制给调用者。 \\
   trap record & Device 复制到稳定槽并 clean & Host 读取并清 bit；确认前槽不可复用。 \\
-  proc create 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate 后读取，更新并 clean；Host 查询时重新读取。 \\
+  proc create 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate、复制启动数据、完整 flush 创建结果；Host 收到回复后读回并释放。 \\
   PS/kill 描述符 & Host 写入普通 Device RAM 后提交 & Device invalidate、填充结果并 clean；Host 收到 response 后读取。 \\
   D-cache flush 描述符 & Host 写入目标范围并提交 & Device invalidate 描述符和目标范围，回写 status 并 clean。 \\
   profile FIFO & Device 写 proc 初始状态与目标状态变化，满/STOP 时 clean & Host 读取后用 response 决定是否继续。 \\
@@ -95,7 +94,7 @@ Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块
 
 表中的 Host-owned 标量控制 descriptor 均从 64-byte 对齐地址开始，allocation 大小按
 64-byte 向上取整，opcode 唯一确定结构体布局和长度。Device 在解析前 invalidate；
-请求字段保持只读，只在响应或 Proc family 终态写结果并 clean。Host 确认结果可见后才释放。
+请求字段保持只读，只在响应前写结果并完整 flush。Host 收到回复并读回结果后释放。
 提交前失败可以立即释放；一旦尝试发布命令却未收到匹配响应，该 allocation 不重新进入
 分配池，只在 HAL 关闭时统一回收。
 

@@ -17,20 +17,19 @@ _start:
     add     sp, sp, t0
     andi    sp, sp, -16
 
-    /* The initial tp is this hart's init thread at CPU-local offset zero. */
-    la      tp, __cpu_start
+    /* Clear CPU-local data; boot has no schedulable thread. */
+    la      t2, __cpu_start
     li      t0, CONFIG_CPU_LOCAL_SIZE
     mul     t1, a0, t0
-    add     tp, tp, t1
-    mv      t1, tp
+    add     t1, t2, t1
 .Lzero_cpu:
     sd      zero, 0(t1)
     addi    t1, t1, 8
     addi    t0, t0, -8
     bnez    t0, .Lzero_cpu
-    sd      sp, 8(tp)       /* init.sp records the boot stack */
+    mv      tp, zero
 
-    /* Scheduler/init owns no Host shared allocation. */
+    /* Boot owns no Host shared allocation. */
     mv      gp, zero
 
     /* Exceptions and tensor external interrupts use a per-Hart trap stack. */
@@ -55,7 +54,7 @@ _start:
     csrw    mie, t0
     li      t0, 0x8
     csrs    mstatus, t0
-    call    scheduler
+    tail    switch_context
 
 .Lpark:
     wfi

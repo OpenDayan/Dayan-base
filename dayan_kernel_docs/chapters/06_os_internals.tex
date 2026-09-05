@@ -13,10 +13,10 @@
 
 \begin{enumerate}
   \item BL0 从 Host--Device mailbox 读取 BL1 entry，并把 hart ID 放入 \code{a0}；
-  \item BL1 选择本 hart 的 init 栈和 CPU-local 区，设置 \code{tp/current}、
+  \item BL1 选择本 hart 的启动栈和 CPU-local 区，设置 \code{tp/current=0}、
         \code{gp=0}、trap 栈与 \code{mtvec}；
   \item \code{init()} 初始化 platform、scheduler、私有堆、两个 RPC proc 和 profile proc；
-  \item 进入 \code{scheduler()}，不再返回。
+  \item 直接进入 \code{switch_context()}，首次分派不保存启动上下文。
 \end{enumerate}
 
 BL1 初始化期间保持中断关闭；进入 scheduler 前只在 \code{mie} 中启用 MEIE，并设置
@@ -29,12 +29,12 @@ BASE 全局队列中的调度 token，再重新初始化本 Hart 的 Local Resou
 
 \begin{dayantable}{默认每 hart 预留}{tab:kernel-050}{X[27,l] X[24,l] X[49,l]}
   区域 & 大小 & 用途 \\
-  CPU-local & 4 KiB & scheduler、allocator、RPC、trap 状态和 init thread。 \\
-  init 栈 & 64 KiB & BL1、初始化和 scheduler。 \\
+  CPU-local & 4 KiB & profile 开关、allocator、RPC、trap 状态。 \\
+  启动栈 & 64 KiB & BL1 和初始化，首次分派后不再使用。 \\
   RPC 栈 & 4 KiB $\times$ 2 & receive proc 与 send proc。 \\
   profile 栈 & 4 KiB & profile FIFO 满时执行反向 RPC。 \\
   trap 栈 & 4 KiB & 同步异常与张量机器外部中断入口。 \\
-  proc slot & $(64+4)$ KiB $\times$ 16 & 算子 proc 的固定栈与 printf buffer；不含 init/RPC/profile proc。 \\
+  proc slot & $(64+4)$ KiB $\times$ 16 & 算子 proc 的固定栈与 printf buffer；不含 RPC/profile proc。 \\
   初始堆 & 1 MiB & 当前 hart 私有 allocator 的首个 region。 \\
 \end{dayantable}
 
@@ -43,8 +43,8 @@ BASE 全局队列中的调度 token，再重新初始化本 Hart 的 Local Resou
 
 \subsection{thread 与 scheduler}
 
-\code{tp} 始终指向 \code{struct thread} 固定前缀。init thread 的 ID/type 为 0；
-system、子 Thread 和 root Proc 的 type 分别为 1、2、3，用户 ID 由 slot 和 generation
+启动后的 \code{tp} 指向 \code{struct thread} 固定前缀，没有独立 init/scheduler Thread。
+system、子 Thread 和 root Proc 的 type 分别为 1、2、3，ID 由 slot 和 generation
 组成。
 
 \begin{dayantable}{thread 状态}{tab:kernel-051}{X[23,l] X[15,l] X[62,l]}
@@ -59,16 +59,19 @@ system、子 Thread 和 root Proc 的 type 分别为 1、2、3，用户 ID 由 s
   \code{KILL\_WAIT\_PRODUCE} & 7 & 已 kill，只等待 Produce 返回后释放 slot。 \\
 \end{dayantable}
 
-scheduler 主循环只有 \code{call switch_context} 和回跳。\code{switch_context} 先读
-\code{mip.MSIP}；pending 且 receive Thread 处于 \code{WAIT_POLL} 时直接选它，否则从
+\code{switch_context} 先读
+\code{mip.MSIP}；pending 时直接选择 receive Thread，否则从
 BASE Produce/Bar[0] 弹出一个 Thread 指针。空 token 继续等待；token 等于当前
 \code{tp} 时不保存上下文，直接返回原 Thread。软件不扫描 ready、poll 或 resource
 队列。
 
 \code{dayan_yield} 和普通唤醒提交无依赖硬件 Wait。event wait 仍把 Thread 的短 slot node
-挂到 join/RPC/profile 等明确所有者的链表；事件所有者唤醒它时才提交 Wait。一般
-predicate wait 在调用方循环检查条件并 yield，不由 scheduler 执行 predicate。RPC receive
+挂到 join/RPC/profile 等明确所有者的链表；事件所有者唤醒它时才提交 Wait。
+join 等待目标子 Thread 的退出事件，不轮询条件，也没有通用 predicate wait 接口。RPC receive
 是唯一由 \code{mip.MSIP} 直接选择、无需硬件 token 的路径。
+由中断唤醒的系统事件在短临界区内检查条件并登记 waiter，恢复中断后再切换，避免漏唤醒。
+root 启动参数由 Host Service 校验，子 Thread 参数由 Device API 入口校验；
+内部 \code{thread_start} 只构造上下文。
 
 \subsection{上下文与 proc 生命周期}
 
@@ -85,7 +88,7 @@ helper 的内部调用覆盖尚未保存的当前 Thread 返回地址。
 附录~\ref{sec:kernel-080}。
 
 每个 Hart 在链接阶段静态准备 16 个算子 proc slot，每个 slot 包含 proc 对象、64 KiB
-栈和 4 KiB printf buffer；init、两个 RPC proc 与 profile proc 使用独立对象和栈，
+栈和 4 KiB printf buffer；两个 RPC proc 与 profile proc 使用独立对象和栈，
 不占这些 slot。
 \code{RPC_PROC_CREATE} 取得 root 后立即从全局空闲池摘下 \code{max\_child\_threads} 个
 slot，形成该 family 的专属池；root 计入 reservation，单个 descriptor 最多声明 15 个
@@ -95,18 +98,19 @@ slot，形成该 family 的专属池；root 计入 reservation，单个 descript
 \code{dayan_create_thread} 从同一 Hart 的空闲静态 slot 创建带名称的子 Thread，传递一个
 指针参数并继承 logical task、\code{gp/shared} 和 URAM。显式 TCSR 请求从根 Proc 的
 静态池中子分配并写入该 Thread 的 Context1；Local/Shared Named Resource 使用根窗口的
-相同物理 base，并按子 Thread 声明限制可见前缀 count。proc 保存 parent ID、直属未结束子
-Thread 计数与 join 状态。子 Thread 退出后成为 zombie，减少父计数并按 join 条件精确唤醒；
+相同物理 base，并按子 Thread 声明限制可见前缀 count。proc 保存 parent slot 和退出等待链表。
+子 Thread 退出后成为 zombie，主动唤醒自身退出链表上的父 Thread；
 join 回收 zombie。每个 proc 退出前隐式 join-all，该规则递归保证 root cleanup 时没有
 存活后代。root 最终一次性归还 family 的专属 slot；栈和 printf buffer 始终是静态存储。
 每个 proc 退出均 best-effort flush 自己的输出，只有 Host 创建的 root 使用
 \code{RPC_PROC_EXIT} 上报 64-bit 返回值。root 把退出 transaction 留在自身栈上并进入
 deferred-reap 状态；RPC send Thread 等 Host 清除 outbound doorbell、完成 transaction
-cleanup 后才回收 root slot。这样 Host 描述符终态和 RPC 栈对象都不会与 slot 复用竞态。
+cleanup 后才回收 root slot。创建描述符已在 CREATE 回复后归还 Host，退出只依赖
+slot 中保存的 cookie 和结果；退出 RPC 的栈对象在握手完成前保持有效。
 
-\code{RPC_PROC_KILL_ALL} 不终止 init、receive、send 或 profile Thread。EVENT waiter 从
-所有者链表摘除；尚未发送的 transaction 被取消，已由 send Thread 持有的 transaction
-在释放调用者 slot 前排空。任何已有硬件 token 的 Thread 都改为
+\code{RPC_PROC_KILL_ALL} 不终止 receive、send 或 profile Thread。EVENT waiter 从
+所有者链表摘除；尚未发送的 transaction 被取消。send Thread 阻塞完成握手，
+kill 执行时不存在尚在发送的 transaction。任何已有硬件 token 的 Thread 都改为
 \code{KILL_WAIT_PRODUCE}，token 返回后只执行延迟 slot 回收，不再恢复 kernel 代码；没有
 outstanding token 的 slot 可直接进入退出态。kill 仍只对 root 发送一次退出通知，子
 Thread 不产生 Host 生命周期消息。\code{waiting_produce} 统计所有尚未回到软件的调度
@@ -147,7 +151,7 @@ proc 记录定义和当前状态，随后每次实际状态变化只写 8 bytes�
 
 FIFO 写满时，状态更新路径只置位并唤醒专用 profile proc，不直接执行 RPC。profile proc
 clean 已写数据后发送 \code{RPC_PROFILE_FLUSH}，根据 Host response 继续记录或关闭本
-Hart profile。Host STOP 先关闭记录路径；若 flush 正在进行则等待其结束，随后 clean 并
+Hart profile。flush 使用同步 RPC，期间不会切到 receive Thread。Host STOP 关闭记录路径，随后 clean 并
 返回尚未填满的字节数。
 
 \subsection{私有堆}
@@ -159,6 +163,8 @@ best-fit；块头中的前块大小用于合并相邻空闲块。返回地址至
 Device RAM region；动态 region 完全空闲后通过 \code{RPC_HEAP_RELEASE} 归还。接入
 前 invalidate，归还前 clean，Host 确认后再次 invalidate。无效或重叠 region 不会加入
 allocator，并立即请求 Host 回收。
+非空的 free、resize 和 size 参数必须是当前 Hart 的有效分配；allocator 不重复检查
+指针对齐、块头有效性或 double-free，保留空指针语义、容量检查和 Host region 校验。
 
 \subsection{执行单元完成事件}
 
@@ -176,7 +182,7 @@ Thread token 从 BASE 全局队列返回；DMA 复用 LSU 路径。Named Resourc
 root proc、parent proc 和 launch cookie，生成稳定的 \code{trap_record}，再通过 RPC
 发送给 Host。
 
-普通 proc 异常后以失败状态退出。init/scheduler 异常、嵌套异常、RPC send proc 异常或
+普通 proc 异常后以失败状态退出。启动阶段异常、嵌套异常、RPC send proc 异常或
 报告无法入队时，Dayan OS 停机；这些场景无法安全恢复或保证诊断送达。
 
 \subsection{张量中断处理}
@@ -184,12 +190,13 @@ root proc、parent proc 和 launch cookie，生成稳定的 \code{trap_record}�
 RVTNG 把 URAM 越界或未对齐、TCSR 逻辑组越界以及指令解码错误汇总为每 Hart 的
 机器外部中断。trap 入口保存通用寄存器和 machine/FCSR 状态后读取中断控制、48-bit
 累计计数与最近 16 条记录，连同当前 Thread ID、状态和 Tensor Context 写入
-176-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
+472-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
 原执行对象。错误指令是否继续以及采用何种降级结果由 RVTNG 定义。
 
-trap handler 唤醒 RPC send Thread；它在发送普通 transaction 前后 drain 快照，并用
-\code{RPC_TENSOR_INTERRUPT_REPORT} 异步上报。上一条报告尚未
-离开本 Hart 时，新中断仍会清除硬件 pending，并累计 \code{dropped_reports}，避免中断
+trap handler 唤醒 RPC send Thread；它在发送普通 transaction 前 drain 快照，并用
+\code{RPC_TENSOR_INTERRUPT_REPORT} 同步上报，不额外维护 transaction 或完成回调。
+每 Hart 使用两个缓冲，发送期间的新中断写入另一个 pending 缓冲；若 pending 缓冲
+已经占用，则累计 \code{dropped_reports}。每次中断都会清除硬件 pending，避免中断
 线长期阻塞。Server 默认打印 source ID/名称、低 32-bit info、Context 和累计次数；source
 编号与 RVTNG 的 \code{RVTIntPlacer} 输入顺序一致。
 

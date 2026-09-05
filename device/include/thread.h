@@ -21,7 +21,6 @@ enum thread_state {
 };
 
 enum thread_type {
-    THREAD_TYPE_BASE = 0,
     THREAD_TYPE_SYSTEM = 1,
     THREAD_TYPE_TASK_THREAD = 2,
     THREAD_TYPE_TASK_PROC = 3,
@@ -34,7 +33,6 @@ struct thread {
     uint16_t id;
     uint8_t parent;
     struct thread_list_node node;
-    uint8_t scheduled;
     uintptr_t sp;
     uintptr_t pc;
     uint64_t tensor_context;

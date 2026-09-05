@@ -13,10 +13,6 @@
 #define RESOURCE_PRODUCE_BASE    0x020U
 #define PRODUCE_BAR_GLOBAL       0x000U
 
-#define RESOURCE_TCSR_ENCODING(address, read, reg) \
-    (0x0bU | ((uint32_t)(reg) << 7) | ((uint32_t)(read) << 12) | \
-     ((uint32_t)(address) << 13))
-
 static inline uintptr_t resource_scheduler_interrupt_disable(void)
 {
     uintptr_t previous;
@@ -35,65 +31,6 @@ static inline void resource_scheduler_interrupt_restore(uintptr_t previous)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
 }
 
-static inline void resource_scheduler_write_a0(uint32_t address,
-                                               uint64_t value)
-{
-    register uint64_t a0 __asm__("a0") = value;
-
-    switch (address) {
-    case RESOURCE_WAIT_FREE:
-        __asm__ volatile(".insn 4, %1" : : "r"(a0),
-                         "i"(RESOURCE_TCSR_ENCODING(
-                             RESOURCE_WAIT_FREE, 0, 10)) : "memory");
-        break;
-    case RESOURCE_WAIT_READY:
-        __asm__ volatile(".insn 4, %1" : : "r"(a0),
-                         "i"(RESOURCE_TCSR_ENCODING(
-                             RESOURCE_WAIT_READY, 0, 10)) : "memory");
-        break;
-    case RESOURCE_WAIT_QOS:
-        __asm__ volatile(".insn 4, %1" : : "r"(a0),
-                         "i"(RESOURCE_TCSR_ENCODING(
-                             RESOURCE_WAIT_QOS, 0, 10)) : "memory");
-        break;
-    case RESOURCE_WAIT:
-        __asm__ volatile(".insn 4, %1" : : "r"(a0),
-                         "i"(RESOURCE_TCSR_ENCODING(
-                             RESOURCE_WAIT, 0, 10)) : "memory");
-        break;
-    case RESOURCE_CONSUME_READY:
-        __asm__ volatile(".insn 4, %1" : : "r"(a0),
-                         "i"(RESOURCE_TCSR_ENCODING(
-                             RESOURCE_CONSUME_READY, 0, 10)) : "memory");
-        break;
-    case LOCAL_RESOURCE_INIT:
-        __asm__ volatile(".insn 4, %1" : : "r"(a0),
-                         "i"(RESOURCE_TCSR_ENCODING(
-                             LOCAL_RESOURCE_INIT, 0, 10)) : "memory");
-        break;
-    default:
-        __builtin_trap();
-    }
-}
-
-static inline uintptr_t resource_scheduler_pop(void)
-{
-    register uintptr_t a0 __asm__("a0");
-
-    __asm__ volatile(".insn 4, %1"
-                     : "=r"(a0)
-                     : "i"(RESOURCE_TCSR_ENCODING(
-                           PRODUCE_BAR_GLOBAL, 1, 10))
-                     : "memory");
-    return a0;
-}
-
-static inline void resource_scheduler_drain(void)
-{
-    while (resource_scheduler_pop())
-        ;
-}
-
 static inline void resource_scheduler_submit(uint64_t wait_free,
                                              uint64_t wait_ready,
                                              int8_t qos,
@@ -101,10 +38,10 @@ static inline void resource_scheduler_submit(uint64_t wait_free,
 {
     uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
-    resource_scheduler_write_a0(RESOURCE_WAIT_FREE, wait_free);
-    resource_scheduler_write_a0(RESOURCE_WAIT_READY, wait_ready);
-    resource_scheduler_write_a0(RESOURCE_WAIT_QOS, (uint8_t)qos & 7U);
-    resource_scheduler_write_a0(RESOURCE_WAIT, token);
+    __builtin_riscv_tx_base_tcsr_write(wait_free, 0, RESOURCE_WAIT_FREE);
+    __builtin_riscv_tx_base_tcsr_write(wait_ready, 0, RESOURCE_WAIT_READY);
+    __builtin_riscv_tx_base_tcsr_write((uint8_t)qos & 7U, 0, RESOURCE_WAIT_QOS);
+    __builtin_riscv_tx_base_tcsr_write(token, 0, RESOURCE_WAIT);
     resource_scheduler_interrupt_restore(interrupt_state);
 }
 
@@ -113,7 +50,7 @@ resource_scheduler_local_init(void)
 {
     uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
-    resource_scheduler_write_a0(LOCAL_RESOURCE_INIT, 0);
+    __builtin_riscv_tx_base_tcsr_write(0, 0, LOCAL_RESOURCE_INIT);
     resource_scheduler_interrupt_restore(interrupt_state);
 }
 

@@ -5,6 +5,7 @@
 
 int mem_init(void *base, size_t size);
 void *mem_alloc(size_t size);
+/* Non-null pointers must name live allocations from this Hart's heap. */
 void *mem_resize(void *ptr, size_t size);
 void mem_free(void *ptr);
 size_t mem_size(const void *ptr);

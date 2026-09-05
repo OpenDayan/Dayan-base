@@ -142,10 +142,10 @@ enum rpc_proc_state {
 };
 
 /*
- * Host-owned create descriptor. Host keeps this storage valid and leaves all
- * request fields unchanged until state is EXITED or FAILED. BL1 updates only
- * result fields, flushes their cache line, then publishes state by flushing
- * its cache line last.
+ * Host validates the launch fields and owns this cache-line-isolated storage
+ * until the blocking CREATE reply. Device copies all launch data and flushes
+ * the entire descriptor before replying; it never accesses it again. Host
+ * reads RUNNING/FAILED only after the reply. PROC_EXIT carries the final result.
  */
 struct rpc_proc_create_request {
     uint32_t state;
@@ -391,7 +391,7 @@ _Static_assert(sizeof(struct rpc_profile_flush_request) == 32,
 _Static_assert(sizeof(struct rpc_profile_flush_response) == 24,
                "proc profile flush response ABI must stay fixed");
 
-int rpc_init(void);
+void rpc_init(void);
 
 /*
  * Host-to-Device dispatcher. Return 1 and fill response_command to reply,
@@ -400,22 +400,14 @@ int rpc_init(void);
 int rpc_receive(uint16_t opcode, uint64_t arg,
                 uint64_t *response_command);
 
-long rpc_call(uint32_t service,
+long rpc_call(uint16_t service,
               const void *request, size_t request_size,
               void *response, size_t response_size);
-long rpc_write(const void *data, size_t size);
-long rpc_clear(void);
 long rpc_write_proc(uint32_t proc_id, const void *data, size_t size);
-long rpc_clear_proc(uint32_t proc_id);
 long rpc_heap_acquire(size_t size, struct rpc_heap_response *response);
 long rpc_heap_release(uintptr_t addr, size_t size);
-long rpc_proc_exit(uint32_t proc_id, uint32_t parent_proc_id,
-                   int64_t result, uint64_t cookie, uint32_t flags);
-long rpc_profile_flush(const struct rpc_profile_flush_request *request,
-                       struct rpc_profile_flush_response *response);
-/* Returns 1 while the system send thread still owns the transaction. */
-int rpc_proc_wait_cancel(struct thread *thread);
-/* Completes the Host-owned launch descriptor after its root Thread exits. */
-void rpc_proc_cleanup(struct thread *thread, void *request);
+struct task_proc;
+/* A root reporting its own exit defers stack reclamation until Host ack. */
+long rpc_proc_exit(struct task_proc *task, int64_t result);
 
 #endif

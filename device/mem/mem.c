@@ -152,9 +152,6 @@ static int region_add(struct mem_state *mem, uintptr_t raw, size_t raw_size,
     block = (struct block *)(start + REGION_SIZE);
     sentinel = (struct block *)(end - sizeof(*sentinel));
     size = (size_t)((unsigned char *)sentinel - (unsigned char *)block);
-    if (size < MIN_BLOCK)
-        return -EINVAL;
-
     region->raw = raw;
     region->raw_size = raw_size;
     region->first = block;
@@ -267,8 +264,6 @@ void *mem_alloc(size_t size)
         if (region_grow(mem, need) < 0)
             return 0;
         block = tree_best(mem, need);
-        if (!block)
-            return 0;
     }
 
     tree_remove(mem, block);
@@ -300,15 +295,11 @@ void mem_free(void *ptr)
     struct block *next;
     size_t released;
 
-    if (!ptr || ((uintptr_t)ptr & (ALIGNMENT - 1)))
+    if (!ptr)
         return;
     region = find_region(mem, ptr);
-    if (!region)
-        return;
 
     block = ((struct block *)ptr) - 1;
-    if (!block_used(block) || block_size(block) < MIN_BLOCK)
-        return;
     released = block_size(block);
     block->size &= ~USED;
 
@@ -338,18 +329,11 @@ void mem_free(void *ptr)
 
 size_t mem_size(const void *ptr)
 {
-    struct mem_state *mem = &cpu_self()->mem;
-    struct mem_region *region;
     const struct block *block;
 
-    if (!ptr || ((uintptr_t)ptr & (ALIGNMENT - 1)))
-        return 0;
-    region = find_region(mem, ptr);
-    if (!region)
+    if (!ptr)
         return 0;
     block = ((const struct block *)ptr) - 1;
-    if (!block_used(block) || block_size(block) < sizeof(*block))
-        return 0;
     return block_size(block) - sizeof(*block);
 }
 
@@ -365,8 +349,6 @@ void *mem_resize(void *ptr, size_t size)
         return 0;
     }
     old_size = mem_size(ptr);
-    if (!old_size)
-        return 0;
     if (size <= old_size)
         return ptr;
 

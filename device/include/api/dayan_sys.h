@@ -103,7 +103,7 @@ DAYAN_API DAYAN_NORETURN void dayan_thread_exit(int64_t result);
 /* The returned range belongs to the current resident kernel instance. */
 DAYAN_API void *dayan_uram_base(void);
 DAYAN_API size_t dayan_uram_size(void);
-/* Current Cluster ABI has exactly four participating Cores. */
+/* Busy-waits without yielding; exactly four Cores must participate. */
 DAYAN_API int dayan_cluster_barrier(uint32_t participants,
                                     dayan_cluster_barrier_t *barrier);
 /* Logical launch coordinates. Physical Cluster/Core placement stays hidden. */

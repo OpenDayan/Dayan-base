@@ -16,10 +16,9 @@ void platform_instruction_fence(void);
 void platform_rpc_init(void);
 void platform_rpc_ready(void);
 _Noreturn void platform_rpc_halt(void);
-int platform_rpc_receive_pending(void);
 uint64_t platform_rpc_receive(void);
 void platform_rpc_receive_ack(void);
-int platform_rpc_send_ready(void);
+/* Return after the Host acknowledges the mailbox. */
 void platform_rpc_send(uint64_t command);
 
 void platform_idle(void);

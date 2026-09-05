@@ -6,41 +6,26 @@
 #include "errno.h"
 #include "platform.h"
 #include "platform_regs.h"
+#include "resource_scheduler.h"
 #include "rpc.h"
 #include "rpc_internal.h"
 #include "string.h"
 
 extern unsigned char __rpc_stack_start[];
 
-struct rpc_descriptor_slot {
-    _Alignas(RPC_DESCRIPTOR_GRANULE)
-    unsigned char bytes[RPC_DESCRIPTOR_GRANULE];
-};
-
 struct rpc_call_context {
     struct rpc_transaction transaction;
     void *response;
     size_t response_size;
-    struct rpc_descriptor_slot packet_slot;
-    struct rpc_descriptor_slot request_slot;
-    struct rpc_descriptor_slot response_slot;
+    _Alignas(RPC_DESCRIPTOR_GRANULE) struct rpc_packet packet;
+    _Alignas(RPC_DESCRIPTOR_GRANULE) unsigned char request[RPC_DESCRIPTOR_GRANULE];
+    _Alignas(RPC_DESCRIPTOR_GRANULE) unsigned char reply[RPC_DESCRIPTOR_GRANULE];
 };
-
-_Static_assert(sizeof(struct rpc_descriptor_slot) == RPC_DESCRIPTOR_GRANULE,
-               "RPC descriptor slot size");
-_Static_assert(_Alignof(struct rpc_descriptor_slot) == RPC_DESCRIPTOR_GRANULE,
-               "RPC descriptor slot alignment");
-
-static struct rpc_packet *rpc_call_packet(struct rpc_call_context *call)
-{
-    return (struct rpc_packet *)call->packet_slot.bytes;
-}
 
 static void rpc_transaction_init(struct rpc_transaction *transaction,
                                  uint64_t command,
                                  rpc_cleanup_fn cleanup)
 {
-    INIT_LIST_HEAD(&transaction->node);
     thread_list_init(&transaction->wait);
     transaction->command = command;
     transaction->cleanup = cleanup;
@@ -49,62 +34,30 @@ static void rpc_transaction_init(struct rpc_transaction *transaction,
     transaction->status = 0;
 }
 
-static int rpc_transaction_submit(struct rpc_transaction *transaction)
+static void rpc_transaction_send(struct rpc_transaction *transaction)
+{
+    struct thread *terminal_thread = transaction->terminal_thread;
+
+    platform_rpc_send(transaction->command);
+    transaction->completed = 1;
+    if (transaction->cleanup)
+        transaction->cleanup(transaction);
+    if (terminal_thread)
+        thread_exit_deferred_complete(terminal_thread);
+    else
+        (void)thread_event_wake_all(&transaction->wait);
+}
+
+static void rpc_transaction_submit(struct rpc_transaction *transaction)
 {
     struct rpc_state *rpc = &cpu_self()->rpc;
 
-    if (!rpc->initialized)
-        return -ENOSYS;
-    if (!transaction || !list_empty(&transaction->node))
-        return -EBUSY;
+    if (current->type == THREAD_TYPE_SYSTEM) {
+        rpc_transaction_send(transaction);
+        return;
+    }
     list_add_tail(&transaction->node, &rpc->send_queue);
     (void)thread_event_wake_one(&rpc->send_event);
-    return 0;
-}
-
-static void rpc_transaction_wait(struct rpc_transaction *transaction)
-{
-    struct thread *thread = thread_self();
-
-    if (thread && thread->type != THREAD_TYPE_BASE) {
-        if (thread_system_wait(thread))
-            platform_halt();
-        thread_system_wait_set(thread, transaction);
-    }
-    while (!transaction->completed)
-        thread_wait_event(&transaction->wait);
-    if (thread && thread->type != THREAD_TYPE_BASE)
-        thread_system_wait_set(thread, 0);
-}
-
-int rpc_proc_wait_cancel(struct thread *thread)
-{
-    struct rpc_transaction *transaction;
-
-    if (!thread)
-        return -EINVAL;
-    transaction = thread_system_wait(thread);
-    if (!transaction)
-        return 0;
-    if (transaction->completed) {
-        thread_system_wait_set(thread, 0);
-        return 0;
-    }
-    if (!list_empty(&transaction->node)) {
-        list_del_init(&transaction->node);
-        transaction->status = -ECANCELED;
-        transaction->completed = 1;
-        thread_system_wait_set(thread, 0);
-        return 0;
-    }
-    return 1;
-}
-
-static int rpc_send_poll(struct thread *thread, void *arg)
-{
-    (void)thread;
-    (void)arg;
-    return platform_rpc_send_ready();
 }
 
 static void rpc_send_main(void)
@@ -113,33 +66,23 @@ static void rpc_send_main(void)
 
     for (;;) {
         struct rpc_transaction *transaction;
-        struct thread *terminal_thread;
+        uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
+        if (list_empty(&rpc->send_queue) &&
+            !cpu_self()->tensor_interrupt.pending) {
+            thread_prepare_wait(&rpc->send_event);
+            resource_scheduler_interrupt_restore(interrupt_state);
+            switch_context();
+        } else {
+            resource_scheduler_interrupt_restore(interrupt_state);
+        }
         tensor_interrupt_drain();
-        while (list_empty(&rpc->send_queue)) {
-            thread_wait_event(&rpc->send_event);
-            tensor_interrupt_drain();
-        }
-
-        transaction = list_first_entry(&rpc->send_queue,
-                                       struct rpc_transaction, node);
-        list_del_init(&transaction->node);
-
-        while (!platform_rpc_send_ready())
-            thread_wait_poll(rpc_send_poll, 0);
-        platform_rpc_send(transaction->command);
-        while (!platform_rpc_send_ready())
-            thread_wait_poll(rpc_send_poll, 0);
-
-        transaction->completed = 1;
-        terminal_thread = transaction->terminal_thread;
-        if (transaction->cleanup)
-            transaction->cleanup(transaction);
-        if (terminal_thread) {
-            thread_exit_deferred_complete(terminal_thread, transaction);
+        if (list_empty(&rpc->send_queue))
             continue;
-        }
-        (void)thread_event_wake_all(&transaction->wait);
+        transaction = list_first_entry(&rpc->send_queue,
+                                        struct rpc_transaction, node);
+        list_del_init(&transaction->node);
+        rpc_transaction_send(transaction);
     }
 }
 
@@ -147,8 +90,7 @@ void rpc_send_notify(void)
 {
     struct rpc_state *rpc = &cpu_self()->rpc;
 
-    if (rpc->initialized)
-        (void)thread_event_wake_one(&rpc->send_event);
+    (void)thread_event_wake_one(&rpc->send_event);
 }
 
 __attribute__((weak))
@@ -160,161 +102,104 @@ int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
     return 0;
 }
 
-__attribute__((weak))
-void rpc_receive_reply_queued(uint16_t opcode)
-{
-    (void)opcode;
-}
-
 static void rpc_receive_main(void)
 {
     for (;;) {
-        struct rpc_transaction response;
         uint64_t response_command = 0;
-        uint64_t command;
+        uint64_t command = platform_rpc_receive();
+        uint16_t opcode = rpc_command_opcode(command);
         int reply;
-        int status;
 
-        while (!platform_rpc_receive_pending())
-            thread_wait_rpc();
-
-        command = platform_rpc_receive();
-        if (rpc_command_opcode(command) == 0 &&
-            rpc_command_arg(command) == DAYAN_BOOTROM_RESET_VECTOR)
+        if (!opcode && rpc_command_arg(command) == DAYAN_BOOTROM_RESET_VECTOR)
             platform_rpc_halt();
-        reply = rpc_receive(rpc_command_opcode(command),
-                            rpc_command_arg(command), &response_command);
-        if (reply > 0) {
-            rpc_transaction_init(&response, response_command, 0);
-            status = rpc_transaction_submit(&response);
-            if (status < 0)
-                platform_halt();
-            rpc_receive_reply_queued(rpc_command_opcode(command));
-        }
-
-        /* Host may reuse its mailbox only after this acknowledgement. */
-        platform_rpc_receive_ack();
-
+        reply = rpc_receive(opcode, rpc_command_arg(command), &response_command);
         if (reply > 0)
-            rpc_transaction_wait(&response);
+            platform_rpc_send(response_command);
+        platform_rpc_receive_ack();
+        thread_wait_rpc();
     }
 }
 
-int rpc_init(void)
+void rpc_init(void)
 {
     struct rpc_state *rpc = &cpu_self()->rpc;
     uintptr_t hart = platform_hart_id();
     uintptr_t base = (uintptr_t)__rpc_stack_start +
                      hart * 2U * CONFIG_RPC_STACK_SIZE;
-    int status;
 
-    rpc->initialized = 0;
-    rpc->pending_start = 0;
     INIT_LIST_HEAD(&rpc->send_queue);
     thread_list_init(&rpc->send_event);
-    rpc_transaction_init(&rpc->trap, 0, 0);
-    rpc_transaction_init(&rpc->tensor_interrupt, 0, 0);
-    rpc->trap.completed = 1;
-    rpc->tensor_interrupt.completed = 1;
     platform_rpc_init();
 
-    status = thread_start(thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE),
-                          RPC_PROFILE_SLOT_RPC_RECEIVE, THREAD_TYPE_SYSTEM,
-                          "rpc-receive", rpc_receive_main,
-                          (void *)base, CONFIG_RPC_STACK_SIZE, 0,
-                          0, 0);
-    if (status < 0)
-        return status;
+    thread_start(thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE),
+                  RPC_PROFILE_SLOT_RPC_RECEIVE, THREAD_TYPE_SYSTEM,
+                  "rpc-receive", rpc_receive_main,
+                  (void *)base, CONFIG_RPC_STACK_SIZE, 0, 0, 0);
     base += CONFIG_RPC_STACK_SIZE;
-    status = thread_start(thread_slot_get(RPC_PROFILE_SLOT_RPC_SEND),
-                          RPC_PROFILE_SLOT_RPC_SEND, THREAD_TYPE_SYSTEM,
-                          "rpc-send", rpc_send_main,
-                          (void *)base, CONFIG_RPC_STACK_SIZE, 0,
-                          0, 0);
-    if (status < 0)
-        return status;
-    rpc->initialized = 1;
-    return 0;
+    thread_start(thread_slot_get(RPC_PROFILE_SLOT_RPC_SEND),
+                  RPC_PROFILE_SLOT_RPC_SEND, THREAD_TYPE_SYSTEM,
+                  "rpc-send", rpc_send_main,
+                  (void *)base, CONFIG_RPC_STACK_SIZE, 0, 0, 0);
 }
 
 static void rpc_call_cleanup(struct rpc_transaction *transaction)
 {
     struct rpc_call_context *call = (struct rpc_call_context *)transaction;
-    struct rpc_packet *packet = rpc_call_packet(call);
+    struct rpc_packet *packet = &call->packet;
 
     platform_cache_invalidate(packet, sizeof(*packet));
     if (packet->status >= 0 && call->response_size) {
-        platform_cache_invalidate(call->response_slot.bytes,
-                                  call->response_size);
-        memcpy(call->response, call->response_slot.bytes,
-               call->response_size);
+        platform_cache_invalidate(call->reply, call->response_size);
+        memcpy(call->response, call->reply, call->response_size);
     }
     transaction->status = (long)packet->status;
 }
 
-static int rpc_call_start(struct rpc_call_context *call, uint32_t service,
+/* Firmware callers use fixed request/response types that fit one cache line. */
+static void rpc_call_start(struct rpc_call_context *call, uint16_t service,
                           const void *request, size_t request_size,
                           void *response, size_t response_size,
                           struct thread *terminal_thread)
 {
-    struct rpc_packet *packet;
-    uintptr_t packet_addr;
+    struct rpc_packet *packet = &call->packet;
 
-    if (!call || (!request && request_size) ||
-        (!response && response_size) ||
-        request_size > RPC_DESCRIPTOR_GRANULE ||
-        response_size > RPC_DESCRIPTOR_GRANULE ||
-        !service || service > UINT16_MAX)
-        return -EINVAL;
-    if (!current || current->type == THREAD_TYPE_BASE)
-        return -EPERM;
-    if (current == thread_slot_get(RPC_PROFILE_SLOT_RPC_SEND))
-        return -EPERM;
-
-    memset(call, 0, sizeof(*call));
-    packet = rpc_call_packet(call);
     if (request_size)
-        memcpy(call->request_slot.bytes, request, request_size);
+        memcpy(call->request, request, request_size);
     if (response_size)
-        memcpy(call->response_slot.bytes, response, response_size);
-    packet->request_addr = request_size ?
-        (uintptr_t)call->request_slot.bytes : 0;
+        memcpy(call->reply, response, response_size);
+    packet->request_addr = request_size ? (uintptr_t)call->request : 0;
     packet->request_size = request_size;
-    packet->response_addr = response_size ?
-        (uintptr_t)call->response_slot.bytes : 0;
+    packet->response_addr = response_size ? (uintptr_t)call->reply : 0;
     packet->response_size = response_size;
     packet->status = -EIO;
     call->response = response;
     call->response_size = response_size;
-    packet_addr = (uintptr_t)packet;
-    if ((uint64_t)packet_addr & ~RPC_COMMAND_ARG_MASK)
-        return -EOVERFLOW;
-
     if (request_size)
-        platform_cache_flush(call->request_slot.bytes, request_size);
+        platform_cache_flush(call->request, request_size);
     if (response_size)
-        platform_cache_flush(call->response_slot.bytes, response_size);
+        platform_cache_flush(call->reply, response_size);
     platform_cache_flush(packet, sizeof(*packet));
 
     rpc_transaction_init(&call->transaction,
-                         rpc_command_pack((uint16_t)service, packet_addr),
+                         rpc_command_pack(service, (uintptr_t)packet),
                          rpc_call_cleanup);
     call->transaction.terminal_thread = terminal_thread;
-    return rpc_transaction_submit(&call->transaction);
+    rpc_transaction_submit(&call->transaction);
 }
 
-long rpc_call(uint32_t service,
+long rpc_call(uint16_t service,
               const void *request, size_t request_size,
               void *response, size_t response_size)
 {
     struct rpc_call_context call;
-    int status;
 
-    status = rpc_call_start(&call, service, request, request_size,
-                            response, response_size, 0);
-    if (status < 0)
-        return status;
-    rpc_transaction_wait(&call.transaction);
+    rpc_call_start(&call, service, request, request_size,
+                    response, response_size, 0);
+    if (!call.transaction.completed) {
+        thread_system_wait_set(current, &call.transaction);
+        thread_wait_event(&call.transaction.wait);
+        thread_system_wait_set(current, 0);
+    }
     return call.transaction.status;
 }
 
@@ -324,8 +209,6 @@ long rpc_write_proc(uint32_t proc_id, const void *data, size_t size)
 
     if (!size)
         return 0;
-    if (!proc_id || !data)
-        return -EINVAL;
     request.hart_id = (uint32_t)platform_hart_id();
     request.proc_id = proc_id;
     request.data_addr = (uintptr_t)data;
@@ -334,39 +217,10 @@ long rpc_write_proc(uint32_t proc_id, const void *data, size_t size)
     return rpc_call(RPC_WRITE, &request, sizeof(request), 0, 0);
 }
 
-long rpc_write(const void *data, size_t size)
-{
-    struct task_proc *task = task_proc_self();
-
-    return task ? rpc_write_proc(task->thread.id, data, size) : -EPERM;
-}
-
-long rpc_clear_proc(uint32_t proc_id)
-{
-    struct rpc_print_request request;
-
-    if (!proc_id)
-        return -EINVAL;
-    request.hart_id = (uint32_t)platform_hart_id();
-    request.proc_id = proc_id;
-    request.data_addr = 0;
-    request.data_size = 0;
-    return rpc_call(RPC_CLEAR, &request, sizeof(request), 0, 0);
-}
-
-long rpc_clear(void)
-{
-    struct task_proc *task = task_proc_self();
-
-    return task ? rpc_clear_proc(task->thread.id) : -EPERM;
-}
-
 long rpc_heap_acquire(size_t size, struct rpc_heap_response *response)
 {
     struct rpc_heap_request request;
 
-    if (!size || !response)
-        return -EINVAL;
     request.size = size;
     response->addr = 0;
     response->size = 0;
@@ -378,60 +232,29 @@ long rpc_heap_release(uintptr_t addr, size_t size)
 {
     struct rpc_heap_release release;
 
-    if (!addr || !size)
-        return -EINVAL;
     release.addr = addr;
     release.size = size;
     return rpc_call(RPC_HEAP_RELEASE, &release, sizeof(release), 0, 0);
 }
 
-long rpc_proc_exit(uint32_t proc_id, uint32_t parent_proc_id,
-                   int64_t result, uint64_t cookie, uint32_t flags)
+long rpc_proc_exit(struct task_proc *task, int64_t result)
 {
     struct rpc_proc_exit_request request;
 
-    if (!proc_id || flags != RPC_PROC_EXIT_ROOT || parent_proc_id)
-        return -EINVAL;
     request.hart_id = (uint32_t)platform_hart_id();
-    request.proc_id = proc_id;
-    request.parent_proc_id = parent_proc_id;
-    request.flags = flags;
+    request.proc_id = task->thread.id;
+    request.parent_proc_id = 0;
+    request.flags = RPC_PROC_EXIT_ROOT;
     request.result = result;
-    request.cookie = cookie;
+    request.cookie = task->descriptor.cookie;
+    if (current == &task->thread) {
+        struct rpc_call_context call;
+
+        rpc_call_start(&call, RPC_PROC_EXIT, &request, sizeof(request),
+                        0, 0, current);
+        thread_exit_defer(&call.transaction);
+    }
     return rpc_call(RPC_PROC_EXIT, &request, sizeof(request), 0, 0);
-}
-
-int rpc_proc_exit_current(uint32_t proc_id, uint32_t parent_proc_id,
-                          int64_t result, uint64_t cookie, uint32_t flags)
-{
-    struct rpc_proc_exit_request request;
-    struct rpc_call_context call;
-    struct thread *thread = thread_self();
-    int status;
-
-    if (!thread || thread->type != THREAD_TYPE_TASK_PROC ||
-        !proc_id || flags != RPC_PROC_EXIT_ROOT || parent_proc_id)
-        return -EINVAL;
-    request.hart_id = (uint32_t)platform_hart_id();
-    request.proc_id = proc_id;
-    request.parent_proc_id = parent_proc_id;
-    request.flags = flags;
-    request.result = result;
-    request.cookie = cookie;
-    status = rpc_call_start(&call, RPC_PROC_EXIT, &request, sizeof(request),
-                            0, 0, thread);
-    if (status < 0)
-        return status;
-    thread_exit_defer(&call.transaction);
-}
-
-long rpc_profile_flush(const struct rpc_profile_flush_request *request,
-                       struct rpc_profile_flush_response *response)
-{
-    if (!request || !response)
-        return -EINVAL;
-    return rpc_call(RPC_PROFILE_FLUSH, request, sizeof(*request),
-                    response, sizeof(*response));
 }
 
 static void rpc_trap_cleanup(struct rpc_transaction *transaction)
@@ -440,69 +263,18 @@ static void rpc_trap_cleanup(struct rpc_transaction *transaction)
     trap_report_complete();
 }
 
-int rpc_report_trap(const void *record, size_t size)
+int rpc_report_trap(const struct trap_record *record)
 {
     struct rpc_state *rpc = &cpu_self()->rpc;
-    uintptr_t addr;
-    int status;
 
-    if (!record || !size)
-        return -EINVAL;
-    if (!rpc->initialized)
-        return -ENOSYS;
-    if (!rpc->trap.completed ||
-        current == thread_slot_get(RPC_PROFILE_SLOT_RPC_SEND))
+    /* A fault inside the sender cannot enqueue work for that same sender. */
+    if (current == thread_slot_get(RPC_PROFILE_SLOT_RPC_SEND))
         return -EBUSY;
-    if (size > sizeof(struct trap_record))
-        return -EOVERFLOW;
-    addr = (uintptr_t)record;
-    if ((addr & (RPC_DESCRIPTOR_GRANULE - 1U)) ||
-        ((uint64_t)addr & ~RPC_COMMAND_ARG_MASK))
-        return -EOVERFLOW;
 
-    platform_cache_flush(record, size);
-    rpc_transaction_init(&rpc->trap,
-                         rpc_command_pack(RPC_TRAP_REPORT, addr),
-                         rpc_trap_cleanup);
-    status = rpc_transaction_submit(&rpc->trap);
-    if (status < 0)
-        rpc->trap.completed = 1;
-    return status;
-}
-
-static void rpc_tensor_interrupt_cleanup(struct rpc_transaction *transaction)
-{
-    (void)transaction;
-    tensor_interrupt_report_complete();
-}
-
-int rpc_tensor_interrupt_ready(void)
-{
-    struct rpc_state *rpc = &cpu_self()->rpc;
-
-    return rpc->initialized && rpc->tensor_interrupt.completed;
-}
-
-int rpc_report_tensor_interrupt(const struct tensor_interrupt_record *record)
-{
-    struct rpc_state *rpc = &cpu_self()->rpc;
-    uintptr_t addr;
-    int status;
-
-    if (!record)
-        return -EINVAL;
-    if (!rpc_tensor_interrupt_ready())
-        return -EBUSY;
-    addr = (uintptr_t)record;
-    if ((addr & (RPC_DESCRIPTOR_GRANULE - 1U)) ||
-        ((uint64_t)addr & ~RPC_COMMAND_ARG_MASK))
-        return -EOVERFLOW;
     platform_cache_flush(record, sizeof(*record));
-    rpc_transaction_init(&rpc->tensor_interrupt,
-                         rpc_command_pack(RPC_TENSOR_INTERRUPT_REPORT, addr),
-                         rpc_tensor_interrupt_cleanup);
-    status = rpc_transaction_submit(&rpc->tensor_interrupt);
-    if (status < 0)
-        rpc->tensor_interrupt.completed = 1;
-    return status;
+    rpc_transaction_init(&rpc->trap,
+                         rpc_command_pack(RPC_TRAP_REPORT, (uintptr_t)record),
+                         rpc_trap_cleanup);
+    rpc_transaction_submit(&rpc->trap);
+    return 0;
 }

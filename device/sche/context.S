@@ -15,10 +15,6 @@ switch_context:
     slli    t0, t0, 3
     add     t1, t1, t0
     ld      t1, 0(t1)
-    beqz    t1, .Lpop_token
-    lbu     t0, THREAD_STATE_OFFSET(t1)
-    li      t2, THREAD_WAIT_POLL_VALUE
-    bne     t0, t2, .Lpop_token
     li      t2, 0
     j       .Lselected
 
@@ -31,7 +27,6 @@ switch_context:
     .insn   4, 0x0006d38b
 
 .Lselected:
-    sb      zero, THREAD_SCHEDULED_OFFSET(t1)
     lbu     t0, THREAD_STATE_OFFSET(t1)
     li      t3, THREAD_KILL_WAIT_PRODUCE_VALUE
     beq     t0, t3, .Lkill_token
@@ -39,6 +34,7 @@ switch_context:
     li      t0, THREAD_RUNNING_VALUE
     sb      t0, THREAD_STATE_OFFSET(t1)
     beq     t1, tp, .Lsame_thread
+    beqz    tp, .Lfirst_thread
 
     /* next is known before any callee-saved register is spilled. */
     addi    t0, sp, -SWITCH_FRAME_SIZE
@@ -67,6 +63,7 @@ switch_context:
     sd      t6, THREAD_PC_OFFSET(tp)
     lbu     t6, THREAD_STATE_OFFSET(tp)
 
+.Lload_context:
     mv      sp, t2
     mv      t0, t3
     /* Context1: BASE unit, address 0x010, source t0 (x5). */
@@ -102,6 +99,14 @@ switch_context:
 
 .Lsame_thread:
     ret
+
+.Lfirst_thread:
+    ld      t2, THREAD_SP_OFFSET(t1)
+    ld      t3, THREAD_TENSOR_CONTEXT_OFFSET(t1)
+    lwu     t4, THREAD_RESOURCE_CONTEXT_OFFSET(t1)
+    ld      t5, THREAD_PC_OFFSET(t1)
+    li      t6, THREAD_RUNNING_VALUE
+    j       .Lload_context
 .size switch_context, . - switch_context
 
 .align 2
@@ -127,15 +132,6 @@ switch_context_restore:
     addi    sp, sp, SWITCH_FRAME_SIZE
     ret
 .size switch_context_restore, . - switch_context_restore
-
-.align 2
-.globl scheduler
-.type scheduler, @function
-scheduler:
-.Lscheduler_loop:
-    call    switch_context
-    j       .Lscheduler_loop
-.size scheduler, . - scheduler
 
 .section .text.proc_bootstrap, "ax", @progbits
 .option push

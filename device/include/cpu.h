@@ -19,13 +19,8 @@ struct mem_state {
     size_t available;
 };
 
-struct sche_state {
-    struct thread init;
-    uint32_t profile_enabled;
-};
-
 struct cpu {
-    struct sche_state sche;
+    uint32_t profile_enabled;
     struct mem_state mem;
     struct rpc_state rpc;
     struct trap_state trap;
@@ -34,10 +29,6 @@ struct cpu {
 
 extern uint8_t __cpu_start[];
 
-_Static_assert(offsetof(struct cpu, sche) == 0,
-               "bl1 expects scheduler state at CPU-local offset 0");
-_Static_assert(offsetof(struct sche_state, init) == 0,
-               "bl1 expects the init thread at CPU-local offset 0");
 _Static_assert(sizeof(struct cpu) <= CONFIG_CPU_LOCAL_SIZE,
                "cpu state exceeds its linker reservation");
 

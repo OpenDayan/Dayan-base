@@ -42,6 +42,5 @@ struct trap_frame;
 
 void tensor_interrupt_handle(const struct trap_frame *frame);
 void tensor_interrupt_drain(void);
-void tensor_interrupt_report_complete(void);
 
 #endif

@@ -127,6 +127,17 @@ static void *run_blocking_rpc(void *argument)
     return 0;
 }
 
+static void *run_early_proc_exit(void *argument)
+{
+    npu_service_launch_t *launch = argument;
+
+    assert(npu_service_launch_complete(launch->device, launch->target,
+                                       0x101, 37, launch->cookie) == 0);
+    npu_service_launch_publish(launch->device, launch->target,
+                               0x101, 37, launch->cookie);
+    return 0;
+}
+
 static struct server_session *runtime_session_locked(
     dayan_server_t *server, const npu_runtime_t *runtime)
 {
@@ -582,6 +593,79 @@ int main(void)
      */
     server = 0;
     assert(dayan_server_create(&server, &server_options) == 0);
+    {
+        npu_service_launch_desc_t desc;
+        npu_service_launch_t *launch = 0;
+        npu_hal_allocation_t *reused = 0;
+        struct rpc_proc_create_request reply = {0};
+        npu_service_launch_info_t info;
+        pthread_t exit_thread;
+        uint64_t address;
+        unsigned attempt;
+
+        pthread_mutex_lock(&server->device->mutex);
+        server->device->clusters[0].booted_cores = 1;
+        pthread_mutex_unlock(&server->device->mutex);
+        npu_service_launch_desc_init(&desc);
+        desc.entry = 0x1000;
+        desc.cookie = 0x5678;
+        desc.name = "early-exit";
+        assert(npu_service_launch(server->device, &desc, &launch) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            int pending;
+
+            pthread_mutex_lock(&server->device->mutex);
+            pending = server->device->calls[0].pending;
+            pthread_mutex_unlock(&server->device->mutex);
+            if (pending)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        /* PROC_EXIT can arrive before the launch agent has read CREATE's reply. */
+        assert(pthread_create(&exit_thread, 0, run_early_proc_exit, launch) == 0);
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            int received;
+
+            pthread_mutex_lock(&server->device->mutex);
+            received = launch->exit_received;
+            assert(!launch->submit_done);
+            pthread_mutex_unlock(&server->device->mutex);
+            if (received)
+                break;
+            npu_delay_us(1000);
+        }
+        assert(attempt < 1000);
+        reply.state = RPC_PROC_RUNNING;
+        reply.proc_id = 0x101;
+        reply.cookie = desc.cookie;
+        reply.task_mode = desc.task_mode;
+        memcpy(reply.name, desc.name, strlen(desc.name) + 1);
+        fd = open_file(directory, "xdma0_c2h_0", O_RDWR);
+        assert(fd >= 0);
+        assert(pwrite(fd, &reply, sizeof(reply), launch->request_address) ==
+               (ssize_t)sizeof(reply));
+        close(fd);
+        pthread_mutex_lock(&server->device->mutex);
+        server->device->calls[0].status = 0;
+        server->device->calls[0].pending = 0;
+        pthread_cond_broadcast(&server->device->condition);
+        pthread_mutex_unlock(&server->device->mutex);
+        assert(pthread_join(exit_thread, 0) == 0);
+        assert(npu_service_launch_query(launch, &info) == 0);
+        assert(info.state == NPU_SERVICE_LAUNCH_EXITED && info.status == 37);
+        assert(!launch->request_allocation && !launch->descriptor_may_be_live);
+        assert(npu_service_alloc_rpc_descriptor(server->device, desc.target,
+                                                sizeof(reply), &reused) == 0);
+        assert(npu_hal_memory_address(server->hal, reused, desc.target,
+                                      &address) == 0);
+        assert(address == launch->request_address);
+        assert(npu_service_launch_release(launch) == 0);
+        assert(npu_hal_memory_free(server->hal, reused) == 0);
+        pthread_mutex_lock(&server->device->mutex);
+        server->device->clusters[0].booted_cores = 0;
+        pthread_mutex_unlock(&server->device->mutex);
+    }
     {
         static const size_t descriptor_sizes[] = {
             sizeof(struct rpc_dcache_flush_request),

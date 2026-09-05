@@ -362,7 +362,7 @@ static int layout_sections(const struct elf_view *elf,
 {
     struct load_section *sections;
     uint64_t cursor = 0;
-    uint64_t maximum_alignment = 16;
+    uint64_t maximum_alignment = RPC_DESCRIPTOR_GRANULE;
     size_t index;
     int status;
 
@@ -415,6 +415,9 @@ static int layout_sections(const struct elf_view *elf,
         status = -ENOEXEC;
         goto fail;
     }
+    status = align_up_u64(cursor, RPC_DESCRIPTOR_GRANULE, &cursor);
+    if (status < 0)
+        goto fail;
     *sections_out = sections;
     *image_size_out = cursor;
     *alignment_out = maximum_alignment;
@@ -990,8 +993,9 @@ static int apply_relocations(const struct relocation_context *context,
     return 0;
 }
 
-static int flush_icache(npu_service_device_t *runtime, uint32_t cluster,
-                        uint64_t token)
+static int flush_dcache(npu_service_device_t *runtime, uint32_t cluster,
+                        uint64_t address, uint64_t length,
+                        int *range_may_be_live)
 {
     uint32_t core_mask;
     uint32_t timeout;
@@ -1007,100 +1011,53 @@ static int flush_icache(npu_service_device_t *runtime, uint32_t cluster,
     for (core_index = 0;
          core_index < runtime->hal_info.cores_per_cluster; ++core_index) {
         npu_hal_core_t core = { cluster, core_index };
+        struct rpc_dcache_flush_request request = {
+            .hart_id = core_index,
+            .address = address,
+            .length = length,
+            .status = -EIO,
+        };
+        npu_hal_allocation_t *allocation = 0;
+        uint64_t request_address;
+        int descriptor_may_be_live = 0;
         int status;
 
         if (!(core_mask & (UINT32_C(1) << core_index)))
             continue;
-        status = npu_service_rpc_call(runtime, core, RPC_ICACHE_FLUSH,
-                                      token, timeout, 0);
+        status = npu_service_alloc_rpc_descriptor(
+            runtime, core, sizeof(request), &allocation);
         if (status < 0)
             return status;
-    }
-    return 0;
-}
-
-static int flush_dcache_core(npu_service_device_t *runtime,
-                             npu_hal_core_t core, uint64_t address,
-                             uint64_t length, uint32_t timeout)
-{
-    struct rpc_dcache_flush_request request;
-    npu_hal_allocation_t *allocation = 0;
-    uint64_t request_address;
-    int descriptor_may_be_live = 0;
-    int status;
-
-    status = npu_service_alloc_rpc_descriptor(
-        runtime, core, sizeof(request), &allocation);
-    if (status < 0)
-        return status;
-    status = npu_service_mmu_device_address(runtime, allocation, core,
-                                            &request_address);
-    if (status < 0 || request_address > RPC_COMMAND_ARG_MASK) {
-        status = status < 0 ? status : -EOVERFLOW;
-        goto out;
-    }
-    memset(&request, 0, sizeof(request));
-    request.hart_id = core.core;
-    request.address = address;
-    request.length = length;
-    request.status = -EIO;
-    status = npu_hal_memory_write(runtime->hal, allocation, core, 0,
-                                  &request, sizeof(request));
-    if (status < 0)
-        goto out;
-    status = npu_service_rpc_call(runtime, core, RPC_DCACHE_FLUSH,
-                                  request_address, timeout,
-                                  &descriptor_may_be_live);
-    if (status < 0)
-        goto out;
-    status = npu_hal_memory_read(runtime->hal, allocation, core, &request, 0,
-                                 sizeof(request));
-    if (status < 0)
-        goto out;
-    if (request.hart_id != core.core ||
-        request.flags || request.address != address ||
-        request.length != length || request.reserved) {
-        status = -EPROTO;
-        goto out;
-    }
-    if (request.status < 0) {
-        status = request.status >= INT_MIN ? (int)request.status : -EIO;
-        goto out;
-    }
-    status = request.status == 0 ? 0 : -EPROTO;
-
+        status = npu_service_mmu_device_address(runtime, allocation, core,
+                                                &request_address);
+        if (status < 0 || request_address > RPC_COMMAND_ARG_MASK) {
+            status = status < 0 ? status : -EOVERFLOW;
+            goto out;
+        }
+        status = npu_hal_memory_write(runtime->hal, allocation, core, 0,
+                                      &request, sizeof(request));
+        if (status < 0)
+            goto out;
+        status = npu_service_rpc_call(runtime, core, RPC_DCACHE_FLUSH,
+                                      request_address, timeout,
+                                      &descriptor_may_be_live);
+        if (status < 0)
+            goto out;
+        status = npu_hal_memory_read(runtime->hal, allocation, core, &request, 0,
+                                     sizeof(request));
+        if (status < 0)
+            goto out;
+        status = request.status < INT_MIN || request.status > 0 ? -EPROTO :
+                  (int)request.status;
 out:
-    if (allocation && !descriptor_may_be_live) {
-        int free_status = npu_hal_memory_free(runtime->hal, allocation);
+        if (descriptor_may_be_live) {
+            *range_may_be_live = 1;
+        } else {
+            int free_status = npu_hal_memory_free(runtime->hal, allocation);
 
-        if (status == 0 && free_status < 0)
-            status = free_status;
-    }
-    return status;
-}
-
-static int flush_dcache(npu_service_device_t *runtime, uint32_t cluster,
-                        uint64_t address, uint64_t length)
-{
-    uint32_t core_mask;
-    uint32_t timeout;
-    uint32_t core_index;
-
-    pthread_mutex_lock(&runtime->mutex);
-    core_mask = runtime->clusters[cluster].booted_cores;
-    timeout = runtime->options.default_timeout_ms;
-    pthread_mutex_unlock(&runtime->mutex);
-    if (!core_mask)
-        return -ENODEV;
-
-    for (core_index = 0;
-         core_index < runtime->hal_info.cores_per_cluster; ++core_index) {
-        npu_hal_core_t core = { cluster, core_index };
-        int status;
-
-        if (!(core_mask & (UINT32_C(1) << core_index)))
-            continue;
-        status = flush_dcache_core(runtime, core, address, length, timeout);
+            if (status == 0 && free_status < 0)
+                status = free_status;
+        }
         if (status < 0)
             return status;
     }
@@ -1130,6 +1087,7 @@ static int load_kernel_module(npu_service_device_t *runtime,
     size_t export_count = 0;
     size_t symbol_section_index = 0;
     size_t index;
+    int range_may_be_live = 0;
     int status;
 
     status = elf_view_init(&elf, object, object_size, ET_REL);
@@ -1219,16 +1177,16 @@ static int load_kernel_module(npu_service_device_t *runtime,
     status = apply_relocations(&relocations, symbol_section_index);
     if (status < 0)
         goto fail;
-    status = flush_dcache(runtime, target.cluster, base, image_size);
+    /* Retire old dirty lines before Host writes a possibly reused range. */
+    status = flush_dcache(runtime, target.cluster, base, image_size,
+                           &range_may_be_live);
     if (status < 0)
         goto fail;
     status = npu_hal_memory_write(runtime->hal, allocation, target, 0, image,
                                   (size_t)image_size);
     if (status < 0)
         goto fail;
-    status = flush_icache(runtime, target.cluster, base);
-    if (status < 0)
-        goto fail;
+    /* PROC_CREATE executes fence.i locally before the new entry can run. */
     module = calloc(1, sizeof(*module));
     if (!module) {
         status = -ENOMEM;
@@ -1249,7 +1207,8 @@ static int load_kernel_module(npu_service_device_t *runtime,
     *module_out = module;
     status = 0;
 fail:
-    if (status < 0 && allocation)
+    /* A timed-out invalidate may still touch this range: retain it until close. */
+    if (status < 0 && allocation && !range_may_be_live)
         (void)npu_hal_memory_free(runtime->hal, allocation);
     free(image);
     free(symbol_values);

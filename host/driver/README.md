@@ -190,14 +190,15 @@ create-proc ABI 使用 224-byte `rpc_proc_create_request`，包含 entry、栈�
 printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
 最大子 Thread 数、URAM base/size、64-bit Tensor Context，以及固定 16-byte Proc 名称。Runtime launch 必须提供
 非空 Task 名称；名称最多 15 bytes，最后一 byte 留给 NUL。BL1 创建 root 时一次性专属
-预留全部子 slot；`dayan_create_thread(name, entry, argument, resources)` 在同一 Core
+预留全部子 slot，并复制启动数据。创建事务全程阻塞，Host 读取创建回复后即可回收描述符；
+最终结果由 `RPC_PROC_EXIT` 单独上报。`dayan_create_thread(name, entry, argument, resources)` 在同一 Core
 创建有独立名称的子 Thread，返回正的 ID 并继承 logical task、`shared/gp` 和 URAM；
 TCSR 资源由参数显式声明并形成独立 Context。
 `dayan_thread_join`/`dayan_thread_join_all` 回收直属子 Thread；父
 执行对象返回前隐式等待全部子 Thread，因而 root 的终态覆盖整棵子树。每个执行对象退出
 统一调用输出 flush，空缓冲不会产生 RPC，也不再额外发送 CLEAR。只有 root 主动向 Host
-上报返回值；Host 在响应 `RPC_PROC_EXIT` 前记录终态并释放 create descriptor，Device
-收到响应后立即由 scheduler 栈归还整组静态 slot。普通完成路径不调用 `RPC_PROC_PS`。
+上报返回值；Host 在响应 `RPC_PROC_EXIT` 前记录终态，Device
+收到响应后由 send Thread 归还整组静态 slot。普通完成路径不调用 `RPC_PROC_PS`。
 
 `RPC_PROC_PS` 返回目标 Hart 的系统/算子 proc 快照，每条记录包含相同的 16-byte
 名称。系统 Proc 分别命名为 `rpc-receive`、`rpc-send` 和 `profile-flush`。
@@ -216,7 +217,10 @@ shared allocation。该 barrier 使用 `AMOADD.D` ticket，可跨多轮复用；
 
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
 未定义符号。覆盖模块前，会对该 Cluster 所有已启动 Core 分别执行带地址和长度的
-`RPC_DCACHE_FLUSH`；全部完成后写入新的 text/rodata，再执行 `RPC_ICACHE_FLUSH` 并发布入口。
+`RPC_DCACHE_FLUSH`；全部完成后写入新的 text/rodata，再发布入口。
+模块首尾独占 64-byte cache line，loader 互斥锁覆盖分配、失效、上传和发布。
+目标 Core 在每次 `RPC_PROC_CREATE` 中执行 `fence.i`，不再单独发送 I-cache RPC。
+若 D-cache RPC 超时，描述符及目标模块范围均保留到 HAL 关闭，避免延迟失效破坏复用内存。
 
 Device 发起的标量 RPC 将 packet、request 和 response 分别放入独占的 64-byte 对齐
 slot，Host 只写 response/status，Device 确认后 invalidate 并复制回调用者。Host-owned
