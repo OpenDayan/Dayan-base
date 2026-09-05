@@ -34,13 +34,17 @@ struct thread {
     uint16_t id;
     uint8_t parent;
     struct thread_list_node node;
+    uint8_t scheduled;
     uintptr_t sp;
     uintptr_t pc;
     uint64_t tensor_context;
+    uint32_t resource_context;
+    uint8_t token_ext;
+    uint8_t reap_deferred;
     char name[THREAD_NAME_SIZE];
 };
 
-void switch_context(struct thread *prev, struct thread *next);
+void switch_context(void);
 
 /* U-Boot-style global register variable: current has no memory object. */
 register struct thread *current __asm__("tp");

@@ -71,6 +71,60 @@ context_dump=$($objdump --disassemble --no-show-raw-insn \
     [ "$(grep -Ec 'ld[[:space:]]+gp,' <<<"$context_dump")" -eq 2 ] ||
     fail "context switch must save and restore per-proc gp"
 
+switch_dump=$($objdump --disassemble --no-show-raw-insn \
+    --disassemble-symbols=switch_context "$elf")
+switch_raw=$($objdump --disassemble \
+    --disassemble-symbols=switch_context "$elf")
+scheduler_dump=$($objdump --disassemble --no-show-raw-insn \
+    --disassemble-symbols=scheduler "$elf")
+[ "$(grep -Ec '^[[:space:]]*[[:xdigit:]]+:' <<<"$scheduler_dump")" -eq 3 ] &&
+    grep -Eq 'jalr.*<switch_context>' <<<"$scheduler_dump" ||
+    fail "scheduler must contain only call switch_context and its loop branch"
+if grep -Eq '(^|[[:space:],(])s(0|1|2|3|4|5|6|7|8|9|10|11)([[:space:],)]|$)' \
+        <<<"$scheduler_dump"; then
+    fail "scheduler must not use callee-saved registers"
+fi
+for encoding in 0000128b 0006d38b 0002028b 0002228b; do
+    grep -Fq "$encoding" <<<"$switch_raw" ||
+        fail "switch_context hardware instruction $encoding is missing"
+done
+mip_line=$(grep -n -m1 'csrr[[:space:]]\+t0, mip' <<<"$switch_dump" |
+    cut -d: -f1)
+pop_line=$(grep -n -m1 'tx\.sb\.get\.any' <<<"$switch_dump" |
+    cut -d: -f1)
+same_line=$(grep -n -m1 'beq[[:space:]]\+t1, tp' <<<"$switch_dump" |
+    cut -d: -f1)
+spill_line=$(grep -n -m1 'sd[[:space:]]\+s0,' <<<"$switch_dump" |
+    cut -d: -f1)
+[ -n "$mip_line" ] && [ -n "$pop_line" ] && [ -n "$same_line" ] &&
+    [ -n "$spill_line" ] && [ "$mip_line" -lt "$pop_line" ] &&
+    [ "$pop_line" -lt "$same_line" ] && [ "$same_line" -lt "$spill_line" ] ||
+    fail "switch_context must select mip/token/same-tp before spilling s0"
+switch_selection=$(sed -n "1,$((spill_line - 1))p" <<<"$switch_dump")
+if grep -Eq '(^|[[:space:],(])s(0|1|2|3|4|5|6|7|8|9|10|11)([[:space:],)]|$)' \
+        <<<"$switch_selection"; then
+    fail "switch_context selection path must use only caller-saved registers"
+fi
+for load in \
+    'ld[[:space:]]+t2, 0x8\(t1\)' \
+    'ld[[:space:]]+t3, 0x18\(t1\)' \
+    'lwu[[:space:]]+t4, 0x20\(t1\)' \
+    'ld[[:space:]]+t5, 0x10\(t1\)'; do
+    grep -Eq "$load" <<<"$switch_dump" ||
+        fail "switch_context must interleave target context loads with spills"
+done
+kill_ra_save_line=$(grep -n -m1 'sd[[:space:]]\+ra, 0x0(sp)' \
+    <<<"$switch_dump" | cut -d: -f1)
+kill_call_line=$(grep -n -m1 'jalr.*<scheduler_kill_token>' \
+    <<<"$switch_dump" | cut -d: -f1)
+kill_ra_restore_line=$(grep -n -m1 'ld[[:space:]]\+ra, 0x0(sp)' \
+    <<<"$switch_dump" | cut -d: -f1)
+[ -n "$kill_ra_save_line" ] && [ -n "$kill_call_line" ] &&
+    [ -n "$kill_ra_restore_line" ] &&
+    [ "$kill_ra_save_line" -lt "$kill_call_line" ] &&
+    [ "$kill_call_line" -lt "$kill_ra_restore_line" ] ||
+    fail "kill-token handling must preserve the interrupted thread return address"
+
 if ! $objdump --disassemble --no-show-raw-insn \
         "$api_compile" "$api_cxx_compile" | \
         grep -Eq '(^|[[:space:],(])gp([[:space:],)]|$)'; then
@@ -119,6 +173,23 @@ if grep -Eq '(^|[[:space:]])(lb|lbu|lh|lhu|lw|lwu|ld)([[:space:]]|$)' \
     fail "RPC receive polling must not read CLINT through MMIO"
 fi
 
+rpc_halt_dump=$($objdump --disassemble --no-show-raw-insn \
+    --disassemble-symbols=platform_rpc_halt \
+    "$build/platform/platform.o")
+rpc_halt_raw=$($objdump --disassemble \
+    --disassemble-symbols=platform_rpc_halt \
+    "$build/platform/platform.o")
+grep -Fq '0000150b' <<<"$rpc_halt_raw" ||
+    fail "RPC halt must drain stale hardware scheduler tokens"
+grep -Fq '0006a50b' <<<"$rpc_halt_raw" ||
+    fail "RPC halt must initialize Local Resource state"
+halt_pop_line=$(grep -n -m1 'tx\.sb\.get\.any' <<<"$rpc_halt_dump" |
+    cut -d: -f1)
+halt_init_line=$(grep -n -m1 '0x35' <<<"$rpc_halt_dump" | cut -d: -f1)
+[ -n "$halt_pop_line" ] && [ -n "$halt_init_line" ] &&
+    [ "$halt_pop_line" -lt "$halt_init_line" ] ||
+    fail "RPC halt must drain scheduler tokens before Local Resource init"
+
 stack_sections=$($readelf --sections --wide "$elf" | \
     grep -Ec '\.(stack|rpc_stack|profile_stack|trap_stack|proc_stack)[[:space:]]+NOBITS')
 [ "$stack_sections" -eq 5 ] ||
@@ -165,40 +236,22 @@ for encoding in 0000220b 0000420b 0000620b 0000820b; do
     grep -Fq "$encoding" <<<"$dapi_raw" ||
         fail "Produce instruction $encoding is missing"
 done
-for encoding in 0000250b 0000450b 0000650b 0000850b; do
+for encoding in 0004250b 0004450b 0004650b 0004850b; do
     grep -Fq "$encoding" <<<"$dapi_raw" ||
-        fail "encoded-token Produce instruction $encoding is missing"
+        fail "Resource Produce instruction $encoding is missing"
 done
-grep -Fq '0000150b' <<<"$dapi_raw" ||
-    fail "global Produce pop instruction encoding changed"
 if grep -Eq '(^|[[:space:]])fence([[:space:]]|$)' <<<"$dapi_dump" ||
         grep -Eq '(^|[[:space:]])amo[^[:space:]]*\.(aq|rl|aqrl)([[:space:]]|$)' \
             <<<"$dapi_dump"; then
     fail "Dayan synchronization API must use relaxed coherent accesses"
 fi
 
-local_resource_apis=dayan_resource_init,dayan_resource_alloc,dayan_resource_produce,dayan_resource_consume,dayan_resource_wait_ready,dayan_resource_wait_free
+local_resource_apis=dayan_resource_wait,dayan_resource_wait_ready,dayan_resource_wait_free,dayan_resource_produce_lsu,dayan_resource_produce_mat,dayan_resource_produce_vec,dayan_resource_produce_macro,dayan_resource_consume_lsu,dayan_resource_consume_mat,dayan_resource_consume_vec,dayan_resource_consume_macro
 if $objdump --no-show-raw-insn \
         --disassemble-symbols="$local_resource_apis" \
         "$build/sche/dapi.o" | \
         grep -Eq '(^|[[:space:]])(amo[^[:space:]]*|lr\.[wd][^[:space:]]*|sc\.[wd][^[:space:]]*|fence)([[:space:]]|$)'; then
-    fail "per-hart resource API must not use atomic instructions"
-fi
-shared_alloc_dump=$($objdump --no-show-raw-insn \
-    --disassemble-symbols=dayan_shared_resource_alloc "$build/sche/dapi.o")
-shared_produce_dump=$($objdump --no-show-raw-insn \
-    --disassemble-symbols=dayan_shared_resource_produce "$build/sche/dapi.o")
-shared_consume_dump=$($objdump --no-show-raw-insn \
-    --disassemble-symbols=dayan_shared_resource_consume "$build/sche/dapi.o")
-grep -Eq 'amocas\.d([[:space:]]|$)' <<<"$shared_alloc_dump" ||
-    fail "shared resource allocation must use native 64-bit AMOCAS"
-grep -Eq 'amoadd\.d([[:space:]]|$)' <<<"$shared_produce_dump" ||
-    fail "shared resource produce must use native 64-bit AMOADD"
-grep -Eq 'amoadd\.d([[:space:]]|$)' <<<"$shared_consume_dump" ||
-    fail "shared resource consume must use native 64-bit AMOADD"
-shared_resource_dump="$shared_alloc_dump$shared_produce_dump$shared_consume_dump"
-if grep -Eq 'amoswap\.[wd]([[:space:]]|$)' <<<"$shared_resource_dump"; then
-    fail "shared resource API must not use an atomic spin lock"
+    fail "Named Resource API must not use atomic instructions"
 fi
 barrier_dump=$($objdump --no-show-raw-insn \
     --disassemble-symbols=dayan_cluster_barrier "$build/sche/dapi.o")

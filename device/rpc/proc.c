@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "cpu.h"
 #include "errno.h"
 #include "platform.h"
 #include "profile.h"
@@ -45,6 +46,8 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
 {
     struct dayan_context_fields tensor_context =
         dayan_context_unpack(request->tensor_context);
+    struct dayan_resource_context_fields resource_context =
+        dayan_resource_context_unpack(request->resource_context);
     uint64_t coherent_base = CONFIG_COHERENT_BASE;
     uint64_t coherent_size = CONFIG_COHERENT_SIZE;
     uint64_t uram_window = CONFIG_URAM_BASE +
@@ -54,7 +57,6 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
     int context_uram_valid;
 
     if (request->flags || request->reserved || request->task_reserved ||
-        request->resource_reserved ||
         request->state != RPC_PROC_SUBMITTED ||
         request->argc > RPC_PROC_MAX_ARGS ||
         !request->name[0] ||
@@ -73,6 +75,8 @@ static int proc_request_valid(const struct rpc_proc_create_request *request)
         request->task_id[2] >= request->task_dim[2] ||
         (request->task_mode != 1U && request->task_mode != 4U) ||
         (request->task_mode == 4U && request->task_dim[0] != 4U) ||
+        (request->resource_context >> 22) ||
+        !dayan_resource_context_fields_valid(&resource_context) ||
         (request->tensor_context >> 56) ||
         !dayan_context_fields_valid(&tensor_context))
         return 0;
@@ -126,6 +130,9 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     size_t index;
     int status = -EINVAL;
 
+    if (cpu_self()->rpc.pending_start)
+        platform_halt();
+
     *response_command = rpc_command_pack(RPC_PROC_CREATE_RESPONSE, arg);
     if (!rpc_descriptor_address_valid(arg, sizeof(*request)))
         return 1;
@@ -154,7 +161,8 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     if (status < 0)
         goto complete;
     status = task_proc_set_descriptor(task, &descriptor,
-                                      request->tensor_context);
+                                      request->tensor_context,
+                                      request->resource_context);
     if (status < 0)
         goto complete;
     status = task_proc_reserve(task);
@@ -173,6 +181,7 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     request->proc_id = task->thread.id;
     request->hart_id = (uint32_t)platform_hart_id();
     proc_request_publish_state(request, RPC_PROC_RUNNING);
+    cpu_self()->rpc.pending_start = task;
     return 1;
 
 complete:
@@ -185,6 +194,22 @@ complete:
     request->hart_id = (uint32_t)platform_hart_id();
     proc_request_publish_state(request, RPC_PROC_FAILED);
     return 1;
+}
+
+void rpc_receive_reply_queued(uint16_t opcode)
+{
+    struct task_proc *task = cpu_self()->rpc.pending_start;
+
+    if (opcode != RPC_PROC_CREATE) {
+        if (task)
+            platform_halt();
+        return;
+    }
+    if (!task)
+        return;
+    cpu_self()->rpc.pending_start = 0;
+    if (task_proc_schedule(task) < 0)
+        platform_halt();
 }
 
 static int rpc_icache_flush(uint64_t token, uint64_t *response_command)

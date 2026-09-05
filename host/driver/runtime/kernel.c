@@ -216,6 +216,8 @@ int npu_kernel_get_info(npu_kernel_t *kernel, npu_kernel_info_t *info)
     info->mat_tcsr_count = response.mat_tcsr_count;
     info->vec_tcsr_count = response.vec_tcsr_count;
     info->macro_tcsr_count = response.macro_tcsr_count;
+    info->local_resource_count = response.local_resource_count;
+    info->shared_resource_count = response.shared_resource_count;
     info->reserved = 0;
     info->stack_size = response.stack_size;
     info->atomic_cache_size = response.atomic_cache_size;

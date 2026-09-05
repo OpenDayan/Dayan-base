@@ -103,6 +103,8 @@ int npu_package_build(const void *riscv_object, size_t object_size,
             kernel->mat_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
             kernel->vec_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
             kernel->macro_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->local_resource_count > NPU_PACKAGE_RESOURCE_MAX_COUNT ||
+            kernel->shared_resource_count > NPU_PACKAGE_RESOURCE_MAX_COUNT ||
             (kernel->stack_size &&
              kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
             kernel->stack_size > NPU_PACKAGE_PROC_STACK_SIZE ||
@@ -229,6 +231,8 @@ int npu_package_build(const void *riscv_object, size_t object_size,
         destination->mat_tcsr_count = source->mat_tcsr_count;
         destination->vec_tcsr_count = source->vec_tcsr_count;
         destination->macro_tcsr_count = source->macro_tcsr_count;
+        destination->local_resource_count = source->local_resource_count;
+        destination->shared_resource_count = source->shared_resource_count;
         destination->stack_size = source->stack_size;
         destination->atomic_cache_size = source->atomic_cache_size;
         destination->printf_buffer_size = source->printf_buffer_size;

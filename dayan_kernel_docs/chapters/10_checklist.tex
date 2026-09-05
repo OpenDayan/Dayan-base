@@ -10,7 +10,7 @@
   状态 & 检查项 \\
   \code{[ ]} & 混合源码包含 \code{dayan_kernel.h}，单侧头文件位于对应条件分支。 \\
   \code{[ ]} & 全局变量标明 Host/Device；kernel 签名、参数类型和参数数量符合限制。 \\
-  \code{[ ]} & 每个 kernel 有同名资源描述符，子 Thread、atomic cache、URAM 和四类 TCSR 上限覆盖最坏情况；只有会写入未保存/恢复的非 TCSR Hart 状态的 single-Core kernel 使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}。 \\
+  \code{[ ]} & 每个 kernel 有同名资源描述符，子 Thread、Local/Shared Named Resource、atomic cache、URAM 和四类 TCSR 上限覆盖最坏情况；只有会写入未保存/恢复的非 TCSR Hart 状态的 single-Core kernel 使用 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}。 \\
   \code{[ ]} & 激活/Element-wise 等独立分片默认使用无子 Thread 的顺序 Proc；按单 Proc 声明资源，必要时用 \code{DAYAN_KERNEL_TASK_DESC} 允许每 Hart 最多共驻 4 个 Proc。 \\
   \code{[ ]} & 只在核间广播、远程 URAM 复制或明确的多阶段流水中创建子 Thread；每个 Proc/Thread 优先使用自己 Context 的逻辑 TCSR 组 0。 \\
   \code{[ ]} & Device 指针指向可访问且生命周期足够长的 Device/coherent 内存。 \\
@@ -18,7 +18,7 @@
   \code{[ ]} & Host 加载匹配的固件，并在调用 wrapper 前注册 \code{npu-os-api.elf}。 \\
   \code{[ ]} & 启动属性经过初始化，hart 范围和内存大小有效。 \\
   \code{[ ]} & 异步路径释放全部已返回 handle，包括部分提交失败的情况。 \\
-  \code{[ ]} & 跨 hart 数据位于 coherent allocation，并用 shared resource 或明确的原子协议同步。 \\
+  \code{[ ]} & 跨 hart 数据位于 coherent allocation，并用 Shared Named Resource、Cluster barrier 或明确的原子协议同步；有限资源图末端已提交 consume。 \\
 \end{dayantable}
 
 \subsection{Host 与 RPC}
@@ -33,7 +33,7 @@
   \code{[ ]} & 等待 Host--Device response 时，后台 worker 仍处理 Device--Host 服务。 \\
   \code{[ ]} & 堆 region 的地址、大小、类型和 hart owner 在申请与归还时一致。 \\
   \code{[ ]} & proc create 描述符保持到 EXITED/FAILED；shared allocation 保持到所有使用者结束。 \\
-  \code{[ ]} & 按 Hart 累加 \code{1 + max\_child\_threads}，保证不超过 16，并按 Core 限制 atomic cache、URAM 与四类 TCSR；invocation 终态后释放全部 reservation。 \\
+  \code{[ ]} & 按 Hart 累加 \code{1 + max\_child\_threads}，保证不超过 16，并按 Core 限制 atomic cache、URAM、四类 TCSR 和 Local Named Resource，按 Cluster 限制 Shared Named Resource；invocation 终态后释放全部 reservation。 \\
   \code{[ ]} & locked Task 只进入空 Hart，活跃期间拒绝其它 logical Task；创建失败和 family 终态均清除锁。 \\
   \code{[ ]} & profile allocation 按已启动 Hart 分成独立 FIFO，每份至少容纳 19 项初始 proc 状态；满缓冲先读数据再回复 continue，STOP 排空尾批次后再释放 allocation。 \\
 \end{dayantable}

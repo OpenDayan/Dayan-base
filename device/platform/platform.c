@@ -4,6 +4,7 @@
 #include "config.h"
 #include "platform.h"
 #include "platform_regs.h"
+#include "resource_scheduler.h"
 
 _Static_assert(CONFIG_HART_COUNT <= 32,
                "RPC interrupt controller has only 32 lines");
@@ -136,9 +137,18 @@ _Noreturn void platform_rpc_halt(void)
     __asm__ volatile("fence iorw, iorw" ::: "memory");
     __asm__ volatile(
         "li t0, 8\n"
-        "csrc mstatus, t0\n"
-        "fence.i"
+        "csrc mstatus, t0"
         ::: "t0", "memory");
+    /*
+     * This Hart is about to re-enter BL0 without resetting the tensor block.
+     * Its other permanent workers are stopped in switch_context, so discard
+     * their already-issued scheduling tokens before initializing the Local
+     * Resource table.  The next BL1 instance must not inherit runnable tp
+     * values from this one.
+     */
+    resource_scheduler_drain();
+    resource_scheduler_local_init();
+    __asm__ volatile("fence.i" ::: "memory");
     /* Bootrom consumes and acknowledges the pending opcode-0 request. */
     bootrom();
     platform_halt();

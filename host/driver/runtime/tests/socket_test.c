@@ -478,6 +478,8 @@ int main(void)
         kernel.max_tasks_per_core = 1;
         kernel.max_child_threads = 0;
         kernel.flags = NPU_PACKAGE_KERNEL_LOCKED_TASK;
+        kernel.local_resource_count = 3;
+        kernel.shared_resource_count = 2;
         kernel.uram_size = 0;
         assert(npu_package_build(object, sizeof(object), &kernel, 1, 0,
                                  &package, &package_size) == 0);
@@ -492,6 +494,8 @@ int main(void)
             assert(info.flags == NPU_KERNEL_LOCKED_TASK);
             assert(info.supported_task_modes ==
                    NPU_PACKAGE_TASK_MODE_SINGLE_CORE);
+            assert(info.local_resource_count == 3);
+            assert(info.shared_resource_count == 2);
         }
         npu_launch_desc_init(&launch, "locked-test");
         launch.config.task_dim.x = 4;

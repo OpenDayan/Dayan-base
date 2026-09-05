@@ -21,7 +21,9 @@
 
 BL1 初始化期间保持中断关闭；进入 scheduler 前只在 \code{mie} 中启用 MEIE，并设置
 \code{mstatus.MIE}。mailbox 的 MSIP 仍只作为可轮询状态，张量错误通过机器外部中断
-进入 \code{mtvec}，同步异常沿用同一入口。
+进入 \code{mtvec}，同步异常沿用同一入口。Host 请求软重启时，旧 BL1 先关闭中断、排空
+BASE 全局队列中的调度 token，再重新初始化本 Hart 的 Local Resource 表，防止新实例取得
+上一实例遗留的 Thread 指针。
 
 \subsection{每 hart 状态}
 
@@ -41,14 +43,15 @@ BL1 初始化期间保持中断关闭；进入 scheduler 前只在 \code{mie} �
 
 \subsection{thread 与 scheduler}
 
-\code{tp} 始终指向 \code{struct thread} 固定前缀。init thread 的 ID 和 type 为 0；
-proc 的 type 为 1，ID 由本 hart scheduler 从 1 开始分配。
+\code{tp} 始终指向 \code{struct thread} 固定前缀。init thread 的 ID/type 为 0；
+system、子 Thread 和 root Proc 的 type 分别为 1、2、3，用户 ID 由 slot 和 generation
+组成。
 
 \begin{dayantable}{thread 状态}{tab:kernel-051}{X[23,l] X[15,l] X[62,l]}
   状态 & 数值 & 含义 \\
   \code{RUNNING} & 0 & 当前在本 hart 执行。 \\
-  \code{READY} & 1 & 位于 ready queue。 \\
-  \code{WAIT_POLL} & 2 & scheduler 每轮调用非阻塞 predicate。 \\
+  \code{READY} & 1 & 已向硬件提交 Wait，等待 Thread token 返回。 \\
+  \code{WAIT_POLL} & 2 & RPC receive 等待 \code{mip.MSIP} 选择。 \\
   \code{WAIT_EVENT} & 3 & 挂在事件链表，由事件所有者唤醒。 \\
   \code{WAIT_START} & 4 & thread 构造期间的内部状态。 \\
   \code{WAIT_EXIT} & 5 & proc 已结束，不再调度。 \\
@@ -56,21 +59,26 @@ proc 的 type 为 1，ID 由本 hart scheduler 从 1 开始分配。
   \code{KILL\_WAIT\_PRODUCE} & 7 & 已 kill，只等待 Produce 返回后释放 slot。 \\
 \end{dayantable}
 
-scheduler 每轮先扫描张量单元完成 token，再检查 poll queue，最后从 ready queue 取一个
-proc。没有 ready proc、poll waiter 或 event waiter 时进入 platform idle。运行中的
-proc 通过 \code{proc_yield}、\code{proc_wait_poll}、\code{proc_wait_event} 或
-\code{proc_exit} 回到 scheduler。
+scheduler 主循环只有 \code{call switch_context} 和回跳。\code{switch_context} 先读
+\code{mip.MSIP}；pending 且 receive Thread 处于 \code{WAIT_POLL} 时直接选它，否则从
+BASE Produce/Bar[0] 弹出一个 Thread 指针。空 token 继续等待；token 等于当前
+\code{tp} 时不保存上下文，直接返回原 Thread。软件不扫描 ready、poll 或 resource
+队列。
 
-event wait 把 proc 的 intrusive node 挂到事件所有者链表，唤醒时移回 ready queue；
-poll wait 则由 scheduler 反复执行 predicate。RPC 队列和单核 resource 使用 event，
-mailbox 状态与跨核 resource 使用 poll。
+\code{dayan_yield} 和普通唤醒提交无依赖硬件 Wait。event wait 仍把 Thread 的短 slot node
+挂到 join/RPC/profile 等明确所有者的链表；事件所有者唤醒它时才提交 Wait。一般
+predicate wait 在调用方循环检查条件并 yield，不由 scheduler 执行 predicate。RPC receive
+是唯一由 \code{mip.MSIP} 直接选择、无需硬件 token 的路径。
 
 \subsection{上下文与 proc 生命周期}
 
-\code{switch_context} 保存 \code{ra}、\code{s0--s11}、\code{gp} 和 \code{fcsr}，
-并切换 \code{sp}、恢复 PC 与 \code{tp}。\code{gp} 随 proc 保存，因此每个 proc 可以
-绑定不同的 coherent allocation。上下文切换本身不承担 profile 埋点；proc 状态更新由
-统一路径完成，并在状态真正变化后记录目标状态。
+\code{switch_context} 只用 caller-saved 临时寄存器完成 mip 检查、token pop 和目标选择。
+确定目标与当前 Thread 不同后，才保存 \code{ra}、\code{s0--s11}、\code{gp} 和
+\code{fcsr}；旧上下文 store 与新 Thread 的 sp/PC/Context load 交错执行。随后切换
+\code{sp/tp}，恢复 Context1/Context2 并跳到目标 PC。\code{gp} 随 Thread 保存，因此
+不同 kernel 实例可以绑定不同 coherent allocation。kill 后返回的 token 不会恢复目标
+Thread，而是在当前栈上调用延迟回收 helper；该短路径显式保存并恢复 \code{ra}，避免
+helper 的内部调用覆盖尚未保存的当前 Thread 返回地址。
 
 新 proc 的启动帧保存 entry、返回地址、\code{a0--a7} 和 shared 基址。bootstrap
 只加载实际参数数量对应的寄存器；entry 正常返回后进入 \code{proc_exit}。详细帧布局见
@@ -86,21 +94,25 @@ slot，形成该 family 的专属池；root 计入 reservation，单个 descript
 
 \code{dayan_create_thread} 从同一 Hart 的空闲静态 slot 创建带名称的子 Thread，传递一个
 指针参数并继承 logical task、\code{gp/shared} 和 URAM。显式 TCSR 请求从根 Proc 的
-静态池中子分配并写入该 Thread 的 Context。proc 保存 parent ID/pointer、直属未结束子
+静态池中子分配并写入该 Thread 的 Context1；Local/Shared Named Resource 使用根窗口的
+相同物理 base，并按子 Thread 声明限制可见前缀 count。proc 保存 parent ID、直属未结束子
 Thread 计数与 join 状态。子 Thread 退出后成为 zombie，减少父计数并按 join 条件精确唤醒；
 join 回收 zombie。每个 proc 退出前隐式 join-all，该规则递归保证 root cleanup 时没有
 存活后代。root 最终一次性归还 family 的专属 slot；栈和 printf buffer 始终是静态存储。
-每个 proc 退出均 best-effort flush 并 CLEAR 自己的输出，只有 Host 创建的 root 使用
-\code{RPC_PROC_EXIT} 上报 64-bit 返回值；scheduler cleanup 再更新 Host 描述符终态。
+每个 proc 退出均 best-effort flush 自己的输出，只有 Host 创建的 root 使用
+\code{RPC_PROC_EXIT} 上报 64-bit 返回值。root 把退出 transaction 留在自身栈上并进入
+deferred-reap 状态；RPC send Thread 等 Host 清除 outbound doorbell、完成 transaction
+cleanup 后才回收 root slot。这样 Host 描述符终态和 RPC 栈对象都不会与 slot 复用竞态。
 
-\code{RPC_PROC_KILL_ALL} 不终止 init、receive、send 或 profile proc。READY/POLL/EVENT 等 proc
-先从各自队列摘除；等待 system proc transaction 的调用者也从唤醒链表摘除，尚未发送的
-transaction 被取消，已由 send proc 持有的 transaction 在释放调用者 slot 前排空。
-非 Produce slot 立即归还全局池；\code{WAIT_PRODUCE} 改为
-\code{KILL_WAIT_PRODUCE}，硬件 token 返回后才归还。kill 仍只对 root 发送一次退出通知，
-子 Thread 不产生 Host 生命周期消息。
+\code{RPC_PROC_KILL_ALL} 不终止 init、receive、send 或 profile Thread。EVENT waiter 从
+所有者链表摘除；尚未发送的 transaction 被取消，已由 send Thread 持有的 transaction
+在释放调用者 slot 前排空。任何已有硬件 token 的 Thread 都改为
+\code{KILL_WAIT_PRODUCE}，token 返回后只执行延迟 slot 回收，不再恢复 kernel 代码；没有
+outstanding token 的 slot 可直接进入退出态。kill 仍只对 root 发送一次退出通知，子
+Thread 不产生 Host 生命周期消息。\code{waiting_produce} 统计所有尚未回到软件的调度
+token，其中也包括 \code{dayan_yield} 提交的无依赖 Wait；它不只表示执行单元任务。
 
-\subsection{Tensor Context 与 TCSR 虚拟化}
+\subsection{Context1/Context2 虚拟化}
 
 每个算子 proc 和子 Thread 都保存独立的 64-bit Tensor Context。\code{switch_context}
 在恢复执行对象时把该值写入硬件 Context TCSR，使 kernel 使用逻辑 TCSR 组号，不感知
@@ -115,11 +127,14 @@ Server 分配的物理组号。编码只使用低 56 bit：
   49:46 / 55:50 & MACRO \code{TCFGCNT} / \code{TCFGBASE}。 \\
 \end{dayantable}
 
-Server 为根 Proc 静态分配 URAM 和四类 TCSR 范围，并把编码结果随
+Context2 是 22-bit Named Resource 映射：bit 4:0/10:5 为 Local base/count，bit
+15:11/21:16 为 Shared base/count。Server 为根 Proc 静态分配 URAM、四类 TCSR、每 Hart
+Local Resource 和每 Cluster Shared Resource 范围，并把两个 Context 随
 \code{RPC_PROC_CREATE} 下发。子 Thread 继承根 Proc 的 URAM 上下界；其 TCSR 数量由
 \code{dayan_thread_resources_t} 显式声明，再从 family 的静态 TCSR 池中子分配。
-因此每个执行对象都应优先使用自己的逻辑组 0，Thread 退出并被 join 回收后归还对应
-TCSR 位图。
+Named Resource 使用根窗口的相同 base，子 Thread 只能访问声明的逻辑前缀。因此每个执行
+对象都应优先使用自己的逻辑 TCSR 组 0；物理资源范围在整个 kernel invocation 终态后由
+Host scheduler 统一归还。
 
 \subsection{proc profile}
 
@@ -147,13 +162,12 @@ allocator，并立即请求 Host 回收。
 
 \subsection{执行单元完成事件}
 
-\code{dayan_wait_lsu/mat/vec/macro} 把当前 \code{tp} 写入对应 Produce 队列，然后
-进入事件等待。非阻塞资源 wait API 改为写入显式 token：低 48 位是资源地址，高 16 位
-事件值 1/2/3/4 分别表示 local produce、local consume、shared produce、shared consume；
-普通 Thread 等待的事件值为 0。scheduler 的 \code{scheduler_scan_produce()} 从 BASE
-全局完成队列取回 token，按事件值唤醒 Thread 或执行对应资源操作。若事件 0 指向
-\code{KILL_WAIT_PRODUCE}，scheduler 只完成延迟 slot 回收，不再恢复其 kernel 代码。
-DMA 复用 LSU 路径；未知事件或失败的资源状态迁移视为固件内部协议错误。
+\code{dayan_wait_lsu/mat/vec/macro} 把当前 \code{tp} 写入对应 Produce 队列，然后等待该
+Thread token 从 BASE 全局队列返回；DMA 复用 LSU 路径。Named Resource produce/consume
+把 output、consumer count 和 READY 输入 mask 写入相同执行单元，但完成时由硬件直接迁移
+资源状态，不产生资源指针 token。BASE 全局队列中的非零 token 因而始终可直接解释为
+\code{struct thread *}。若它指向 \code{KILL_WAIT_PRODUCE}，汇编选择路径调用延迟回收，
+不再恢复其 kernel 代码。
 
 \subsection{异常处理}
 
@@ -173,7 +187,8 @@ RVTNG 把 URAM 越界或未对齐、TCSR 逻辑组越界以及指令解码错误
 176-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
 原执行对象。错误指令是否继续以及采用何种降级结果由 RVTNG 定义。
 
-scheduler 随后用 \code{RPC_TENSOR_INTERRUPT_REPORT} 异步上报该快照。上一条报告尚未
+trap handler 唤醒 RPC send Thread；它在发送普通 transaction 前后 drain 快照，并用
+\code{RPC_TENSOR_INTERRUPT_REPORT} 异步上报。上一条报告尚未
 离开本 Hart 时，新中断仍会清除硬件 pending，并累计 \code{dropped_reports}，避免中断
 线长期阻塞。Server 默认打印 source ID/名称、低 32-bit info、Context 和累计次数；source
 编号与 RVTNG 的 \code{RVTIntPlacer} 输入顺序一致。

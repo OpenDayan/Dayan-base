@@ -37,22 +37,23 @@ dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接�
   \code{DAYAN_THREAD_NAME_SIZE} & Thread 名称存储为 16 B。 \\
   \code{DAYAN_URAM_ALLOCATION_GRANULE} & URAM 资源以 32 KiB 对齐和分配。 \\
   \code{DAYAN_TCSR_LOGICAL_GROUPS} & 每类 TCSR 最多声明 8 个逻辑组。 \\
+  \code{DAYAN_RESOURCE_LOGICAL_COUNT} & Local 和 Shared 两个逻辑编号空间各有 32 项。 \\
+  \code{DAYAN_RESOURCE_COUNT_PACK} / \code{DAYAN_RESOURCE_LOCAL_COUNT} / \code{DAYAN_RESOURCE_SHARED_COUNT} & 在 kernel descriptor 中打包或读取 Local/Shared 数量。 \\
   \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} & 表示单 Core Task 需要独占一个 Hart。 \\
   \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} & 当前允许的算子资源标志掩码。 \\
-  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 32 字节紧凑常量，描述最大子 Thread 数、每 Core 共驻数、标志、四类 TCSR 数量、Atomic Cache 字节数和 URAM 字节数。 \\
+  \code{dayan_kernel_resource_desc_t} & dycc 和 Runtime 使用的 32 字节紧凑常量，描述最大子 Thread 数、每 Core 共驻数、标志、四类 TCSR、Local/Shared Named Resource、Atomic Cache 和 URAM 数量。 \\
   \code{dayan_thread_entry_t} & 子 Thread 入口类型 \code{void (*)(void *)}。 \\
-  \code{dayan_thread_resources_t} & 8 字节描述符；创建子 Thread 时显式声明 LSU/MAT/VEC/MACRO TCSR 数量，空指针表示不占用 TCSR。 \\
+  \code{dayan_thread_resources_t} & 8 字节描述符；创建子 Thread 时声明四类 TCSR 与 Local/Shared Named Resource 数量，空指针表示全部为零。 \\
   \code{dayan_cluster_barrier_t} & 四 Core 屏障使用的 16 字节 ticket 存储；Server 在 lane 启动前将其清零。 \\
-  \code{dayan_resource_state} & \code{DAYAN_RESOURCE_FREE}、\code{DAYAN_RESOURCE_BUSY}、\code{DAYAN_RESOURCE_READY} 三态资源状态机。 \\
   \code{dayan_task_axis} & \code{DAYAN_TASK_X}、\code{DAYAN_TASK_Y}、\code{DAYAN_TASK_Z} 三个逻辑任务坐标轴。 \\
-  \code{dayan_resource_t} & 同一 Hart 内的资源对象；字段私有，用户只负责存储生命周期。 \\
-  \code{dayan_shared_resource_t} & 跨 Hart 资源对象；必须位于 \code{shared} 指向的分配内。 \\
-  \code{list_head} & \code{dayan_resource_t} 的公开布局依赖类型；不作为独立容器 API 使用。 \\
+  \code{dayan_resource_t} / \code{dayan_resource_mask_t} & 8-bit 逻辑资源编号和 64-bit 资源集合；两者都按值传递，不指向内存对象。 \\
+  \code{DAYAN_LOCAL_RESOURCE} / \code{DAYAN_SHARED_RESOURCE} / \code{DAYAN_RESOURCE_MASK} & 分别构造 Local 编号、Shared 编号和对应 mask bit。 \\
+  \code{dayan_resource_role} & 资源等待返回的 \code{DAYAN_RESOURCE_ROLE_NORMAL}、\code{DAYAN_RESOURCE_ROLE_PRODUCER} 或 \code{DAYAN_RESOURCE_ROLE_CONSUMER}。 \\
 \end{dayantable}
 
 算子使用 \code{DAYAN_KERNEL_DESC}（见 Runtime 章节）生成一个
-\code{dayan_kernel_resource_desc_t} 常量。Atomic Cache 和 URAM 在 Host 启动算子前
-一次性分配，子 Thread 资源槽在根 Proc 建立时一次性预留。TCSR 由 Context 保存和
+\code{dayan_kernel_resource_desc_t} 常量。Atomic Cache、URAM 和 Named Resource 窗口在
+Host 启动算子前一次性分配，子 Thread 资源槽在根 Proc 建立时一次性预留。TCSR 由 Context 保存和
 映射；只有其它未做上下文保存和恢复的 Hart 状态才需要
 \code{DAYAN_KERNEL_LOCKED_TASK_DESC}。该标志不会改变实际的子 Thread 数量上限。
 
@@ -61,7 +62,7 @@ dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接�
 \begin{dayantable}{Thread dapi}{tab:api-dapi-proc}{X[39,l] X[61,l]}
   API & 行为 \\
   \code{dayan_yield} & 当前 Proc 主动让出调度机会。 \\
-  \code{dayan_thread_resources_init} & 初始化子 Thread 的显式 TCSR 资源声明。 \\
+  \code{dayan_thread_resources_init} & 清零子 Thread 的显式 TCSR 与 Named Resource 声明。 \\
   \code{dayan_create_thread} & 在同一物理 Core 的预留资源槽中创建具名直接子 Thread；成功时返回正 Thread ID。 \\
   \code{dayan_thread_join} & 等待指定的直接子 Thread，按需返回其 64 位结果，并回收已退出 Thread。 \\
   \code{dayan_thread_join_all} & 等待并回收当前执行对象的全部直接子 Thread。 \\
@@ -112,49 +113,40 @@ dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接�
   \code{dayan_cache_flush} & 写回与给定地址区间相交的每条数据缓存线；大小为零时不执行操作。 \\
 \end{dayantable}
 
-这两个接口不等待 LSU、MAT 等执行单元，也不提供 Hart 间同步。调用方仍需通过资源对象、
+这两个接口不等待 LSU、MAT 等执行单元，也不提供 Hart 间同步。调用方仍需通过 Named Resource、
 屏障或其它协议建立数据所有权以及发布和消费顺序。
 
-\subsection{单 Hart 资源}
+\subsection{Named Resource}
 
-\code{dayan_resource_t} 供同一 Hart 上的生产者 Proc 和消费者 Proc 协作。资源状态按
-FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE 循环。当生产者数量为
-零时，分配操作直接进入 READY。所有函数成功返回 0，失败返回负 errno。
+硬件资源表使用 FREE $\rightarrow$ BUSY $\rightarrow$ READY $\rightarrow$ FREE 状态机。
+每个 Core 有 32 项 Local Resource，同一 Cluster 共享 32 项 Shared Resource；DAPI 用
+0--31 和 32--63 的逻辑编号统一访问。Host 按 descriptor 分配物理窗口，Device 通过
+Context2 映射，因此算子不为资源分配对象内存，也不维护软件等待链表。
 
-\begin{dayantable}{单 Hart resource dapi}{tab:api-dapi-resource}{X[44,l] X[56,l]}
+\begin{dayantable}{Named Resource 等待 dapi}{tab:api-dapi-resource}{X[42,l] X[58,l]}
   API & 行为 \\
-  \code{dayan_resource_init} & 初始化对象为 FREE，并建立本 Hart 的等待队列。 \\
-  \code{dayan_resource_alloc} & 仅从 FREE 状态开始新一代资源，并设置生产者和消费者数量；消费者数量必须非零。 \\
-  \code{dayan_resource_produce} & 递减生产者数量；归零时发布 READY 状态并唤醒等待者。 \\
-  \code{dayan_resource_consume} & 递减消费者数量；归零时恢复 FREE 状态并唤醒等待者。 \\
-  \code{dayan_resource_wait_lsu_produce} / \code{dayan_resource_wait_mat_produce} / \code{dayan_resource_wait_vec_produce} / \code{dayan_resource_wait_macro_produce} & 非阻塞地登记对应单元完成事件；完成后由调度器对资源执行一次 produce。 \\
-  \code{dayan_resource_wait_lsu_consume} / \code{dayan_resource_wait_mat_consume} / \code{dayan_resource_wait_vec_consume} / \code{dayan_resource_wait_macro_consume} & 非阻塞地登记对应单元完成事件；完成后由调度器对资源执行一次 consume。 \\
-  \code{dayan_resource_wait_ready} & 阻塞当前 Proc，直到资源达到 READY。 \\
-  \code{dayan_resource_wait_free} & 阻塞当前 Proc，直到资源回到 FREE。 \\
+  \code{dayan_resource_wait} & 等待所有 READY 输入和 FREE 输出，并在成功发射时原子把输出预留为 BUSY；qos 范围为 $-4$--3。 \\
+  \code{dayan_resource_wait_ready} & 等待一个资源达到 READY。 \\
+  \code{dayan_resource_wait_free} & 等待一个资源为 FREE，并在返回前将其预留为 BUSY。 \\
 \end{dayantable}
 
-\subsection{跨 Hart 资源}
+\code{wait_free} 和 \code{wait_ready} mask 通常不重叠。恰好重叠一个 bit 时，硬件执行
+生产者选举：胜者返回 \code{DAYAN_RESOURCE_ROLE_PRODUCER}，其余参与者在该项 READY 后
+返回 \code{DAYAN_RESOURCE_ROLE_CONSUMER}；普通等待返回
+\code{DAYAN_RESOURCE_ROLE_NORMAL}。访问 Context2 未声明的编号、多个重叠 bit 或非法 qos
+返回负值。
 
-\code{dayan_shared_resource_t} 表达 Cluster 内跨 Hart 的发布和消费。对象必须位于当前
-算子的 \code{shared} 共享区内并满足自然对齐。状态更新使用 Atomic Cache 可见的原子
-操作；等待方在调度器轮询期间让出 Core。剩余的生产者和消费者数量编码在同一个 64 位
-状态字中。分配使用 \code{amocas.d}，发布和消费使用 \code{amoadd.d}，不使用自旋锁。
-
-\begin{dayantable}{Shared resource dapi}{tab:api-dapi-shared-resource}{X[47,l] X[53,l]}
+\begin{dayantable}{Named Resource 完成 dapi}{tab:api-dapi-shared-resource}{X[47,l] X[53,l]}
   API & 行为 \\
-  \code{dayan_shared_resource_init} & 校验 shared 范围，并将跨 Hart 对象初始化为 FREE。 \\
-  \code{dayan_shared_resource_alloc} & 使用 \code{amocas.d} 从 FREE 状态开始新一代资源并设置计数。 \\
-  \code{dayan_shared_resource_produce} & 使用 \code{amoadd.d} 原子递减生产者数量；最后一个生产者发布 READY 状态。 \\
-  \code{dayan_shared_resource_consume} & 使用 \code{amoadd.d} 原子递减消费者数量；最后一个消费者发布 FREE 状态。 \\
-  \code{dayan_shared_resource_wait_lsu_produce} / \code{dayan_shared_resource_wait_mat_produce} / \code{dayan_shared_resource_wait_vec_produce} / \code{dayan_shared_resource_wait_macro_produce} & 非阻塞登记单元完成事件；完成后原子执行一次 shared produce。 \\
-  \code{dayan_shared_resource_wait_lsu_consume} / \code{dayan_shared_resource_wait_mat_consume} / \code{dayan_shared_resource_wait_vec_consume} / \code{dayan_shared_resource_wait_macro_consume} & 非阻塞登记单元完成事件；完成后原子执行一次 shared consume。 \\
-  \code{dayan_shared_resource_wait_ready} & 可调度地轮询，直到跨 Hart 资源为 READY。 \\
-  \code{dayan_shared_resource_wait_free} & 可调度地轮询，直到跨 Hart 资源为 FREE。 \\
+  \code{dayan_resource_produce_lsu} / \code{dayan_resource_produce_mat} / \code{dayan_resource_produce_vec} / \code{dayan_resource_produce_macro} & 对应单元此前工作完成时消费输入 mask，并把已预留的 output 以 1--255 个 consumer 发布为 READY。 \\
+  \code{dayan_resource_consume_lsu} / \code{dayan_resource_consume_mat} / \code{dayan_resource_consume_vec} / \code{dayan_resource_consume_macro} & 对应单元此前工作完成时消费非空输入 mask，不发布后继资源。 \\
 \end{dayantable}
 
-上述异步资源接口把事件类型编码在 Produce token 高 16 位，把资源地址编码在低 48 位，
-调用本身不挂起当前 Proc。资源对象及其所属 kernel 实例必须保持有效，直到调度器处理完成
-token；若完成时资源状态不允许对应的 produce/consume，固件按内部协议错误停机。
+这些完成接口提交后立即返回。执行单元直接更新硬件资源表，不把资源地址编码成 scheduler
+token；全局 Produce 队列中的调度 token 始终是 Thread 指针。READY 项在最后一个 consumer
+离开后自动回到 FREE。有限依赖图的末端必须 terminal consume，或由后继 produce 消费，
+否则遗留状态会阻塞资源窗口的后续复用。Local 和 Shared 使用完全相同的 DAPI，Shared 的
+跨 Core 仲裁由硬件完成。
 
 \subsection{Device stdio}
 

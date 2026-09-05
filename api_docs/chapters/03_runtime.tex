@@ -39,7 +39,7 @@ Runtime 不访问寄存器或中断设备。公开入口由
   \code{npu_kernel_arg_t} & 一个 64 位立即数，或带偏移和访问方向的 Buffer 参数。 \\
   \code{npu_launch_desc_t} & 逻辑任务配置、参数、调用方标识和固定 16 字节的 Task 名称。 \\
   \code{npu_event_info_t} & Event 的状态、命令类型、结果、顺序号和调用方标识。 \\
-  \code{npu_kernel_info_t} & 算子的执行模式、并发限制、参数定义和栈、一致性内存、常驻内存、URAM 等资源需求。 \\
+  \code{npu_kernel_info_t} & 算子的执行模式、并发限制、参数定义、栈、Local/Shared Named Resource、一致性内存、常驻内存和 URAM 等资源需求。 \\
   \code{npu_profile_options_t} & 性能采样缓冲区大小和配置标志。 \\
   \code{npu_profile_record_t} & 8 字节采样记录头：48 位计数器、8 位资源槽编号和 8 位状态或标签。 \\
   \code{npu_profile_slot_define_t} & 24 字节资源槽定义记录，由记录头和 16 字节 Proc 名称组成。 \\
@@ -211,6 +211,7 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
   \code{NPU_PACKAGE_PROC_MIN_STACK_SIZE} / \code{NPU_PACKAGE_PROC_STACK_SIZE} & Proc 栈最小为 1 KiB，当前固定大小和上限均为 64 KiB。 \\
   \code{NPU_PACKAGE_PROC_PRINTF_SIZE} / \code{NPU_PACKAGE_URAM_GRANULE} & 默认输出缓冲区为 4 KiB，URAM 分配粒度为 32 KiB。 \\
   \code{NPU_PACKAGE_TCSR_MAX_COUNT} & LSU、MAT、VEC、MACRO 每类最多声明 8 个逻辑 TCSR 组。 \\
+  \code{NPU_PACKAGE_RESOURCE_MAX_COUNT} & Local 和 Shared Named Resource 各最多声明 32 项。 \\
   \code{NPU_PACKAGE_ISA_RV64_DAYAN} & Device object 必须声明的 Dayan RV64 ISA 字符串。 \\
   \code{NPU_PACKAGE_IMMUTABLE_MODULE} & Package object 在 Module 生命周期内不可变。 \\
   \code{NPU_PACKAGE_TASK_MODE_SINGLE_CORE} / \code{NPU_PACKAGE_TASK_MODE_FOUR_CORE} / \code{NPU_PACKAGE_TASK_MODE_ALL} & 算子支持的执行模式位图。 \\
@@ -226,20 +227,25 @@ dycc 包装层公开不透明的 \code{npu_kernel_descriptor_t} 和版本化的
 等待并销毁内部 Event。Host 与 Device 共同使用 \code{dayan_kernel_resource_desc_t}、
 \code{DAYAN_HART_MAX_PROCS}、
 \code{DAYAN_KERNEL_MAX_CHILD_THREADS}、\code{DAYAN_URAM_ALLOCATION_GRANULE}、
-\code{DAYAN_TCSR_LOGICAL_GROUPS}、
+\code{DAYAN_TCSR_LOGICAL_GROUPS}、\code{DAYAN_RESOURCE_LOGICAL_COUNT}、
 \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK} 和 \code{DAYAN_KERNEL_RESOURCE_FLAGS_ALL} 保持
 资源描述一致。
 
 每个 \code{__kernel__} 函数必须使用 \code{DAYAN_KERNEL_DESC}、
-\code{DAYAN_KERNEL_TASK_DESC} 或 \code{DAYAN_KERNEL_LOCKED_TASK_DESC} 声明静态资源。
+\code{DAYAN_KERNEL_TASK_DESC}、\code{DAYAN_KERNEL_LOCKED_TASK_DESC}、
+\code{DAYAN_KERNEL_NAMED_RESOURCE_DESC} 或
+\code{DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC} 声明静态资源。
 最后一个宏仅支持单 Core 模式，用于依赖未保存和恢复的 Hart 配置寄存器的算子；该属性
 不改变真实子 Thread 资源计数。dycc 识别 \code{__host__}、\code{__device__}、
 \code{__kernel__} 源码标注并生成 Host 包装代码；这些标注只影响编译
 切分，不增加 Runtime 二进制 ABI 字段。
 
-\code{DAYAN_KERNEL_RESOURCE_DESC} 是上述三个声明宏共用的底层组合宏；通常不由算子
-直接调用。\code{DAYAN_KERNEL_DESC_ASSERT} 使同一声明在 C 与 C++ Device 编译中执行
-等价的静态约束检查。
+\code{DAYAN_KERNEL_RESOURCE_DESC} 是不声明 Named Resource 的底层组合宏；
+\code{DAYAN_KERNEL_RESOURCE_DESC_EX} 额外接收 Local/Shared 数量，供需要同时设置 flag
+和 Named Resource 的算子使用。\code{DAYAN_RESOURCE_COUNT_PACK}、
+\code{DAYAN_RESOURCE_LOCAL_COUNT} 和 \code{DAYAN_RESOURCE_SHARED_COUNT} 在 32-bit
+descriptor 字段中打包和读取这两个数量。\code{DAYAN_KERNEL_DESC_ASSERT} 使同一声明在
+C 与 C++ Device 编译中执行等价的静态约束检查。
 
 \begin{dayantable}{dycc Host 包装层 API}{tab:api-runtime-wrapper}{X[43,l] X[57,l]}
   API & 行为 \\

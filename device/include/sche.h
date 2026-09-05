@@ -54,12 +54,14 @@ int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
 int task_proc_slot_acquire(struct task_proc **task_out);
 int task_proc_start(struct task_proc *task, const char *name,
                     thread_fn entry, size_t argc, const uintptr_t *args);
+int task_proc_schedule(struct task_proc *task);
 void task_proc_slot_release(struct task_proc *task);
 int task_proc_reserve(struct task_proc *task);
 void task_proc_unreserve(struct task_proc *task);
 int task_proc_set_descriptor(struct task_proc *task,
                              const struct task_descriptor *descriptor,
-                             uint64_t tensor_context);
+                             uint64_t tensor_context,
+                             uint32_t resource_context);
 int task_proc_set_cleanup_arg(struct task_proc *task, void *arg);
 int thread_create_child(struct thread *parent, const char *name,
                         thread_fn entry,
@@ -80,16 +82,21 @@ int thread_output_put(struct thread *thread, char ch);
 int thread_output_flush(struct thread *thread);
 
 int thread_wake(struct thread *thread);
-void thread_ready_first(struct thread *thread);
 size_t thread_event_wake_one(struct thread_list *event);
 size_t thread_event_wake_all(struct thread_list *event);
 void thread_list_init(struct thread_list *list);
 void thread_yield(void);
 void thread_wait_poll(thread_poll_fn poll, void *arg);
-/* A null event selects the scheduler's default externally-driven queue. */
 void thread_wait_event(struct thread_list *event);
 void thread_wait_produce(void);
-void scheduler_scan_produce(void);
+uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
+                               int8_t qos);
+void thread_wait_rpc(void);
+void scheduler_notify(void);
+void scheduler_reap_thread(struct thread *thread);
+void scheduler_kill_token(struct thread *thread);
+_Noreturn void thread_exit_defer(void *wait);
+void thread_exit_deferred_complete(struct thread *thread, void *wait);
 _Noreturn void thread_exit(void);
 _Noreturn void thread_exit_status(int64_t status);
 _Noreturn void scheduler(void);

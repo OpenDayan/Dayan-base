@@ -67,7 +67,11 @@ int npu_kernel_descriptor_create(
         resources->max_tasks_per_core > 4U ||
         resources->max_child_threads > DAYAN_KERNEL_MAX_CHILD_THREADS ||
         (resources->flags & ~DAYAN_KERNEL_RESOURCE_FLAGS_ALL) ||
-        resources->reserved ||
+        (resources->resource_counts & ~UINT32_C(0xffff)) ||
+        DAYAN_RESOURCE_LOCAL_COUNT(resources->resource_counts) >
+            DAYAN_RESOURCE_LOGICAL_COUNT ||
+        DAYAN_RESOURCE_SHARED_COUNT(resources->resource_counts) >
+            DAYAN_RESOURCE_LOGICAL_COUNT ||
         resources->lsu_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         resources->mat_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         resources->vec_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
@@ -107,6 +111,10 @@ int npu_kernel_descriptor_create(
     kernel.mat_tcsr_count = resources->mat_tcsr_count;
     kernel.vec_tcsr_count = resources->vec_tcsr_count;
     kernel.macro_tcsr_count = resources->macro_tcsr_count;
+    kernel.local_resource_count =
+        DAYAN_RESOURCE_LOCAL_COUNT(resources->resource_counts);
+    kernel.shared_resource_count =
+        DAYAN_RESOURCE_SHARED_COUNT(resources->resource_counts);
     kernel.atomic_cache_size = resources->atomic_cache_size;
     kernel.uram_size = resources->uram_size;
     kernel.arguments = arguments;

@@ -187,7 +187,9 @@ typedef struct npu_ipc_kernel_info {
     uint8_t mat_tcsr_count;
     uint8_t vec_tcsr_count;
     uint8_t macro_tcsr_count;
-    uint32_t reserved;
+    uint8_t local_resource_count;
+    uint8_t shared_resource_count;
+    uint16_t reserved;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t resident_memory;

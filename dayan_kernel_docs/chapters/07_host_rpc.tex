@@ -4,7 +4,7 @@
 
 \section{Host RPC 服务}\label{sec:kernel-060}
 
-Dayan OS 主动请求的 opcode 1--7 必须由 Host 实现。Host 使用反方向的 RPC 发布新代码
+Dayan OS 主动请求的 opcode 1--8 必须由 Host 实现。Host 使用反方向的 RPC 发布新代码
 并启动 kernel；响应仍走 Device--Host mailbox。
 
 \subsection{服务列表}
@@ -12,12 +12,13 @@ Dayan OS 主动请求的 opcode 1--7 必须由 Host 实现。Host 使用反方�
 \begin{dayantable}{RPC opcode}{tab:kernel-060}{X[13,l] X[30,l] X[23,l] X[34,l]}
   opcode & 名称 & 方向 & 用途 \\
   1 & \code{RPC_WRITE} & Device $\rightarrow$ Host & 输出一段 proc 数据。 \\
-  2 & \code{RPC_CLEAR} & Device $\rightarrow$ Host & 清空指定 proc 的 Host 输出缓冲。 \\
+  2 & \code{RPC_CLEAR} & Device $\rightarrow$ Host & 要求输出回调刷新指定 proc 的下游输出流。 \\
   3 & \code{RPC_HEAP_ACQUIRE} & Device $\rightarrow$ Host & 为一个 hart 分配私有堆 region。 \\
   4 & \code{RPC_HEAP_RELEASE} & Device $\rightarrow$ Host & 归还此前分配的私有堆 region。 \\
   5 & \code{RPC_TRAP_REPORT} & Device $\rightarrow$ Host & 上报同步异常现场。 \\
-  6 & \code{RPC_PROC_EXIT} & Device $\rightarrow$ Host & 上报 Host root proc 的退出值。 \\
-  7 & \code{RPC_PROFILE_FLUSH} & Device $\rightarrow$ Host & 上报一个 Hart 的满 profile FIFO。 \\
+  6 & \code{RPC_TENSOR_INTERRUPT_REPORT} & Device $\rightarrow$ Host & 上报张量机器外部中断快照。 \\
+  7 & \code{RPC_PROC_EXIT} & Device $\rightarrow$ Host & 上报 Host root proc 的退出值。 \\
+  8 & \code{RPC_PROFILE_FLUSH} & Device $\rightarrow$ Host & 上报一个 Hart 的满 profile FIFO。 \\
   \code{0x0100} & \code{RPC_PROC_CREATE} & Host $\rightarrow$ Device & 在目标 hart 创建 kernel proc。 \\
   \code{0x0101} & \code{RPC_ICACHE_FLUSH} & Host $\rightarrow$ Device & 在目标 hart 执行一次 \code{fence.i}。 \\
   \code{0x0102} & \code{RPC_PROC_PS} & Host $\rightarrow$ Device & 同步目标 hart 的 proc 快照。 \\
@@ -105,31 +106,37 @@ Host 把 224-byte \code{rpc_proc_create_request} 放在普通 Device RAM，并�
   arguments & 48--119 & argc、reserved 和 8 个 64-bit 参数槽。 \\
   task resources & 120--127 & task mode 和最大子 Thread 数。 \\
   result & 128--151 & status、proc ID、hart ID、cookie。 \\
-  logical task & 152--183 & 三维 task ID、三维 task dim 和两个 reserved 字段。 \\
-  kernel resources & 184--207 & URAM base/size 和压缩的 64-bit URAM/TCSR Context。 \\
+  logical task & 152--179 & 三维 task ID、三维 task dim 和一个 reserved 字段。 \\
+  kernel resources & 180--207 & 32-bit Named Resource Context、URAM base/size 和 64-bit URAM/TCSR Context。 \\
   proc name & 208--223 & 固定 16-byte root proc 名称。 \\
 \end{dayantable}
 
 Dayan OS 校验描述符和地址范围，从本 Hart 的 16 项静态 proc slot 池取得 root，把状态改为
-\code{RUNNING}，并返回 opcode \code{0x8100} 与同一描述符地址。该响应表示创建完成，
-不表示 kernel 已退出。scheduler cleanup 最后写入 \code{EXITED} 或 \code{FAILED}。
+\code{RUNNING}，并返回 opcode \code{0x8100} 与同一描述符地址。Device 先把响应提交给
+RPC send 队列，再向硬件提交 root Thread，避免不会主动 yield 的 kernel 阻塞创建响应。
+该响应表示创建完成，不表示 kernel 已退出。scheduler cleanup 最后写入 \code{EXITED}
+或 \code{FAILED}。
 
 stack size 范围为 1--64 KiB，printf buffer 不超过 4 KiB，参数数量不超过 8。
 root 与最多 15 个子 Thread 共用 16 个算子 slot；init、RPC 与 profile proc 不计入。
 名称必须非空且在 16-byte 字段内以 NUL 结尾，所以有效名称最多为 15 bytes。
 shared 区域为空时 base/size 同时为 0；非空时必须位于 coherent window 且 16-byte 对齐。
 URAM 区域为空时 base/size 同时为 0；非空时必须落在请求来源 hart 的 URAM window，
-base 和 size 都按 32 KiB 对齐。描述符还携带 64-bit Tensor Context；最大子 Thread 数
-当前不超过 15。
+base 和 size 都按 32 KiB 对齐。描述符还携带 64-bit Context1 和 22-bit Context2；后者
+编码 Local/Shared Named Resource 的物理 base 和逻辑 count。最大子 Thread 数当前不超过
+15。
 
 \subsection{退出通知与管理 RPC}
 
-每个 proc 退出都会先尝试 WRITE 剩余输出并发送 CLEAR。只有
+每个 proc 退出都会先尝试用 WRITE 提交剩余输出；缓冲为空时不发送 WRITE，正常退出也不
+额外发送 CLEAR。只有
 \code{RPC_PROC_CREATE} 创建的 root 再发送 opcode 7；32-byte
 \code{rpc_proc_exit_request} 含 hart/proc ID、必须为 0 的 parent ID、
 root flag、\code{int64_t result} 和 launch cookie。Service 的 proc-exit callback 用
 Cluster/Core/proc/cookie 定位 Host 资源。子 Thread 的创建和退出完全在 Device family
-内完成，不发送该 RPC。
+内完成，不发送该 RPC。自然退出的 root 在请求入队后停止执行，但其 slot 和承载
+transaction 的栈会保留到 Host 清除 doorbell；随后由 send Thread 完成 descriptor cleanup
+并回收 slot。
 
 张量机器外部中断使用 opcode 6（\code{RPC_TENSOR_INTERRUPT_REPORT}）。command argument
 直接指向 176-byte \code{tensor_interrupt_record}，包含 Hart/Thread、当前 Tensor
@@ -144,8 +151,9 @@ kill-wait flags、直属子计数、slot、Host root ID、logical task、返回�
 
 \code{RPC_PROC_KILL_ALL} 使用 40-byte result，返回 killed root/child 数、已经释放的
 slot 数和仍处于 Produce 延迟回收的数量。系统 proc 永不被终止；每个被终止 root 以
-\code{-ECANCELED} 完成 Host 描述符并发送一次 root exit callback。Service 对应接口为
-\code{npu_service_rpc_kill_all(device,target,...)}。
+\code{-ECANCELED} 完成 Host 描述符并发送一次 root exit callback。这里的
+\code{waiting_produce} 是尚未返回的硬件调度 token 数，也会计入 yield 提交的无依赖
+Wait。Service 对应接口为 \code{npu_service_rpc_kill_all(device,target,...)}。
 
 \subsection{proc profile 服务}
 

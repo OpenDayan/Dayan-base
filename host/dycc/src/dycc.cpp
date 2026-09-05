@@ -523,6 +523,8 @@ private:
         uint32_t mat_tcsr_count = 0;
         uint32_t vec_tcsr_count = 0;
         uint32_t macro_tcsr_count = 0;
+        uint32_t local_resource_count = 0;
+        uint32_t shared_resource_count = 0;
         uint64_t atomic_cache_size = 0;
         uint64_t uram_size = 0;
     };
@@ -826,11 +828,15 @@ private:
             (fields[2] & ~UINT64_C(1)) ||
             ((fields[2] & UINT64_C(1)) && fields[1] > 1U) ||
             fields[3] > 8U || fields[4] > 8U || fields[5] > 8U ||
-            fields[6] > 8U || fields[7] || (fields[9] & 32767U)) {
+            fields[6] > 8U || (fields[7] & ~UINT64_C(0xffff)) ||
+            (fields[7] & UINT64_C(0xff)) > 32U ||
+            ((fields[7] >> 8) & UINT64_C(0xff)) > 32U ||
+            (fields[9] & 32767U)) {
             diagnose(decl, "invalid kernel resources: expected "
                            "child_threads<=15, tasks_per_core<=4, "
                            "known flags, locked_task tasks_per_core<=1 and "
-                           "TCSR counts<=8 and 32 KiB-aligned URAM size");
+                           "TCSR counts<=8, Named Resource counts<=32 and "
+                           "32 KiB-aligned URAM size");
             return false;
         }
         resources.max_child_threads = static_cast<uint32_t>(fields[0]);
@@ -840,6 +846,10 @@ private:
         resources.mat_tcsr_count = static_cast<uint32_t>(fields[4]);
         resources.vec_tcsr_count = static_cast<uint32_t>(fields[5]);
         resources.macro_tcsr_count = static_cast<uint32_t>(fields[6]);
+        resources.local_resource_count =
+            static_cast<uint32_t>(fields[7] & 0xffU);
+        resources.shared_resource_count =
+            static_cast<uint32_t>((fields[7] >> 8) & 0xffU);
         resources.atomic_cache_size = fields[8];
         resources.uram_size = fields[9];
         return true;
@@ -939,7 +949,10 @@ private:
             << resources.lsu_tcsr_count << "U, "
             << resources.mat_tcsr_count << "U, "
             << resources.vec_tcsr_count << "U, "
-            << resources.macro_tcsr_count << "U, 0U, UINT64_C("
+            << resources.macro_tcsr_count << "U, "
+            << "DAYAN_RESOURCE_COUNT_PACK("
+            << resources.local_resource_count << "U, "
+            << resources.shared_resource_count << "U), UINT64_C("
             << resources.atomic_cache_size << "), UINT64_C("
             << resources.uram_size << ")\n"
             << "    };\n";

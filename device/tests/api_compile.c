@@ -88,11 +88,11 @@ static void compile_intrinsics(long destination, long left, long right)
 }
 #endif
 
-int operator_api_compile(dayan_resource_t *resource,
+int operator_api_compile(dayan_resource_t resource,
                          char *buffer, size_t size)
 {
-    dayan_shared_resource_t *shared_resource =
-        (dayan_shared_resource_t *)shared;
+    dayan_resource_t next = DAYAN_LOCAL_RESOURCE(1);
+    dayan_resource_t shared_resource = DAYAN_SHARED_RESOURCE(0);
     dayan_cluster_barrier_t *barrier =
         (dayan_cluster_barrier_t *)shared;
     void *memory = malloc(64);
@@ -105,34 +105,22 @@ int operator_api_compile(dayan_resource_t *resource,
 #ifdef __cplusplus
     compile_intrinsics((long)buffer, (long)memory, (long)resource);
 #endif
-    status = dayan_resource_init(resource);
-    status |= dayan_resource_alloc(resource, 1, 1);
-    status |= dayan_resource_produce(resource);
+    status = dayan_resource_wait_free(resource);
+    status |= dayan_resource_produce_lsu(resource, 1, 0);
     status |= dayan_resource_wait_ready(resource);
-    status |= dayan_resource_consume(resource);
-    status |= dayan_resource_wait_free(resource);
-    status |= dayan_resource_wait_lsu_produce(resource);
-    status |= dayan_resource_wait_lsu_consume(resource);
-    status |= dayan_resource_wait_mat_produce(resource);
-    status |= dayan_resource_wait_mat_consume(resource);
-    status |= dayan_resource_wait_vec_produce(resource);
-    status |= dayan_resource_wait_vec_consume(resource);
-    status |= dayan_resource_wait_macro_produce(resource);
-    status |= dayan_resource_wait_macro_consume(resource);
-    status |= dayan_shared_resource_init(shared_resource);
-    status |= dayan_shared_resource_alloc(shared_resource, 1, 1);
-    status |= dayan_shared_resource_produce(shared_resource);
-    status |= dayan_shared_resource_wait_ready(shared_resource);
-    status |= dayan_shared_resource_consume(shared_resource);
-    status |= dayan_shared_resource_wait_free(shared_resource);
-    status |= dayan_shared_resource_wait_lsu_produce(shared_resource);
-    status |= dayan_shared_resource_wait_lsu_consume(shared_resource);
-    status |= dayan_shared_resource_wait_mat_produce(shared_resource);
-    status |= dayan_shared_resource_wait_mat_consume(shared_resource);
-    status |= dayan_shared_resource_wait_vec_produce(shared_resource);
-    status |= dayan_shared_resource_wait_vec_consume(shared_resource);
-    status |= dayan_shared_resource_wait_macro_produce(shared_resource);
-    status |= dayan_shared_resource_wait_macro_consume(shared_resource);
+    status |= dayan_resource_wait(DAYAN_RESOURCE_MASK(next),
+                                  DAYAN_RESOURCE_MASK(resource), 0);
+    status |= dayan_resource_produce_mat(
+        next, 1, DAYAN_RESOURCE_MASK(resource));
+    status |= dayan_resource_wait_free(shared_resource);
+    status |= dayan_resource_produce_vec(shared_resource, 1, 0);
+    status |= dayan_resource_wait_ready(shared_resource);
+    status |= dayan_resource_produce_macro(
+        resource, 1, DAYAN_RESOURCE_MASK(shared_resource));
+    status |= dayan_resource_consume_lsu(DAYAN_RESOURCE_MASK(resource));
+    status |= dayan_resource_consume_mat(DAYAN_RESOURCE_MASK(resource));
+    status |= dayan_resource_consume_vec(DAYAN_RESOURCE_MASK(resource));
+    status |= dayan_resource_consume_macro(DAYAN_RESOURCE_MASK(resource));
     child = dayan_create_thread("compile-child", compile_child, memory, 0);
     if (child > 0)
         status |= dayan_thread_join((uint32_t)child, &child_result);

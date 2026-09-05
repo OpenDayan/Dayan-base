@@ -21,6 +21,7 @@ extern "C" {
 #define NPU_PACKAGE_PROC_PRINTF_SIZE  0x1000U
 #define NPU_PACKAGE_URAM_GRANULE      (32U * 1024U)
 #define NPU_PACKAGE_TCSR_MAX_COUNT    8U
+#define NPU_PACKAGE_RESOURCE_MAX_COUNT 32U
 #define NPU_PACKAGE_ISA_RV64_DAYAN    "rv64imaf_zicsr_zifencei"
 
 #define NPU_PACKAGE_IMMUTABLE_MODULE  (1U << 0)
@@ -93,7 +94,9 @@ typedef struct npu_package_kernel {
     uint8_t mat_tcsr_count;
     uint8_t vec_tcsr_count;
     uint8_t macro_tcsr_count;
-    uint32_t reserved1;
+    uint8_t local_resource_count;
+    uint8_t shared_resource_count;
+    uint16_t reserved1;
 } npu_package_kernel_t;
 
 typedef struct npu_package_argument {
@@ -123,6 +126,8 @@ typedef struct npu_package_kernel_desc {
     uint8_t mat_tcsr_count;
     uint8_t vec_tcsr_count;
     uint8_t macro_tcsr_count;
+    uint8_t local_resource_count;
+    uint8_t shared_resource_count;
     uint64_t stack_size;
     uint64_t atomic_cache_size;
     uint64_t printf_buffer_size;

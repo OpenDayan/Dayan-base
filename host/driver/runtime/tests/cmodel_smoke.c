@@ -152,7 +152,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
         return status;
     }
     if (killed.killed_roots != 1U || killed.killed_children ||
-        killed.released_slots != 1U || killed.waiting_produce)
+        killed.released_slots != 1U || killed.waiting_produce != 1U)
         return -EIO;
     status = npu_service_rpc_ps(server->device, target, &snapshot);
     if (status < 0 || snapshot.count != 3U ||

@@ -26,7 +26,7 @@ check_pattern()
 
     while IFS= read -r identifier; do
         case "$identifier" in
-        *_H|*_DEFINED|*_LINKAGE)
+        *_H|*_DEFINED|*_LINKAGE|*_)
             continue
             ;;
         esac
@@ -72,7 +72,7 @@ check_pattern api_docs/chapters/05_dapi.tex \
     '\bDAYAN_[A-Z][A-Z0-9_]+\b|\bdayan_[a-z0-9_]+_t\b' \
     device/include/api/dayan_attrs.h device/include/api/dayan_sys.h
 for identifier in \
-    shared list_head dayan_resource_state dayan_task_axis \
+    shared dayan_resource_role dayan_task_axis \
     FILE stdout EOF \
     INFINITY NAN HUGE_VALF isnan isinf isfinite signbit \
     size_t ptrdiff_t wchar_t max_align_t NULL offsetof \

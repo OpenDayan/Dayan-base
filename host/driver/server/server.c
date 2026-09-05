@@ -741,6 +741,11 @@ static int initialize_slots(dayan_server_t *server)
     server->options.enabled_core_mask = core_mask;
     server->slot_count = (size_t)server->hal_info.cluster_count *
                          server->hal_info.cores_per_cluster;
+    server->shared_resource_used = calloc(
+        server->hal_info.cluster_count,
+        sizeof(*server->shared_resource_used));
+    if (!server->shared_resource_used)
+        return -ENOMEM;
     server->slots = calloc(server->slot_count, sizeof(*server->slots));
     if (!server->slots)
         return -ENOMEM;
@@ -969,6 +974,7 @@ fail:
         close(server->listen_fd);
     if (server->socket_path)
         (void)unlink(server->socket_path);
+    free(server->shared_resource_used);
     free(server->slots);
     if (server->device)
         (void)npu_service_close(server->device);
@@ -2249,6 +2255,11 @@ static int dispatch_control(dayan_server_t *server,
             info->mat_tcsr_count = kernel->metadata->mat_tcsr_count;
             info->vec_tcsr_count = kernel->metadata->vec_tcsr_count;
             info->macro_tcsr_count = kernel->metadata->macro_tcsr_count;
+            info->local_resource_count =
+                kernel->metadata->local_resource_count;
+            info->shared_resource_count =
+                kernel->metadata->shared_resource_count;
+            info->reserved = 0;
             info->argument_count = kernel->metadata->argument_count;
             info->sync_resource_count = kernel->metadata->sync_count;
             info->flags = kernel->metadata->flags;
@@ -2908,6 +2919,7 @@ void dayan_server_destroy(dayan_server_t *server)
         server_log("shutdown", "Device service cleanup failed: %s (%d)",
                    server_status_string(service_status), service_status);
     npu_hal_close(server->hal);
+    free(server->shared_resource_used);
     free(server->slots);
     pthread_cond_destroy(&server->condition);
     pthread_mutex_destroy(&server->mutex);

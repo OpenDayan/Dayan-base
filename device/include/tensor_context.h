@@ -7,6 +7,7 @@
 #define DAYAN_CONTEXT_URAM_WINDOW  0x200000ULL
 #define DAYAN_CONTEXT_TCSR_MAX_COUNT 8U
 #define DAYAN_CONTEXT_TCSR_MAX_BASE  63U
+#define DAYAN_CONTEXT_RESOURCE_COUNT 32U
 
 struct dayan_tcsr_range {
     uint8_t base;
@@ -20,6 +21,16 @@ struct dayan_context_fields {
     struct dayan_tcsr_range mat;
     struct dayan_tcsr_range vec;
     struct dayan_tcsr_range macro;
+};
+
+struct dayan_resource_range {
+    uint8_t base;
+    uint8_t count;
+};
+
+struct dayan_resource_context_fields {
+    struct dayan_resource_range local;
+    struct dayan_resource_range shared;
 };
 
 static inline int dayan_tcsr_range_valid(struct dayan_tcsr_range range)
@@ -71,6 +82,44 @@ static inline struct dayan_context_fields dayan_context_unpack(uint64_t value)
     fields.vec.base = (uint8_t)((value >> 40) & 0x3fU);
     fields.macro.count = (uint8_t)((value >> 46) & 0xfU);
     fields.macro.base = (uint8_t)((value >> 50) & 0x3fU);
+    return fields;
+}
+
+static inline int dayan_resource_range_valid(struct dayan_resource_range range)
+{
+    return range.count <= DAYAN_CONTEXT_RESOURCE_COUNT &&
+           range.base < DAYAN_CONTEXT_RESOURCE_COUNT &&
+           (!range.count || range.base <=
+            DAYAN_CONTEXT_RESOURCE_COUNT - range.count);
+}
+
+static inline int dayan_resource_context_fields_valid(
+    const struct dayan_resource_context_fields *fields)
+{
+    return fields && dayan_resource_range_valid(fields->local) &&
+           dayan_resource_range_valid(fields->shared);
+}
+
+static inline uint32_t dayan_resource_context_pack(
+    const struct dayan_resource_context_fields *fields)
+{
+    if (!dayan_resource_context_fields_valid(fields))
+        return UINT32_MAX;
+    return (uint32_t)fields->local.base |
+           ((uint32_t)fields->local.count << 5) |
+           ((uint32_t)fields->shared.base << 11) |
+           ((uint32_t)fields->shared.count << 16);
+}
+
+static inline struct dayan_resource_context_fields
+dayan_resource_context_unpack(uint32_t value)
+{
+    struct dayan_resource_context_fields fields;
+
+    fields.local.base = (uint8_t)(value & 0x1fU);
+    fields.local.count = (uint8_t)((value >> 5) & 0x3fU);
+    fields.shared.base = (uint8_t)((value >> 11) & 0x1fU);
+    fields.shared.count = (uint8_t)((value >> 16) & 0x3fU);
     return fields;
 }
 

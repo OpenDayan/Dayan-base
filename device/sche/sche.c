@@ -9,7 +9,9 @@
 #include "errno.h"
 #include "platform.h"
 #include "profile.h"
+#include "resource_scheduler.h"
 #include "rpc.h"
+#include "rpc_internal.h"
 #include "sche.h"
 #include "string.h"
 #include "tensor_context.h"
@@ -45,10 +47,30 @@ static unsigned char
                       [CONFIG_PROC_PRINTF_SIZE]
     __attribute__((section(".proc_printf"), aligned(64)));
 
+struct thread *scheduler_rpc_receive_threads[CONFIG_HART_COUNT] SLOT_ARRAY;
+
+_Static_assert(offsetof(struct thread, state) == THREAD_STATE_OFFSET,
+               "assembly thread state offset");
+_Static_assert(offsetof(struct thread, scheduled) == THREAD_SCHEDULED_OFFSET,
+               "assembly thread scheduled offset");
+_Static_assert(offsetof(struct thread, sp) == THREAD_SP_OFFSET,
+               "assembly thread sp offset");
+_Static_assert(offsetof(struct thread, pc) == THREAD_PC_OFFSET,
+               "assembly thread pc offset");
+_Static_assert(offsetof(struct thread, tensor_context) ==
+                   THREAD_TENSOR_CONTEXT_OFFSET,
+               "assembly thread Context1 offset");
+_Static_assert(offsetof(struct thread, resource_context) ==
+                   THREAD_RESOURCE_CONTEXT_OFFSET,
+               "assembly thread Context2 offset");
+_Static_assert(offsetof(struct thread, token_ext) == THREAD_TOKEN_EXT_OFFSET,
+               "assembly thread token extension offset");
+_Static_assert(offsetof(struct thread, reap_deferred) ==
+                   THREAD_REAP_DEFERRED_OFFSET,
+               "assembly deferred reap offset");
+
 /* Each Hart owns one cache-line-isolated structure of per-slot arrays. */
 struct thread_runtime {
-    thread_poll_fn poll[THREAD_SLOT_COUNT];
-    void *poll_arg[THREAD_SLOT_COUNT];
     void *task_cleanup_arg[TASK_SLOT_COUNT];
     void *system_wait[THREAD_SLOT_COUNT - 1U];
     int64_t result[TASK_SLOT_COUNT];
@@ -175,35 +197,6 @@ static void thread_list_add_tail(struct thread_list *list,
     HART_RUNTIME(hart).list_owner[slot] = list;
 }
 
-static void thread_list_add_head(struct thread_list *list,
-                                 struct thread *thread)
-{
-    uintptr_t hart = scheduler_hart();
-    uint8_t slot = checked_slot(thread);
-    uint8_t head;
-
-    if (!list || HART_RUNTIME(hart).list_owner[slot] ||
-        thread->node.prev != THREAD_SLOT_UNLINKED ||
-        thread->node.next != THREAD_SLOT_UNLINKED)
-        platform_halt();
-    head = list->head;
-    thread->node.prev = THREAD_SLOT_NONE;
-    thread->node.next = head;
-    if (head == THREAD_SLOT_NONE) {
-        if (list->tail != THREAD_SLOT_NONE)
-            platform_halt();
-        list->tail = slot;
-    } else {
-        struct thread *next = thread_slot_get(head);
-
-        if (!next || next->node.prev != THREAD_SLOT_NONE)
-            platform_halt();
-        next->node.prev = slot;
-    }
-    list->head = slot;
-    HART_RUNTIME(hart).list_owner[slot] = list;
-}
-
 static void thread_list_remove(struct thread *thread)
 {
     uintptr_t hart = scheduler_hart();
@@ -239,13 +232,6 @@ static void thread_list_remove(struct thread *thread)
     }
     thread_node_init(thread);
     HART_RUNTIME(hart).list_owner[slot] = 0;
-}
-
-static void thread_list_move_tail(struct thread_list *list,
-                                  struct thread *thread)
-{
-    thread_list_remove(thread);
-    thread_list_add_tail(list, thread);
 }
 
 static struct task_proc *task_proc_for(struct thread *thread)
@@ -360,8 +346,6 @@ static void slot_runtime_reset(uint8_t slot)
     uintptr_t hart = scheduler_hart();
     struct thread_runtime *runtime = &HART_RUNTIME(hart);
 
-    runtime->poll[slot] = 0;
-    runtime->poll_arg[slot] = 0;
     runtime->list_owner[slot] = 0;
     if (slot)
         runtime->system_wait[WAIT_INDEX(slot)] = 0;
@@ -375,10 +359,22 @@ static void slot_runtime_reset(uint8_t slot)
     }
 }
 
-int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
-                 const char *name, thread_fn entry,
-                 void *stack, size_t stack_size, void *shared_base,
-                 size_t argc, const uintptr_t *args)
+static void thread_submit(struct thread *thread, uint64_t wait_free,
+                          uint64_t wait_ready, int8_t qos)
+{
+    if (!thread || thread->scheduled || qos < -4 || qos > 3)
+        platform_halt();
+    thread->scheduled = 1;
+    resource_scheduler_submit(wait_free, wait_ready, qos,
+                              (uintptr_t)thread);
+}
+
+static int thread_start_common(struct thread *thread, uint8_t slot,
+                               uint8_t type, const char *name,
+                               thread_fn entry, void *stack,
+                               size_t stack_size, void *shared_base,
+                               size_t argc, const uintptr_t *args,
+                               int schedule)
 {
     uintptr_t hart = scheduler_hart();
     struct proc_frame *frame;
@@ -440,9 +436,22 @@ int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
         slot_state_set(slot, SLOT_CHILD);
     if (cpu_self()->sche.profile_enabled)
         profile_record_thread_start(thread);
-    thread_state_set(thread, THREAD_READY);
-    thread_list_add_tail(&cpu_self()->sche.ready, thread);
+    if (slot == RPC_PROFILE_SLOT_RPC_RECEIVE) {
+        thread_state_set(thread, THREAD_WAIT_POLL);
+    } else if (schedule) {
+        thread_state_set(thread, THREAD_READY);
+        thread_submit(thread, 0, 0, type == THREAD_TYPE_SYSTEM ? 3 : 0);
+    }
     return 0;
+}
+
+int thread_start(struct thread *thread, uint8_t slot, uint8_t type,
+                 const char *name, thread_fn entry,
+                 void *stack, size_t stack_size, void *shared_base,
+                 size_t argc, const uintptr_t *args)
+{
+    return thread_start_common(thread, slot, type, name, entry, stack,
+                               stack_size, shared_base, argc, args, 1);
 }
 
 int task_proc_set_cleanup_arg(struct task_proc *task, void *arg)
@@ -456,7 +465,8 @@ int task_proc_set_cleanup_arg(struct task_proc *task, void *arg)
     if (slot < TASK_SLOT_FIRST || slot > TASK_SLOT_LAST ||
         task->thread.type != THREAD_TYPE_TASK_PROC)
         return -EINVAL;
-    if (task->thread.state != THREAD_READY ||
+    if ((task->thread.state != THREAD_READY &&
+         task->thread.state != THREAD_WAIT_START) ||
         HART_RUNTIME(hart).task_cleanup_arg[TASK_INDEX(slot)])
         return -EBUSY;
     HART_RUNTIME(hart).task_cleanup_arg[TASK_INDEX(slot)] = arg;
@@ -514,13 +524,18 @@ static int task_descriptor_valid(const struct task_descriptor *descriptor)
 
 int task_proc_set_descriptor(struct task_proc *task,
                              const struct task_descriptor *descriptor,
-                             uint64_t tensor_context)
+                             uint64_t tensor_context,
+                             uint32_t resource_context)
 {
     struct dayan_context_fields fields = dayan_context_unpack(tensor_context);
+    struct dayan_resource_context_fields resource_fields =
+        dayan_resource_context_unpack(resource_context);
     uint8_t slot;
 
     if (!task || !task_descriptor_valid(descriptor) ||
         (tensor_context >> 56) || !dayan_context_fields_valid(&fields) ||
+        (resource_context >> 22) ||
+        !dayan_resource_context_fields_valid(&resource_fields) ||
         (uint64_t)fields.uram_hi * DAYAN_CONTEXT_URAM_GRANULE >
             CONFIG_URAM_SIZE ||
         (fields.uram_lo == fields.uram_hi && fields.uram_lo))
@@ -531,6 +546,7 @@ int task_proc_set_descriptor(struct task_proc *task,
         return -EBUSY;
     memcpy(&task->descriptor, descriptor, sizeof(task->descriptor));
     task->thread.tensor_context = tensor_context;
+    task->thread.resource_context = resource_context;
     return 0;
 }
 
@@ -622,6 +638,7 @@ int task_proc_start(struct task_proc *task, const char *name,
 {
     uintptr_t hart = scheduler_hart();
     uint64_t tensor_context;
+    uint32_t resource_context;
     uint8_t slot;
     int status;
 
@@ -631,14 +648,33 @@ int task_proc_start(struct task_proc *task, const char *name,
     if (slot == THREAD_SLOT_NONE || slot_state_get(slot) != SLOT_ROOT)
         return -EPERM;
     tensor_context = task->thread.tensor_context;
-    status = thread_start(&task->thread, slot, THREAD_TYPE_TASK_PROC,
-                          name, entry,
-                          hart_thread_stacks[hart][slot - TASK_SLOT_FIRST],
-                          task_child_stack_size(task), task_shared_base(task),
-                          argc, args);
+    resource_context = task->thread.resource_context;
+    status = thread_start_common(
+        &task->thread, slot, THREAD_TYPE_TASK_PROC, name, entry,
+        hart_thread_stacks[hart][slot - TASK_SLOT_FIRST],
+        task_child_stack_size(task), task_shared_base(task), argc, args, 0);
     task->thread.tensor_context = tensor_context;
+    task->thread.resource_context = resource_context;
     if (status < 0)
         return status;
+    return 0;
+}
+
+int task_proc_schedule(struct task_proc *task)
+{
+    uint8_t slot;
+
+    if (!task)
+        return -EINVAL;
+    slot = thread_slot_id(&task->thread);
+    if (slot < TASK_SLOT_FIRST || slot > TASK_SLOT_LAST ||
+        slot_state_get(slot) != SLOT_ROOT ||
+        task->thread.type != THREAD_TYPE_TASK_PROC)
+        return -EPERM;
+    if (task->thread.state != THREAD_WAIT_START || task->thread.scheduled)
+        return -EBUSY;
+    thread_state_set(&task->thread, THREAD_READY);
+    thread_submit(&task->thread, 0, 0, 0);
     return 0;
 }
 
@@ -787,6 +823,8 @@ int thread_create_child(struct thread *parent, const char *name,
     struct thread *child;
     struct dayan_context_fields root_context;
     struct dayan_context_fields child_context;
+    struct dayan_resource_context_fields root_resources;
+    struct dayan_resource_context_fields child_resources;
     struct task_tcsr_usage usage;
     dayan_thread_resources_t empty_resources;
     uintptr_t args[1];
@@ -810,7 +848,9 @@ int thread_create_child(struct thread *parent, const char *name,
         resources->lsu_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         resources->mat_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
         resources->vec_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
-        resources->macro_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS)
+        resources->macro_tcsr_count > DAYAN_TCSR_LOGICAL_GROUPS ||
+        resources->local_resource_count > DAYAN_RESOURCE_LOGICAL_COUNT ||
+        resources->shared_resource_count > DAYAN_RESOURCE_LOGICAL_COUNT)
         return -EINVAL;
     if (task_active_children(root) >= task->descriptor.max_child_threads)
         return -ENOMEM;
@@ -819,12 +859,22 @@ int thread_create_child(struct thread *parent, const char *name,
         return -ENOMEM;
     child_slot = checked_slot(child);
     root_context = dayan_context_unpack(task->thread.tensor_context);
+    root_resources = dayan_resource_context_unpack(
+        task->thread.resource_context);
     usage = task_tcsr_usage(task);
     child_context = root_context;
     child_context.lsu.count = 0;
     child_context.mat.count = 0;
     child_context.vec.count = 0;
     child_context.macro.count = 0;
+    child_resources = root_resources;
+    child_resources.local.count = resources->local_resource_count;
+    child_resources.shared.count = resources->shared_resource_count;
+    if (child_resources.local.count > root_resources.local.count ||
+        child_resources.shared.count > root_resources.shared.count) {
+        memset(child, 0, sizeof(*child));
+        return -ENOMEM;
+    }
     status = child_tcsr_reserve(&usage.lsu, root_context.lsu,
                                 resources->lsu_tcsr_count,
                                 &child_context.lsu);
@@ -856,6 +906,7 @@ int thread_create_child(struct thread *parent, const char *name,
     }
     child->parent = checked_slot(parent);
     child->tensor_context = dayan_context_pack(&child_context);
+    child->resource_context = dayan_resource_context_pack(&child_resources);
     *thread_id_out = child->id;
     return 0;
 }
@@ -1176,23 +1227,24 @@ static void kill_unlink_thread(struct thread *thread)
 
     switch (thread->state) {
     case THREAD_READY:
-    case THREAD_WAIT_POLL:
-    case THREAD_WAIT_EVENT:
     case THREAD_WAIT_PRODUCE:
-        if (!HART_RUNTIME(hart).list_owner[slot])
+        if (!thread->scheduled || HART_RUNTIME(hart).list_owner[slot])
+            platform_halt();
+        break;
+    case THREAD_WAIT_EVENT:
+        if (thread->scheduled || !HART_RUNTIME(hart).list_owner[slot])
             platform_halt();
         thread_list_remove(thread);
         break;
+    case THREAD_WAIT_POLL:
     case THREAD_WAIT_EXIT:
     case THREAD_WAIT_START:
-        if (HART_RUNTIME(hart).list_owner[slot])
+        if (thread->scheduled || HART_RUNTIME(hart).list_owner[slot])
             platform_halt();
         break;
     default:
         platform_halt();
     }
-    HART_RUNTIME(hart).poll[slot] = 0;
-    HART_RUNTIME(hart).poll_arg[slot] = 0;
 }
 
 static void kill_mark_thread(struct thread *thread, int64_t status)
@@ -1200,16 +1252,16 @@ static void kill_mark_thread(struct thread *thread, int64_t status)
     uintptr_t hart = scheduler_hart();
     uint8_t slot = checked_slot(thread);
     enum slot_state state = slot_state_get(slot);
-    int waiting_produce;
+    int waiting_token;
 
     HART_RUNTIME(hart).result[TASK_INDEX(slot)] = status;
     if (state == SLOT_ZOMBIE)
         return;
     if (state != SLOT_ROOT && state != SLOT_CHILD)
         platform_halt();
-    waiting_produce = thread->state == THREAD_WAIT_PRODUCE;
+    waiting_token = thread->scheduled;
     kill_unlink_thread(thread);
-    if (waiting_produce) {
+    if (waiting_token) {
         thread_state_set(thread, THREAD_KILL_WAIT_PRODUCE);
     } else {
         thread_state_set(thread, THREAD_WAIT_EXIT);
@@ -1370,6 +1422,7 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
         struct task_proc *task;
         uint8_t slot;
         uint32_t before;
+        uint32_t waiting_produce;
 
         if (!(selected_roots &
               (uint16_t)(1U << (root - TASK_SLOT_FIRST))))
@@ -1389,15 +1442,17 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
                 (void)thread_output_flush(thread_slot_get(slot));
         }
         thread_run_cleanup(&task->thread);
+        before = CONFIG_PROC_SLOT_COUNT;
+        for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
+            before -= slot_state_get(slot) == SLOT_FREE;
+        waiting_produce = family_pending_produce(root);
         (void)rpc_proc_exit(
             task->thread.id, 0,
             HART_RUNTIME(hart).result[TASK_INDEX(root)],
                             task->descriptor.cookie, RPC_PROC_EXIT_ROOT);
-        before = CONFIG_PROC_SLOT_COUNT;
-        for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
-            before -= slot_state_get(slot) == SLOT_FREE;
-        result->waiting_produce += family_pending_produce(root);
-        killed_family_release(root);
+        result->waiting_produce += waiting_produce;
+        if (slot_state_get(root) == SLOT_ROOT)
+            killed_family_release(root);
         for (slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
             before -= slot_state_get(slot) != SLOT_FREE;
         result->released_slots += before;
@@ -1424,35 +1479,22 @@ static void kill_complete_produce(struct thread *thread)
 
 int thread_wake(struct thread *thread)
 {
-    struct sche_state *sche = &cpu_self()->sche;
-
-    if (!thread)
-        return -EINVAL;
-    if (thread->state == THREAD_WAIT_PRODUCE ||
-        thread->state == THREAD_WAIT_EVENT) {
-        thread_state_set(thread, THREAD_READY);
-        thread_list_move_tail(&sche->ready, thread);
-        return 0;
-    }
-    if (thread->state == THREAD_KILL_WAIT_PRODUCE) {
-        kill_complete_produce(thread);
-        return 0;
-    }
-    return -EBUSY;
-}
-
-void thread_ready_first(struct thread *thread)
-{
     uintptr_t hart = scheduler_hart();
     uint8_t slot;
 
-    if (!thread || thread->state != THREAD_READY)
-        return;
+    if (!thread)
+        return -EINVAL;
     slot = checked_slot(thread);
-    if (HART_RUNTIME(hart).list_owner[slot] != &cpu_self()->sche.ready)
-        return;
-    thread_list_remove(thread);
-    thread_list_add_head(&cpu_self()->sche.ready, thread);
+    if (thread->state == THREAD_WAIT_EVENT) {
+        if (thread->scheduled || !HART_RUNTIME(hart).list_owner[slot])
+            platform_halt();
+        thread_list_remove(thread);
+        thread_state_set(thread, THREAD_READY);
+        thread_submit(thread, 0, 0,
+                      thread->type == THREAD_TYPE_SYSTEM ? 3 : 0);
+        return 0;
+    }
+    return -EBUSY;
 }
 
 size_t thread_event_wake_one(struct thread_list *event)
@@ -1474,73 +1516,60 @@ size_t thread_event_wake_all(struct thread_list *event)
     return count;
 }
 
-static void switch_to_scheduler(struct thread *thread)
-{
-    switch_context(thread, &cpu_self()->sche.init);
-}
-
-static void switch_to_next_or_scheduler(struct thread *thread)
-{
-    uint8_t next = thread->node.next;
-
-    if (next == THREAD_SLOT_NONE) {
-        switch_to_scheduler(thread);
-    } else {
-        struct thread *next_thread = thread_slot_get(next);
-
-        if (!next_thread)
-            platform_halt();
-        thread_state_set(next_thread, THREAD_RUNNING);
-        switch_context(thread, next_thread);
-    }
-}
-
 void thread_wait_poll(thread_poll_fn poll, void *arg)
 {
-    uintptr_t hart = scheduler_hart();
-    struct thread *thread = current;
-    uint8_t slot = checked_slot(thread);
-
     if (!poll)
         platform_halt();
-    HART_RUNTIME(hart).poll[slot] = poll;
-    HART_RUNTIME(hart).poll_arg[slot] = arg;
-    thread_state_set(thread, THREAD_WAIT_POLL);
-    cpu_self()->sche.active_dirty = 1;
-    switch_to_next_or_scheduler(thread);
+    while (!poll(current, arg))
+        thread_yield();
 }
 
 void thread_wait_event(struct thread_list *event)
 {
     struct thread *thread = current;
-    struct sche_state *sche = &cpu_self()->sche;
 
-    thread_state_set(thread, THREAD_WAIT_EVENT);
     if (!event) {
-        sche->active_dirty = 1;
-        switch_to_next_or_scheduler(thread);
-    } else {
-        uint8_t next = thread->node.next;
-
-        thread_list_move_tail(event, thread);
-        if (next == THREAD_SLOT_NONE) {
-            switch_to_scheduler(thread);
-        } else {
-            struct thread *next_thread = thread_slot_get(next);
-
-            thread_state_set(next_thread, THREAD_RUNNING);
-            switch_context(thread, next_thread);
-        }
+        thread_yield();
+        return;
     }
+    if (thread->scheduled)
+        platform_halt();
+    thread_list_add_tail(event, thread);
+    thread_state_set(thread, THREAD_WAIT_EVENT);
+    switch_context();
 }
 
 void thread_wait_produce(void)
 {
     struct thread *thread = current;
 
+    if (thread->scheduled)
+        platform_halt();
+    thread->scheduled = 1;
     thread_state_set(thread, THREAD_WAIT_PRODUCE);
-    cpu_self()->sche.active_dirty = 1;
-    switch_to_next_or_scheduler(thread);
+    switch_context();
+}
+
+uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
+                               int8_t qos)
+{
+    struct thread *thread = current;
+
+    thread_state_set(thread, THREAD_READY);
+    thread_submit(thread, wait_free, wait_ready, qos);
+    switch_context();
+    return thread->token_ext;
+}
+
+void thread_wait_rpc(void)
+{
+    struct thread *thread = current;
+
+    if (checked_slot(thread) != RPC_PROFILE_SLOT_RPC_RECEIVE ||
+        thread->scheduled)
+        platform_halt();
+    thread_state_set(thread, THREAD_WAIT_POLL);
+    switch_context();
 }
 
 void thread_yield(void)
@@ -1548,7 +1577,48 @@ void thread_yield(void)
     struct thread *thread = current;
 
     thread_state_set(thread, THREAD_READY);
-    switch_to_next_or_scheduler(thread);
+    thread_submit(thread, 0, 0, 0);
+    switch_context();
+}
+
+_Noreturn void thread_exit_defer(void *wait)
+{
+    uintptr_t hart = scheduler_hart();
+    struct thread *thread = current;
+    uint8_t slot;
+
+    if (!wait || !thread || thread->type != THREAD_TYPE_TASK_PROC ||
+        thread->state != THREAD_RUNNING || thread->scheduled ||
+        thread_system_wait(thread))
+        platform_halt();
+    slot = checked_slot(thread);
+    if (slot_state_get(slot) != SLOT_ROOT ||
+        HART_RUNTIME(hart).list_owner[slot] || thread->reap_deferred)
+        platform_halt();
+    thread_system_wait_set(thread, wait);
+    thread->reap_deferred = 1;
+    thread_state_set(thread, THREAD_WAIT_EXIT);
+    switch_context();
+    platform_halt();
+}
+
+void thread_exit_deferred_complete(struct thread *thread, void *wait)
+{
+    uintptr_t hart = scheduler_hart();
+    uint8_t slot;
+
+    if (!thread || thread == current || !wait ||
+        thread->type != THREAD_TYPE_TASK_PROC ||
+        thread->state != THREAD_WAIT_EXIT || thread->scheduled ||
+        !thread->reap_deferred || thread_system_wait(thread) != wait)
+        platform_halt();
+    slot = checked_slot(thread);
+    if (slot_state_get(slot) != SLOT_ROOT ||
+        HART_RUNTIME(hart).list_owner[slot])
+        platform_halt();
+    thread_system_wait_set(thread, 0);
+    thread->reap_deferred = 0;
+    scheduler_reap_thread(thread);
 }
 
 _Noreturn void thread_exit_status(int64_t status)
@@ -1568,15 +1638,21 @@ _Noreturn void thread_exit_status(int64_t status)
         HART_RUNTIME(hart).result[TASK_INDEX(slot)] = -EIO;
     (void)thread_output_flush(thread);
     if (thread->type == THREAD_TYPE_TASK_PROC) {
+        int rpc_status;
+
         thread_run_cleanup(thread);
-        (void)rpc_proc_exit(
+        rpc_status = rpc_proc_exit_current(
             thread->id, 0,
             HART_RUNTIME(hart).result[TASK_INDEX(slot)],
             task->descriptor.cookie, RPC_PROC_EXIT_ROOT);
+        if (rpc_status >= 0)
+            platform_halt();
+        scheduler_notify();
+    } else {
+        child_thread_cleanup(thread);
     }
     thread_state_set(thread, THREAD_WAIT_EXIT);
-    cpu_self()->sche.active_dirty = 1;
-    switch_to_scheduler(thread);
+    switch_context();
     platform_halt();
 }
 
@@ -1585,11 +1661,10 @@ _Noreturn void thread_exit(void)
     thread_exit_status(0);
 }
 
-static void scheduler_cleanup_thread(struct thread *thread)
+void scheduler_reap_thread(struct thread *thread)
 {
     uint8_t slot = checked_slot(thread);
 
-    thread_run_cleanup(thread);
     if (thread->type == THREAD_TYPE_TASK_PROC) {
         struct task_proc *task = (struct task_proc *)thread;
 
@@ -1601,42 +1676,17 @@ static void scheduler_cleanup_thread(struct thread *thread)
     }
 }
 
-static void scheduler_activate_ready(struct sche_state *sche)
+void scheduler_kill_token(struct thread *thread)
 {
-    while (!thread_list_empty(&sche->ready)) {
-        struct thread *thread = thread_slot_get(sche->ready.head);
-
-        thread_list_move_tail(&sche->active, thread);
-    }
+    kill_complete_produce(thread);
 }
 
-static void scheduler_finish_active_batch(struct sche_state *sche)
+void scheduler_notify(void)
 {
-    uint8_t slot = sche->active.head;
+    struct thread *init = &cpu_self()->sche.init;
 
-    while (slot != THREAD_SLOT_NONE) {
-        struct thread *thread = thread_slot_get(slot);
-        uint8_t next = thread->node.next;
-
-        switch (thread->state) {
-        case THREAD_READY:
-            break;
-        case THREAD_WAIT_POLL:
-            thread_list_move_tail(&sche->wait_poll, thread);
-            break;
-        case THREAD_WAIT_EVENT:
-        case THREAD_WAIT_PRODUCE:
-            thread_list_move_tail(&sche->wait_event, thread);
-            break;
-        case THREAD_WAIT_EXIT:
-            thread_list_remove(thread);
-            scheduler_cleanup_thread(thread);
-            break;
-        default:
-            platform_halt();
-        }
-        slot = next;
-    }
+    if (!init->scheduled && init->state != THREAD_WAIT_EVENT)
+        thread_submit(init, 0, 0, 3);
 }
 
 void sche_init(void)
@@ -1652,14 +1702,15 @@ void sche_init(void)
     init->parent = THREAD_SLOT_NONE;
     init->pc = 0;
     init->tensor_context = 0;
+    init->resource_context = 0;
+    init->scheduled = 0;
+    init->token_ext = 0;
     thread_node_init(init);
     memset(init->name, 0, sizeof(init->name));
-    thread_list_init(&sche->ready);
-    thread_list_init(&sche->active);
-    thread_list_init(&sche->wait_poll);
-    thread_list_init(&sche->wait_event);
-    sche->active_dirty = 0;
     sche->profile_enabled = 0;
+    scheduler_rpc_receive_threads[hart] =
+        thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE);
+    resource_scheduler_local_init();
     memset(hart_thread_slots[hart], 0, sizeof(hart_thread_slots[hart]));
     for (slot = 0; slot < THREAD_SLOT_COUNT; ++slot) {
         slot_runtime_reset(slot);
@@ -1668,48 +1719,5 @@ void sche_init(void)
         HART_RUNTIME(hart).generation[slot] = 0;
         slot_state_set(slot, slot >= SYSTEM_SLOT_FIRST ? SLOT_SYSTEM :
                                                         SLOT_FREE);
-    }
-}
-
-_Noreturn void scheduler(void)
-{
-    struct thread *init = current;
-    struct sche_state *sche = &cpu_self()->sche;
-
-    for (;;) {
-        uintptr_t hart = scheduler_hart();
-        uint8_t slot;
-
-        tensor_interrupt_drain();
-        scheduler_scan_produce();
-        slot = sche->wait_poll.head;
-        while (slot != THREAD_SLOT_NONE) {
-            struct thread *waiting = thread_slot_get(slot);
-            uint8_t next = waiting->node.next;
-            thread_poll_fn poll = HART_RUNTIME(hart).poll[slot];
-
-            if (!poll)
-                platform_halt();
-            if (poll(waiting, HART_RUNTIME(hart).poll_arg[slot])) {
-                HART_RUNTIME(hart).poll[slot] = 0;
-                HART_RUNTIME(hart).poll_arg[slot] = 0;
-                thread_state_set(waiting, THREAD_READY);
-                thread_list_move_tail(&sche->ready, waiting);
-            }
-            slot = next;
-        }
-        scheduler_activate_ready(sche);
-        if (thread_list_empty(&sche->active))
-            continue;
-        {
-            struct thread *thread = thread_slot_get(sche->active.head);
-
-            thread_state_set(thread, THREAD_RUNNING);
-            switch_context(init, thread);
-        }
-        if (sche->active_dirty) {
-            scheduler_finish_active_batch(sche);
-            sche->active_dirty = 0;
-        }
     }
 }

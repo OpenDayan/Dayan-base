@@ -40,11 +40,6 @@ struct alignas(64) BarrierLine {
     uint8_t padding[64 - sizeof(dayan_cluster_barrier_t)];
 };
 
-struct alignas(64) ResourceLine {
-    dayan_shared_resource_t resource;
-    uint8_t padding[64 - sizeof(dayan_shared_resource_t)];
-};
-
 struct alignas(64) StatusLine {
     int32_t status;
     uint8_t padding[64 - sizeof(int32_t)];
@@ -53,10 +48,13 @@ struct alignas(64) StatusLine {
 struct alignas(64) ClusterShared {
     BarrierLine initialize;
     BarrierLine finish;
-    ResourceLine armed;
-    ResourceLine notify;
-    ResourceLine ack;
     StatusLine initialize_status;
+};
+
+enum : dayan_resource_t {
+    kArmedResource = DAYAN_SHARED_RESOURCE(0),
+    kNotifyResource = DAYAN_SHARED_RESOURCE(1),
+    kAckResource = DAYAN_SHARED_RESOURCE(2),
 };
 
 static_assert(sizeof(ClusterShared) <= 512,
@@ -89,15 +87,8 @@ static inline void require_status(int status)
 
 static int initialize_shared(ClusterShared *cluster, uint32_t lane)
 {
-    if (lane == kSenderLane) {
-        int status = dayan_shared_resource_init(&cluster->armed.resource);
-
-        if (status == 0)
-            status = dayan_shared_resource_init(&cluster->notify.resource);
-        if (status == 0)
-            status = dayan_shared_resource_init(&cluster->ack.resource);
-        cluster->initialize_status.status = status;
-    }
+    if (lane == kSenderLane)
+        cluster->initialize_status.status = 0;
 
     const int barrier_status = dayan_cluster_barrier(
         kClusterCores, &cluster->initialize.barrier);
@@ -106,29 +97,22 @@ static int initialize_shared(ClusterShared *cluster, uint32_t lane)
     return cluster->initialize_status.status;
 }
 
-static void run_receiver(ClusterShared *cluster, uint64_t sample_count,
+static void run_receiver(uint64_t sample_count,
                          SharedNotifyResults *results)
 {
     const uint64_t total = kWarmupSamples + sample_count;
 
     for (uint64_t iteration = 0; iteration < total; ++iteration) {
-        require_status(dayan_shared_resource_wait_free(
-            &cluster->armed.resource));
-        require_status(dayan_shared_resource_alloc(
-            &cluster->armed.resource, 0, 1));
+        require_status(dayan_resource_wait_free(kArmedResource));
+        require_status(dayan_resource_produce_lsu(
+            kArmedResource, 1U, 0));
 
-        require_status(dayan_shared_resource_wait_ready(
-            &cluster->notify.resource));
+        require_status(dayan_resource_wait(
+            DAYAN_RESOURCE_MASK(kAckResource),
+            DAYAN_RESOURCE_MASK(kNotifyResource), 0));
         const uint64_t receive_cycle = read_mcycle();
-        require_status(dayan_shared_resource_consume(
-            &cluster->notify.resource));
-
-        require_status(dayan_shared_resource_wait_free(
-            &cluster->ack.resource));
-        require_status(dayan_shared_resource_alloc(
-            &cluster->ack.resource, 1, 1));
-        require_status(dayan_shared_resource_produce(
-            &cluster->ack.resource));
+        require_status(dayan_resource_produce_lsu(
+            kAckResource, 1U, DAYAN_RESOURCE_MASK(kNotifyResource)));
 
         if (iteration >= kWarmupSamples)
             results->receive_cycles[iteration - kWarmupSamples] =
@@ -142,32 +126,25 @@ static void run_receiver(ClusterShared *cluster, uint64_t sample_count,
     results->receiver_lane = kReceiverLane;
 }
 
-static void run_sender(ClusterShared *cluster, uint64_t sample_count,
+static void run_sender(uint64_t sample_count,
                        SharedNotifyResults *results)
 {
     const uint64_t total = kWarmupSamples + sample_count;
 
     for (uint64_t iteration = 0; iteration < total; ++iteration) {
-        require_status(dayan_shared_resource_wait_ready(
-            &cluster->armed.resource));
-        require_status(dayan_shared_resource_consume(
-            &cluster->armed.resource));
-
-        require_status(dayan_shared_resource_wait_free(
-            &cluster->notify.resource));
-        require_status(dayan_shared_resource_alloc(
-            &cluster->notify.resource, 1, 1));
+        require_status(dayan_resource_wait(
+            DAYAN_RESOURCE_MASK(kNotifyResource),
+            DAYAN_RESOURCE_MASK(kArmedResource), 0));
 
         const uint64_t send_cycle = read_mcycle();
-        require_status(dayan_shared_resource_produce(
-            &cluster->notify.resource));
+        require_status(dayan_resource_produce_lsu(
+            kNotifyResource, 1U, DAYAN_RESOURCE_MASK(kArmedResource)));
         const uint64_t produce_return_cycle = read_mcycle();
 
-        require_status(dayan_shared_resource_wait_ready(
-            &cluster->ack.resource));
+        require_status(dayan_resource_wait_ready(kAckResource));
         const uint64_t ack_cycle = read_mcycle();
-        require_status(dayan_shared_resource_consume(
-            &cluster->ack.resource));
+        require_status(dayan_resource_consume_lsu(
+            DAYAN_RESOURCE_MASK(kAckResource)));
 
         if (iteration >= kWarmupSamples) {
             const uint64_t sample = iteration - kWarmupSamples;
@@ -177,6 +154,7 @@ static void run_sender(ClusterShared *cluster, uint64_t sample_count,
             results->ack_cycles[sample] = ack_cycle;
         }
     }
+    dayan_wait_lsu();
 }
 
 } // namespace shared_notify_latency_detail
@@ -207,16 +185,17 @@ __kernel__ void shared_notify_latency(uint64_t sample_count,
                    (unsigned long long)start_delay_cycles);
             delay_cycles(start_delay_cycles);
         }
-        run_sender(cluster, sample_count, results);
+        run_sender(sample_count, results);
     } else if (lane == kReceiverLane) {
-        run_receiver(cluster, sample_count, results);
+        run_receiver(sample_count, results);
     }
 
     require_status(dayan_cluster_barrier(kClusterCores,
                                          &cluster->finish.barrier));
 }
 
-DAYAN_KERNEL_DESC(shared_notify_latency, 0, 512, 0, 0, 0, 0, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    shared_notify_latency, 0, 512, 0, 0, 0, 0, 0, 0, 3);
 
 #if !defined(__DAYAN_DEVICE__)
 
@@ -416,7 +395,7 @@ __host__ static int validate_and_print(const SharedNotifyResults &results,
     print_stats("notify + immediate ACK", rtt);
     printf("[host] RTT/2 estimate         avg=%.2f p50=%.2f cycles\n",
            rtt.average / 2.0, (double)rtt.p50 / 2.0);
-    printf("[host] PASS: shared-resource notification benchmark completed\n");
+    printf("[host] PASS: Shared Named Resource notification benchmark completed\n");
     return 0;
 }
 
@@ -474,7 +453,7 @@ __host__ int main(int argc, char **argv)
         launch_attrs.config.task_dim = NPUTaskDim3{4, 1, 1};
         launch_attrs.config.task_mode = NPUTaskMode::kFourCore;
         launch_attrs.timeout_ms = timeout_ms;
-        printf("[host] measuring dayan_shared_resource core 0 -> core 1 "
+        printf("[host] measuring Shared Named Resource core 0 -> core 1 "
                "notification latency\n");
         fflush(stdout);
         status = shared_notify_latency(sample_count, start_delay_cycles,

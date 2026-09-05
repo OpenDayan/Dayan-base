@@ -21,9 +21,9 @@ rg -q 'npu_kernel_arg_buffer' "$work_dir/basic.host.cpp"
 rg -q 'npu_buffer_t \*output' "$work_dir/basic.host.cpp"
 rg -q '__atomic_test_and_set' "$work_dir/basic.host.cpp"
 rg -q '_ZN6sample10vector_addEPmmf' "$work_dir/basic.host.cpp"
-rg -Fq '3U, 0U, 0U, 1U, 2U, 3U, 4U, 0U, UINT64_C(4096), UINT64_C(32768)' \
+rg -Fq '3U, 0U, 0U, 1U, 2U, 3U, 4U, DAYAN_RESOURCE_COUNT_PACK(0U, 0U), UINT64_C(4096), UINT64_C(32768)' \
     "$work_dir/basic.host.cpp"
-rg -Fq '0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, UINT64_C(0), UINT64_C(0)' \
+rg -Fq '0U, 1U, 1U, 0U, 0U, 0U, 0U, DAYAN_RESOURCE_COUNT_PACK(0U, 0U), UINT64_C(0), UINT64_C(0)' \
     "$work_dir/basic.host.cpp"
 rg -Fq 'return sample::vector_add(output, value, scale, attrs);' \
     "$work_dir/basic.host.cpp"

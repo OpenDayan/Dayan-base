@@ -43,7 +43,9 @@ command。
 
 send proc 独占本 hart 的发送队列。队列为空时等待事件；取到 transaction 后，先等待
 outbound bit 清零，写 mailbox 并置位，再等待 Host 清零。最后执行 cleanup，标记事务
-完成并唤醒调用者。
+完成并唤醒调用者。root 自然退出使用 terminal transaction：调用者不再被唤醒，send
+proc 在 Host 确认和 cleanup 之后直接回收已停止运行的 root，保证 transaction 所在栈
+在握手完成前保持有效。
 
 \code{rpc_call} 在调用 proc 的栈上保存 transaction，并给 packet、request、response
 分别保留独占的 64-byte 对齐 slot。调用者等待 send proc 完成，期间 scheduler 可以运行
@@ -97,7 +99,8 @@ Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块
 提交前失败可以立即释放；一旦尝试发布命令却未收到匹配响应，该 allocation 不重新进入
 分配池，只在 HAL 关闭时统一回收。
 
-一致性窗口不需要上述普通 RAM 交接；resource 同步仍遵守 acquire/release 语义。
+一致性窗口不需要上述普通 RAM 交接；Shared Named Resource 同步仍遵守
+acquire/release 语义。
 
 \subsection{并发与失败边界}
 

@@ -167,7 +167,7 @@ struct rpc_proc_create_request {
     uint32_t task_id[3];
     uint32_t task_dim[3];
     uint32_t task_reserved;
-    uint32_t resource_reserved;
+    uint32_t resource_context;
     uint64_t uram_base;
     uint64_t uram_size;
     uint64_t tensor_context;

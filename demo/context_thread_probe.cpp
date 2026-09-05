@@ -90,39 +90,34 @@ static void reused_tcsr_thread(void *argument)
 
 static int test_deferred_resource_transitions(ContextThreadResult *result)
 {
-    dayan_resource_t local_resource;
-    dayan_shared_resource_t *shared_resource =
-        (dayan_shared_resource_t *)shared;
+    const dayan_resource_t local_resource = DAYAN_LOCAL_RESOURCE(0);
+    const dayan_resource_t shared_resource = DAYAN_SHARED_RESOURCE(0);
     int status;
 
-    status = dayan_resource_init(&local_resource);
+    status = dayan_resource_wait_free(local_resource);
     if (status == 0)
-        status = dayan_resource_alloc(&local_resource, 1U, 1U);
+        status = dayan_resource_produce_lsu(local_resource, 1U, 0);
     if (status == 0)
-        status = dayan_resource_wait_lsu_produce(&local_resource);
+        status = dayan_resource_wait_ready(local_resource);
     if (status == 0)
-        status = dayan_resource_wait_ready(&local_resource);
-    if (status == 0)
-        status = dayan_resource_wait_mat_consume(&local_resource);
-    if (status == 0)
-        status = dayan_resource_wait_free(&local_resource);
+        status = dayan_resource_consume_mat(
+            DAYAN_RESOURCE_MASK(local_resource));
     if (status < 0)
         return status;
+    dayan_wait_mat();
     result->completion_mask |= 1U;
 
-    status = dayan_shared_resource_init(shared_resource);
+    status = dayan_resource_wait_free(shared_resource);
     if (status == 0)
-        status = dayan_shared_resource_alloc(shared_resource, 1U, 1U);
+        status = dayan_resource_produce_vec(shared_resource, 1U, 0);
     if (status == 0)
-        status = dayan_shared_resource_wait_vec_produce(shared_resource);
+        status = dayan_resource_wait_ready(shared_resource);
     if (status == 0)
-        status = dayan_shared_resource_wait_ready(shared_resource);
-    if (status == 0)
-        status = dayan_shared_resource_wait_macro_consume(shared_resource);
-    if (status == 0)
-        status = dayan_shared_resource_wait_free(shared_resource);
+        status = dayan_resource_consume_macro(
+            DAYAN_RESOURCE_MASK(shared_resource));
     if (status < 0)
         return status;
+    dayan_wait_macro();
     result->completion_mask |= 2U;
     return 0;
 }
@@ -192,7 +187,8 @@ __kernel__ void context_thread_probe(ContextThreadResult *result)
     dayan_cache_flush(result, sizeof(*result));
 }
 
-DAYAN_KERNEL_DESC(context_thread_probe, 3, 64, 32 * 1024, 2, 0, 0, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    context_thread_probe, 3, 64, 32 * 1024, 2, 0, 0, 0, 1, 1);
 
 #if !defined(__DAYAN_DEVICE__)
 

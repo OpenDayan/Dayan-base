@@ -24,7 +24,7 @@ Socket 协议不属于公开 API。
   \code{npu_service_proc_exit_fn} & 接收根 Proc 的返回值和调用方标识。 \\
   \code{npu_service_profile_fn} & 接收某个 Cluster 和 Core 产生的一段原始性能采样数据。 \\
   \code{npu_service_options_t} & Service 配置，包含 RPC 轮询间隔、默认超时、回调函数和回调参数。 \\
-  \code{npu_service_launch_desc_t} & Proc 启动描述符，包含物理位置、入口、参数、逻辑任务信息、共享区、URAM、子 Thread 上限、Tensor Context、名称和调用方标识。 \\
+  \code{npu_service_launch_desc_t} & Proc 启动描述符，包含物理位置、入口、参数、逻辑任务信息、共享区、URAM、子 Thread 上限、Context1/Context2、名称和调用方标识。 \\
   \code{npu_service_launch_info_t} & 一次启动的状态、物理位置、Proc ID、返回结果、任务坐标和名称。 \\
   \code{npu_service_proc_info_t} & 一个 Proc 的父子关系、状态、资源槽、任务坐标、结果、PC 和名称。 \\
   \code{npu_service_proc_snapshot_t} & 一个 Hart 上的 Proc 快照及资源槽统计。 \\
@@ -50,6 +50,8 @@ Socket 协议不属于公开 API。
   \code{NPU_SERVICE_LAUNCH_EXITED} / \code{NPU_SERVICE_LAUNCH_FAILED} & Proc 已正常退出，或创建和执行过程失败。 \\
   \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统 Proc、Host 创建的根 Proc，以及 Device 创建的子 Thread。 \\
   \code{NPU_SERVICE_PROC_ZOMBIE} / \code{NPU_SERVICE_PROC_KILL_WAIT_PRODUCE} & 已退出但尚未回收的 Proc，或终止后仍在等待异步执行单元完成的 Proc。 \\
+  \code{NPU_SERVICE_MMU_READ} / \code{NPU_SERVICE_MMU_WRITE} / \code{NPU_SERVICE_MMU_EXEC} & ClusterMMU 映射的读、写和执行权限位。 \\
+  \code{NPU_SERVICE_MMU_PAGE_SIZE} / \code{NPU_SERVICE_MMU_PAGE_MASK} & Service 使用的 4 KiB 页大小和页内偏移掩码。 \\
 \end{dayantable}
 
 \subsection{Service 生命周期}
@@ -98,7 +100,8 @@ Socket 协议不属于公开 API。
 \code{target} 必须明确指定 Cluster 和 Core。\code{task_id}、\code{task_dim} 和
 \code{task_mode} 描述逻辑任务。共享区和 URAM 通过 HAL 内存句柄、偏移和长度指定；
 Service 会再次校验内存类别、可见范围和对齐。根 Proc 的子 Thread 资源槽在创建时一次性
-预留；64 位 Tensor Context 随创建请求下发，并在该 Proc 被调度时加载。
+预留；64 位 Context1 和 22 位 Named Resource Context2 随创建请求下发，并在该 Proc
+被调度时加载。
 
 \subsection{Hart 管理与性能采样}
 

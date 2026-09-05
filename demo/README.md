@@ -137,11 +137,10 @@ build/demo/lsu_bandwidth u2d
 
 ## 跨 Core 通知延迟微基准
 
-`shared_notify_latency` 隔离测量 Atomic Cache 上
-`dayan_shared_resource_t` 的 core 0 -> core 1 通知路径。core 1 先用另一项
-Shared Resource 发布 armed 握手，保证自己已经进入接收流程；core 0 随后在
-`dayan_shared_resource_produce()` 前记录 `mcycle`，core 1 在
-`dayan_shared_resource_wait_ready()` 返回后立即记录 `mcycle`。此外 core 1 会立刻
+`shared_notify_latency` 隔离测量硬件 Shared Resource 的 core 0 -> core 1 通知路径。
+core 1 先通过逻辑 Shared Resource 0 发布 armed 握手，保证自己已经进入接收流程；
+core 0 随后在 `dayan_resource_produce_lsu()` 前记录 `mcycle`，core 1 在
+`dayan_resource_wait()` 返回后立即记录 `mcycle`。此外 core 1 会立刻
 回 ACK，得到一个不依赖跨 Core 计数器对齐的 round-trip 对照。默认预热 16 次并采集
 64 个样本，可指定不超过 512 的样本数：
 
@@ -150,8 +149,8 @@ build/demo/shared_notify_latency
 build/demo/shared_notify_latency 512
 ```
 
-主指标包含 producer API、Atomic Cache 状态可见性、接收 Core 的 scheduler 轮询和
-线程恢复；不包含 kernel 启动、初始化 barrier 和结果回传。为 TestCluster 的
+主指标包含 producer API、Cluster 级 Shared Resource 仲裁和接收 Thread 恢复；不包含
+kernel 启动、初始化 barrier 和结果回传。为 TestCluster 的
 `nd` 波形窗口定位时，可传入第二个参数让 core 0 在初始化后打印 marker 并延迟指定
 周期；该延时不进入样本时间戳：
 
@@ -177,9 +176,10 @@ A[M][K] (BF16) × BT[N][K] (BF16) -> C[M][N] (FP32)
 和三个 consumer Thread：当 `M < N` 时使用 `256x384x256` tile，producer 双缓冲读取
 A，三个 consumer 各处理 128 列并读取自己的 BT；否则使用原版的 `384x256x256`
 tile，producer 双缓冲读取 BT，三个 consumer 各处理 128 行并读取自己的 A。共享 tile
-的代际与 producer / consumer 关系由
-`dayan_resource_init/alloc/produce/wait/consume` 管理；LSU 和 MAT 完成等待分别使用
-`dayan_wait_lsu()` 与 `dayan_wait_mat()`。三切片模式的 URAM 占用为 832 KiB。
+的代际与 producer / consumer 关系由两个硬件 Local Resource 管理。producer 通过
+`dayan_resource_wait_free()` 预留双缓冲，并用 `dayan_resource_produce_lsu()` 发布；
+MAT consumer 在完成后用 `dayan_resource_consume_mat()` 释放输入。三切片模式的 URAM
+占用为 832 KiB。
 
 默认 Host case 为 `M=768, N=512, K=1536`。程序生成确定性 BF16 输入、执行 Device
 kernel、回传 Device `mcycle` 吞吐，并逐元素和 CPU 参考结果比较：
@@ -243,13 +243,12 @@ Core 之间连续等分，每行再按 512 行推进；N 维按 384 列 tile 交
 
 每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 负责 A，core 01/10 负责
 B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker、两个 Mat worker 和一个
-C-Store worker。DRAM Loader 发射本代首条 D2U 后通过本地 `dayan_resource_t` 允许 Copy
-进入；源数据真正完成后再通过 Atomic Cache 中的 `dayan_shared_resource_t`
-发布给远端。Copy 使用 D2U 从源 Core URAM 拉取已完成的数据，MAT 只消费本地
-Resource。共享资源统一表示为四个 sliced buffer 与两个 buffered buffer，模板按
+C-Store worker。DRAM Loader 将 D2U 输出发布到 Shared Resource，Copy 用一次硬件 Wait
+同时等待 Shared 输入并预留 Local 输出，再从源 Core URAM 拉取数据。MAT 只消费本地
+Resource。共享资源统一表示为逻辑 sliced buffer 与 buffered buffer，模板按
 路径把它们映射到 A 或 B，避免为两套算法维护重复的 Atomic Cache 状态。两个 Mat
-worker 静态交替处理线性 job：前一条 MAT 成功入队后才用本地 Resource 向下一线程
-交棒，因此最多两条 MAT outstanding，但发射顺序不会反转。
+worker 静态交替处理线性 job：MAT 完成提交同时消费 A/B/当前 turn，并发布下一 turn，
+因此最多两条 MAT outstanding，发射顺序不会反转。
 最后一个 K 分片完成后，MAT 只发布对应 C slice 的本地 Resource；C-Store 按 slice
 顺序取走结果，每次发射两条 U2D 后统一等待完成，再释放 C buffer 供下一 output tile
 使用。这样 MAT 不再承担写回等待，同时保持 RTL 可安全承载的两路 Store outstanding。
@@ -261,10 +260,10 @@ worker 静态交替处理线性 job：前一条 MAT 成功入队后才用本地 
 ## 四 Core 直接广播性能模型
 
 `matmul_bf16_broadcast_4c` 建模更完整的未来广播指令：源端 Loader 的一次 D2U
-同时填充本地和远端 URAM，完成后直接发布本地 Resource 和 Atomic Cache Shared
-Resource。tile 固定为 `512x384x256`，A 沿 M 维等分为四个 `128x256` slice。
+同时填充本地和远端 URAM，完成后直接发布 Local/Shared Named Resource。tile 固定为
+`512x384x256`，A 沿 M 维等分为四个 `128x256` slice。
 每个 Core 只创建一个 DRAM Loader 和两个有序 MatStore worker，不再创建 Copy worker；
-源端 MAT 消费本地 Resource，远端 MAT 直接等待并消费 Shared Resource。B 的远端
+源端 MAT 消费 Local Resource，远端 MAT 直接等待并消费 Shared Resource。B 的远端
 Shared Resource 由四个 M slice 分别消费。模型保留真实的 Load/MAT/C 写回时序与同步
 成本，但由于当前指令不会真实写入远端 URAM，仍跳过数值校验。
 

@@ -229,7 +229,8 @@ Linux 风格 intrusive 泛型。当前兼容常用的 `container_of/list_entry`�
 由宏在编译期展开，基础指针操作使用 `static inline`，RBTree 平衡代码位于
 `device/lib/rbtree.c`。
 
-`device/sche/` 的调度队列和 `device/mem/` 的 region 集合都使用 `list_head`。
+`device/sche/` 的事件等待链表和 `device/mem/` 的 region 集合都使用 `list_head`；就绪与
+Named Resource 调度由硬件队列完成，不维护软件 ready/resource list。
 `device/mem/` 的空闲块
 使用按块大小排序的 intrusive RBTree 做 best-fit 分配，并通过边界信息合并
 相邻空闲块。初始 region 永不归还；堆不足时通过 `RPC_HEAP_ACQUIRE` 请求 Host，
@@ -258,11 +259,12 @@ Device 发送前后都轮询 `IRQ_STATUS` (`0x2000`) 中自己的 bit，只有 H
 (`0x2010`) 使能对应的 Host IRQ 输出。上述 doorbell 只用于握手，不会触发 NPU 上的
 抢占：BL1 用 `csrw mie, 0x800` 仅启用张量机器外部中断，RPC MSIP 保持轮询。
 
-每个 hart 有三个内核 proc。receive proc 以 `proc_wait_poll()` 通过 CSR 轮询本核
-`mip.MSIP`，避免在等待路径中读取 CLINT MMIO；收到 doorbell 后读取 Host 命令，调用弱的
+每个 hart 有三个系统 Thread。receive Thread 处于 `THREAD_WAIT_POLL` 时，由
+`switch_context()` 优先检查本核 `mip.MSIP` 并直接选择，避免读取 CLINT MMIO；收到
+doorbell 后读取 Host 命令，调用弱的
 `rpc_receive(opcode, arg, &response)` 分派接口，并在需要回复时把响应加入发送队列，最后
 向 CLINT `msip` 写 0 清除 pending。send proc 独占本核发送队列；队列为空时使用
-`proc_wait_event()`，有事务时写 Device → Host mailbox，等待 Host 清除状态位，再执行
+event wait，有事务时写 Device → Host mailbox，等待 Host 清除状态位，再执行
 事务 cleanup 并唤醒调用者。receive handler 返回 1 表示发送 `response`，返回 0 表示
 无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行；若它发起阻塞式
 反向 RPC，Host 必须在等待 response 的同时继续服务 Device→Host mailbox。仓库内置的
@@ -286,7 +288,9 @@ Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Devi
 0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
 base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及完成状态。BL1 校验
 task mode 只能为 1 或 4，并在 mode 4 时要求 `task_dim.x == 4`；随后分配托管 proc 并
-回复 opcode `0x8100`。root 创建时会物理摘下 `1 + max_child_threads` 个静态 slot；
+回复 opcode `0x8100`。Device 先把响应交给 RPC send 队列，再向硬件提交 root Thread，
+避免不会主动 yield 的新 kernel 阻塞创建响应。root 创建时会物理摘下
+`1 + max_child_threads` 个静态 slot；
 子孙创建、退出与 join 不再经过 Host。每个 proc 退出都通过统一 flush 路径提交剩余输出；
 缓冲为空时直接返回，不发送 `WRITE` 或 `CLEAR`。只有 Host root 通过 32-byte
 `RPC_PROC_EXIT` 请求主动上报 64-bit 返回值与 cookie。Host 在成功响应前记录终态并释放
@@ -295,10 +299,10 @@ create descriptor；Device 收到响应后立即由 scheduler 归还 Thread slot
 
 Host 管理目标 Hart 使用 `RPC_PROC_PS` (`0x0102`) 和 `RPC_PROC_KILL_ALL` (`0x0103`)，
 响应分别为 `0x8102`、`0x8103`。PS 固定返回三个系统 proc（RPC receive/send 与
-profile）和至多 16 个算子 proc
-的名称、状态、父 ID、直属子计数、logical task、返回值与 cookie。kill-all 保留 init/RPC/profile
-proc，摘除其它 proc 的 ready/poll/event/system-wait 节点；非 Produce slot 立即释放，
-等待 Produce 的 slot 进入 `THREAD_KILL_WAIT_PRODUCE`，收到硬件 token 后才释放。
+profile）和至多 16 个算子 proc 的名称、状态、父 ID、直属子计数、logical task、返回值与
+cookie。kill-all 保留 init/RPC/profile proc，摘除 event/system-wait 节点；尚未回到软件的
+硬件 token 进入 `THREAD_KILL_WAIT_PRODUCE`，token 返回后再释放对应 slot。这里也包括
+`dayan_yield()` 提交的无依赖 Wait token，不只包括执行单元 Produce。
 
 Host 覆盖动态模块前，先通过 `RPC_DCACHE_FLUSH` (`0x0105`) 让所有已启动 Hart
 失效目标模块的 D-cache 范围；全部返回 `0x8105` 后才写入新的 text/rodata。写入完成后
@@ -323,50 +327,27 @@ hart ID 与当前 thread 的 ID/type/state，异步排入 RPC 发送队列，然
 `current` 时无法安全恢复，系统会停机；异常报告无法入队时也会停机，避免静默丢失
 故障信息。
 
-`device/sche/` 是有独立 proc 栈的非抢占式调度器。`switch_context()` 在当前栈保存
-`ra`、`s0-s11`、`gp` 和 `fcsr`，把保存帧的 `sp` 及恢复入口 `pc` 写入当前 thread，
-再加载目标 thread 的 `sp/pc` 并同步更新 `tp/current`。恢复旧 proc 时从切换帧恢复
-`gp/shared`；首次执行新 proc 时由 bootstrap 从启动帧加载它。软浮点 `lp64` ABI 没有需要跨 C 函数调用
-保留的 F 寄存器；有存活浮点值时，编译器会在调用 `proc_yield()` 等函数前自行溢出，
-而每个 thread 的浮点控制状态由 `fcsr` 保存。
+`device/sche/` 是有独立 Thread 栈的非抢占式调度器。`switch_context()` 先用临时寄存器
+检查 `mip.MSIP` 或弹出 BASE Produce/Bar[0]，选定目标且确认不同于当前 `tp` 后，才在当前
+栈保存 `ra`、`s0-s11`、`gp` 和 `fcsr`。旧寄存器 store 与目标 Thread 的 `sp/pc`、
+Context1/Context2 load 交错执行；恢复旧 Thread 时从切换帧恢复 `gp/shared`，首次执行时
+由 bootstrap 从 96-byte 启动帧加载入口、`a0-a7`、返回地址和 `gp`。软浮点 `lp64` ABI
+没有需要跨 C 调用保存的 F 寄存器；有存活浮点值时，编译器会在调用 `thread_yield()` 等
+函数前自行溢出，Thread 的浮点控制状态由 `fcsr` 保存。
 
-`proc_init(proc, entry, stack, stack_size, shared_base, printf_buffer,
-printf_capacity, argc, ...)` 使用调用者提供的栈区间、Host 分配的 shared 基址，以及
-proc 私有输出缓冲区构造任务，
-栈顶按 16 字节向下对齐，支持 0 到 8 个寄存器参数。可变参数是底层 ABI 机器字，调用者
-必须逐个按 `uintptr_t` 传入；后续类型安全封装可负责指针转换、浮点位模式打包以及自动
-加入 proc 指针。实际实现位于接收 `va_list` 的 `proc_vinit()`；`proc_init()` 仅负责
-建立和销毁参数列表，因此其它可变参数封装可以直接调用 `proc_vinit()`，不需要中间
-数组。bootstrap 开头按 `a7` 到 `a0` 连续排列八条定长加载指令，新 proc 的
-初始 `pc` 为 `proc_bootstrap + (8 - argc) * 4`，因此只恢复实际提供的参数寄存器，再
-加载任务入口和返回地址。未使用的高位参数寄存器不作初始化。该栈与输出缓冲区在 proc
-到达 `THREAD_WAIT_EXIT` 前必须一直有效；传入空指针和 0 可为不使用 stdio 的内核 proc
-禁用输出。
-
-例如，底层接口创建一个具有两个机器字参数的 proc：
-
-```c
-proc_init(&proc, (proc_fn)task_main, stack, stack_size, shared_base,
-          printf_buffer, printf_capacity, 2,
-          (uintptr_t)&proc, (uintptr_t)arg);
-```
-
-`proc_init()`/`proc_vinit()`/`proc_init_args()` 成功时直接把 proc 加入当前 CPU 的
-ready queue；最后一个接口供 RPC 这类已有机器字数组的调用者使用。可选 cleanup 在
-proc 停止使用自己的栈后由 scheduler 调用，因而可以安全回收托管栈。运行中的
-proc 可调用 `proc_yield()` 主动让出。`proc_wait_poll(poll, arg)` 进入轮询等待队列，
-scheduler 每轮调用其 predicate，返回非零后移回 ready queue；该队列非空时不会执行
-`wfi`。`proc_wait_event(event)` 则立即把当前 proc 的 intrusive `node` 挂入指定事件
-链表，scheduler 不遍历它；事件所有者调用 `proc_event_wake_one/all()` 或
-`proc_wake()` 将等待者移回 ready queue。传入空指针会使用 scheduler 的默认外部事件
-链表。`entry()` 正常返回等价于调用 `proc_exit()`，不会被重新排队。普通 proc 仍由
-所有者管理生命周期；Host RPC 创建的 root proc 按资源描述符预留 `1 + max_children`
+内部 `thread_start()` 初始化 Thread 后提交一个无依赖硬件 Wait。运行中的 Thread 通过
+`thread_yield()` 提交同类 Wait 主动让出；`thread_wait_poll()` 在调用方检查 predicate，
+未满足时反复 yield。`thread_wait_event()` 仅把短 slot node 挂入 join/RPC/profile 等明确
+事件链表，唤醒操作会为目标 Thread 提交硬件 Wait。scheduler 本身不维护或扫描 ready、
+poll、resource 队列。入口正常返回等价于 `thread_exit()`。Host RPC 创建的 root Proc 按
+资源描述符预留 `1 + max_children`
 个 proc slot。每个 Hart 固定有 16 个算子 proc slot，root 也计入，init、两个 RPC
 proc 和 profile proc 不计入，因此单个 kernel 最多声明 15 个子 Thread。
 `dayan_create_thread(name, entry, argument, resources)` 创建的子 Thread 保持在同一 hart，
 拥有不超过 15 bytes 的名称，继承 logical task、`gp/shared` 与 URAM，并返回正的 Thread
-ID。传入空资源表示不占用 TCSR；显式资源由固件映射为该 Thread 从逻辑组 0 开始的
-独立 Context。`dayan_thread_join(id, &result)` 精确等待直属子 Thread，
+ID。传入空资源表示不占用 TCSR 或 Named Resource；显式 TCSR 由固件映射为该 Thread 从
+逻辑组 0 开始的独立 Context1，Local/Shared count 限制 Context2 可见前缀。
+`dayan_thread_join(id, &result)` 精确等待直属子 Thread，
 `dayan_thread_join_all()` 等待全部直属子 Thread；每个执行对象退出前都会隐式
 join-all，因此 root 进入终态时整棵子树已经完成。`dayan_thread_exit(result)` 可显式
 设置 64-bit 返回值。
@@ -388,18 +369,15 @@ join-all，因此 root 进入终态时整棵子树已经完成。`dayan_thread_e
 未定义符号。`make check` 会检查白名单、两个 API section 和 API ELF 的全局符号集合
 完全一致，并分别用 C11 与 C++17 在只有公开 include 路径的环境下编译算子样例。
 
-第一批 proc 包装为 `dayan_yield()`，以及 `dayan_wait_lsu/mat/vec/macro()` 四个同步
-入口。它们把当前 proc 的 `tp` 作为 token，分别通过 BASE 单元地址 1、2、3、4 发出
-Produce，然后进入默认 event 等待；`dayan_wait_dma()` 是 LSU 入口的兼容别名。
-scheduler 每轮通过 BASE 全局地址 0 的 pop 读取所有已完成 token，并由
-`scheduler_scan_produce()` 按 token 高 16 位分发事件：0 唤醒 Thread，1/2 对本地资源
-执行 produce/consume，3/4 对共享资源执行 produce/consume；低 48 位保存 Thread 或
-resource 指针。`dayan_resource_wait_<unit>_{produce,consume}()` 与对应的
-`dayan_shared_resource_wait_<unit>_{produce,consume}()` 会非阻塞发出这种绑定操作，
-调用方必须保证资源对象在事件完成前保持有效。event 链表本身仍不遍历；只要
-其中存在等待者，scheduler 就持续扫描 Produce，而不会进入 `wfi`。每次等待占用一个
-Produce 项，软件仍须遵守硬件的全局 32 项和单执行单元 2 项的无阻塞保证，不能无界
-发射同步项。
+`dayan_yield()` 直接登记一个无资源依赖的硬件 Wait 项，token 就是当前 Thread 的
+`tp`。`dayan_wait_lsu/mat/vec/macro()` 仍通过对应执行单元的 Produce/Bar 队列等待前序
+工作；`dayan_wait_dma()` 是 LSU 入口的兼容别名。全局 Produce/Bar[0] 中只传递 Thread
+token，不再编码 Resource 指针或软件事件类型。
+
+选线程和上下文切换位于同一个汇编函数中。热路径先读 `mip.MSIP`，有 Host RPC 时选择
+`rpc-receive` Thread；否则弹出 Produce/Bar[0]。token 为 0 时继续等待，等于当前 `tp`
+时直接返回。只有确定目标 Thread 不同后，才保存 `s0--s11`、`gp` 和 `fcsr`，并交错读取
+新 Thread 的栈、PC、Context1 和 Context2。软件 ready/resource 链表与扫描循环已经删除。
 
 `dayan_uram_base()` 和 `dayan_uram_size()` 返回 Service 为当前 kernel 实例在本 Core
 分配的私有 URAM；默认每 Core 容量为 1.5 MiB，地址窗口从 `0x00800000` 起并以 2 MiB
@@ -423,7 +401,7 @@ Hart 上交错执行，从而提高 LSU 与计算单元的利用率。
 
 多 Thread 保留给需要核间数据广播、远程 URAM 复制或显式多阶段生产者/消费者
 流水的特殊算子，典型例子是需要在四个 Core 间广播 A/B tile 的矩阵乘。这类
-算子再使用 `kFourCore`、`shared` resource 和独立的 loader/copy/MAT/store Thread。
+算子再使用 `kFourCore`、Shared Named Resource 和独立的 loader/copy/MAT/store Thread。
 
 `dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前
 `shared` allocation 内的零初始化 16-byte 对象。每个 lane 通过 `AMOADD.D`
@@ -432,38 +410,26 @@ Hart 上交错执行，从而提高 LSU 与计算单元的利用率。
 整个 shared allocation 初始化为零；不会清空可能仍被其它 kernel 使用的全局
 Atomic Cache backing。
 
-资源分为单核和跨核两种类型，两者提供相同的
-`FREE -> BUSY -> READY -> FREE` 状态机。`alloc()` 设置生产者和消费者计数；生产者为
-0 时直接进入 READY，消费者必须非零。最后一次 `produce()` 进入 READY，最后一次
-`consume()` 回到 FREE。所有返回 `int` 的资源接口均以 0 表示成功、负值表示参数或
-状态错误。
+Named Resource 状态由硬件表维护，每个 Core 有 32 项 Local Resource，同一 Cluster
+共享 32 项 Shared Resource。`dayan_resource_t` 只是 8-bit 逻辑编号：0--31 表示
+Local，32--63 表示 Shared。Host 为每个常驻 kernel 分配物理窗口，Device 在切换 Thread
+时恢复 Context2；算子只使用 `DAYAN_LOCAL_RESOURCE(i)`、
+`DAYAN_SHARED_RESOURCE(i)` 和 `DAYAN_RESOURCE_MASK(r)`，不保存资源对象或状态字段。
 
-`dayan_resource_t` 只允许当前 hart 的 proc 共享，可放在该 hart 的栈或普通私有堆中。
-它内嵌 lock/ready/free 三条核私有事件链表；`wait_ready/free()` 直接挂入对应链表，
-状态转换时由资源操作唤醒，而不需要 scheduler 扫描。其状态、计数、上锁和解锁全部
-使用普通 load/store，不包含 `__atomic`、AMO 或 fence；非抢占调度保证资源操作不会
-与本核另一个 proc 同时执行。初始化后，存在等待者的资源对象不得复制、移动或再次
-初始化。
+两类资源使用相同的 `FREE -> BUSY -> READY -> FREE` 状态机。`dayan_resource_wait()`
+把 `WAIT_FREE` 输出和 `WAIT_READY` 输入连同当前 `tp` 一次登记到硬件；发射时所有
+`WAIT_FREE` 项会原子预留为 BUSY。两个掩码 one-hot 重叠时执行生产者选举，返回
+`DAYAN_RESOURCE_ROLE_PRODUCER` 或 `DAYAN_RESOURCE_ROLE_CONSUMER`。单资源便捷接口
+`dayan_resource_wait_free/ready()` 也遵循相同语义，因此 `wait_free()` 成功后调用方必须
+最终发布该资源。
 
-`dayan_shared_resource_t` 供多个 hart 共享。producer/consumer 剩余计数打包在同一个
-64-bit 状态字中：`alloc()` 使用 `amocas.d` 从 FREE 原子安装新一代计数，`produce()`
-和 `consume()` 分别使用一条 `amoadd.d` 递减计数，全程没有自旋锁。它不能保存只对某个
-hart 私有的 proc 链表节点，因此
-`wait_ready/free()` 使用 `proc_wait_poll()` 检查一致性状态。`dayan_sys.h` 以全局寄存器
-变量的形式把 `shared` 直接绑定到 `gp`；它没有内存符号，也不是固件定义的普通全局
-变量，算子代码不得改写它。算子应在 Host
-分配区内定义自己的布局，
-例如把第一个对象放在基址处：
-
-```c
-dayan_shared_resource_t *resource = (dayan_shared_resource_t *)shared;
-```
-
-一个 hart 应在发布对象前调用一次 `dayan_shared_resource_init()`。该函数要求 `gp`
-位于 `0x00400000` 开始的 4 MiB 硬件窗口内，并按 RPC 传入的当前 allocation 精确长度
-检查对象边界和类型对齐。算子仍须让自己的布局与 `atomic_cache_size` 声明一致。不能用
-普通 `malloc()` 为跨核资源分配内存，也不能在算子 `.o` 中静态定义 `.coherent`
-section。
+`dayan_resource_produce_<unit>(output, consumers, inputs)` 在对应执行单元的前序工作完成
+后，原子消费 `inputs` 并把已预留的 `output` 发布为 READY。有限依赖图的最后一批输入
+用 `dayan_resource_consume_<unit>(inputs)` 终止消费，使资源回到 FREE。Resource 操作
+本身不生成调度 token，跨 Hart 的 Shared Resource 提交由硬件在 Cluster 范围内原子化。
+kernel 和子 Thread 分别在 descriptor 与 `dayan_thread_resources_t` 中声明所需的 Local/
+Shared 数量；`shared` 指向的 Host coherent allocation 只存放屏障和算子数据，不再承载
+Resource 控制对象。
 
 `device/lib/` 提供 `mem*`、常用字符串函数、`malloc/calloc/realloc/free`，以及整数、字符串
 和指针格式的 `printf/snprintf`。数学部分先提供不依赖软双精度 runtime 的单精度

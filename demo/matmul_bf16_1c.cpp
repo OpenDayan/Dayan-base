@@ -394,10 +394,8 @@ static inline int wait_for_generation(SharedBuffer *buffer,
                                       uint64_t expected_generation)
 {
     for (;;) {
-        int status;
-
         if (buffer->generation == expected_generation)
-            return dayan_resource_wait_ready(&buffer->resource);
+            return dayan_resource_wait_ready(buffer->resource);
 
         /*
          * A READY buffer with another generation still has slower users.
@@ -405,9 +403,6 @@ static inline int wait_for_generation(SharedBuffer *buffer,
          * generation.  The producer writes generation immediately after
          * allocating the FREE resource, before issuing its DMA.
          */
-        status = dayan_resource_wait_free(&buffer->resource);
-        if (status < 0)
-            return status;
         dayan_yield();
     }
 }
@@ -545,7 +540,8 @@ static void consume_slice(void *argument)
                 }
                 dayan_wait_mat();
 
-                status = dayan_resource_consume(&shared->resource);
+                status = dayan_resource_consume_mat(
+                    DAYAN_RESOURCE_MASK(shared->resource));
                 if (status < 0) {
                     remember_error(state, status);
                     return;
@@ -573,6 +569,7 @@ static void consume_slice(void *argument)
         }
     }
     dayan_wait_lsu();
+    dayan_wait_mat();
 }
 
 template <bool ProducerLoadsA>
@@ -628,19 +625,12 @@ static void producer_thread(void *argument)
                                state->a_stride
                          : (uint64_t)tile_n * Layout::kTileN *
                                state->bt_stride);
-                int status = dayan_resource_wait_free(&shared->resource);
+                int status = dayan_resource_wait_free(shared->resource);
 
                 if (status < 0) {
                     remember_error(state, status);
                     return;
                 }
-                status = dayan_resource_alloc(&shared->resource, 1,
-                                              (uint32_t)users);
-                if (status < 0) {
-                    remember_error(state, status);
-                    return;
-                }
-
                 shared->generation = generation;
                 load_matrix<Constants::kLsuShared>(
                     (uint64_t)real_k * sizeof(uint16_t),
@@ -650,9 +640,8 @@ static void producer_thread(void *argument)
                     Constants::kTileK * sizeof(uint16_t),
                     ProducerLoadsA ? Layout::kTileM : Layout::kTileN,
                     shared->uram, shared_dram);
-                dayan_wait_lsu();
-
-                status = dayan_resource_produce(&shared->resource);
+                status = dayan_resource_produce_lsu(
+                    shared->resource, (uint32_t)users, 0);
                 if (status < 0) {
                     remember_error(state, status);
                     return;
@@ -690,10 +679,7 @@ static int run_pipeline(const MatmulBf16Config *config,
     state.abort = 0;
 
     for (int index = 0; index < 2; ++index) {
-        int status = dayan_resource_init(&state.shared[index].resource);
-
-        if (status < 0)
-            return status;
+        state.shared[index].resource = DAYAN_LOCAL_RESOURCE(index);
         state.shared[index].generation = ~0ULL;
         state.shared[index].uram =
             state.uram_base + Layout::shared_base(index);
@@ -701,6 +687,7 @@ static int run_pipeline(const MatmulBf16Config *config,
 
     dayan_thread_resources_t resources;
     dayan_thread_resources_init(&resources);
+    resources.local_resource_count = 2;
     resources.lsu_tcsr_count = 1;
     int status = dayan_create_thread("producer",
                                      producer_thread<ProducerLoadsA>, &state,
@@ -807,11 +794,10 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
     perf->pipeline_cycles = pipeline_end - pipeline_begin;
 }
 
-DAYAN_KERNEL_LOCKED_TASK_DESC(matmul_bf16_1c,
-                              MATMUL_BF16_1C_SLICES + 1, 0,
-                              MATMUL_BF16_1C_URAM_BYTES,
-                              2 * MATMUL_BF16_1C_SLICES + 1,
-                              MATMUL_BF16_1C_SLICES, 0, 0);
+DAYAN_KERNEL_RESOURCE_DESC_EX(
+    matmul_bf16_1c, 1U, MATMUL_BF16_1C_SLICES + 1,
+    DAYAN_KERNEL_RESOURCE_LOCKED_TASK, 0, MATMUL_BF16_1C_URAM_BYTES,
+    2 * MATMUL_BF16_1C_SLICES + 1, MATMUL_BF16_1C_SLICES, 0, 0, 2, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

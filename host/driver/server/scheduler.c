@@ -23,6 +23,24 @@
 
 static int calculate_shared_size(const struct server_command *command,
                                  uint64_t *size_out);
+static int tcsr_range_reserve(uint64_t *used, uint32_t capacity,
+                              uint32_t count,
+                              struct dayan_tcsr_range *range);
+static void tcsr_range_release(uint64_t *used,
+                               struct dayan_tcsr_range range);
+static void resource_range_release(uint64_t *used,
+                                   struct dayan_resource_range range);
+
+static void release_group_resources(dayan_server_t *server,
+                                    struct server_launch_group *group)
+{
+    if (!group || !group->shared_resources.count)
+        return;
+    resource_range_release(
+        &server->shared_resource_used[group->cluster],
+        group->shared_resources);
+    group->shared_resources.count = 0;
+}
 
 /* Monotonic, so a wall-clock step cannot shorten or extend a deadline. */
 static uint64_t server_now_ms(void)
@@ -106,6 +124,7 @@ static void free_launch_groups(dayan_server_t *server,
     while (group) {
         struct server_launch_group *next = group->next;
 
+        release_group_resources(server, group);
         if (group->shared_allocation)
             (void)npu_hal_memory_free(server->hal,
                                       group->shared_allocation);
@@ -228,6 +247,58 @@ static int tcsr_range_available(uint64_t used, uint32_t capacity,
     return 0;
 }
 
+static int resource_range_available(uint64_t used, uint32_t count)
+{
+    uint32_t base;
+
+    if (!count)
+        return 1;
+    if (count > DAYAN_CONTEXT_RESOURCE_COUNT)
+        return 0;
+    for (base = 0; base <= DAYAN_CONTEXT_RESOURCE_COUNT - count; ++base) {
+        uint64_t mask = ((UINT64_C(1) << count) - 1U) << base;
+
+        if (!(used & mask))
+            return 1;
+    }
+    return 0;
+}
+
+static int resource_range_reserve(uint64_t *used, uint32_t count,
+                                  struct dayan_resource_range *range)
+{
+    uint32_t base;
+
+    range->base = 0;
+    range->count = 0;
+    if (!count)
+        return 0;
+    if (!resource_range_available(*used, count))
+        return -ENOSPC;
+    for (base = 0; base <= DAYAN_CONTEXT_RESOURCE_COUNT - count; ++base) {
+        uint64_t mask = ((UINT64_C(1) << count) - 1U) << base;
+
+        if (*used & mask)
+            continue;
+        *used |= mask;
+        range->base = (uint8_t)base;
+        range->count = (uint8_t)count;
+        return 0;
+    }
+    return -ENOSPC;
+}
+
+static void resource_range_release(uint64_t *used,
+                                   struct dayan_resource_range range)
+{
+    uint64_t mask;
+
+    if (!range.count)
+        return;
+    mask = ((UINT64_C(1) << range.count) - 1U) << range.base;
+    *used &= ~mask;
+}
+
 static int tcsr_range_reserve(uint64_t *used, uint32_t capacity,
                               uint32_t count, struct dayan_tcsr_range *range)
 {
@@ -281,6 +352,17 @@ static int slot_tcsr_accepts(const dayan_server_t *server,
                                 metadata->macro_tcsr_count);
 }
 
+static int slot_resource_accepts(const dayan_server_t *server,
+                                 const struct server_core_slot *slot,
+                                 const npu_package_kernel_t *metadata)
+{
+    return resource_range_available(slot->local_resource_used,
+                                    metadata->local_resource_count) &&
+           resource_range_available(
+               server->shared_resource_used[slot->target.cluster],
+               metadata->shared_resource_count);
+}
+
 static int reserve_tcsr_ranges(dayan_server_t *server,
                                struct server_core_slot *slot,
                                const npu_package_kernel_t *metadata,
@@ -307,11 +389,17 @@ static int reserve_tcsr_ranges(dayan_server_t *server,
                                     server->options.macro_tcsr_count_per_hart,
                                     metadata->macro_tcsr_count,
                                     &resources->macro);
+    if (status == 0)
+        status = resource_range_reserve(&slot->local_resource_used,
+                                        metadata->local_resource_count,
+                                        &resources->local);
     if (status < 0) {
         tcsr_range_release(&slot->lsu_tcsr_used, resources->lsu);
         tcsr_range_release(&slot->mat_tcsr_used, resources->mat);
         tcsr_range_release(&slot->vec_tcsr_used, resources->vec);
         tcsr_range_release(&slot->macro_tcsr_used, resources->macro);
+        resource_range_release(&slot->local_resource_used,
+                               resources->local);
         memset(resources, 0, sizeof(*resources));
     }
     return status;
@@ -326,6 +414,7 @@ static void release_tcsr_ranges(struct server_core_slot *slot,
     tcsr_range_release(&slot->mat_tcsr_used, resources->mat);
     tcsr_range_release(&slot->vec_tcsr_used, resources->vec);
     tcsr_range_release(&slot->macro_tcsr_used, resources->macro);
+    resource_range_release(&slot->local_resource_used, resources->local);
 }
 
 static int slot_accepts(const dayan_server_t *server,
@@ -362,7 +451,8 @@ static int slot_accepts(const dayan_server_t *server,
     if (slot->uram_memory > slot->uram_capacity ||
         metadata->uram_size > slot->uram_capacity - slot->uram_memory)
         return 0;
-    if (!slot_tcsr_accepts(server, slot, metadata))
+    if (!slot_tcsr_accepts(server, slot, metadata) ||
+        !slot_resource_accepts(server, slot, metadata))
         return 0;
     for (index = 0; index < command->data.launch.argument_count; ++index) {
         const struct server_buffer *buffer =
@@ -444,9 +534,15 @@ static int reserve_slots_locked(dayan_server_t *server,
     const npu_package_kernel_t *metadata =
         command->data.launch.kernel->metadata;
     size_t index;
+    struct dayan_resource_range shared_range = { 0, 0 };
+    uint32_t cluster = server->slots[slots[0]].target.cluster;
 
     if (calculate_shared_size(command, &atomic_cache) < 0)
         return -EOVERFLOW;
+    if (resource_range_reserve(&server->shared_resource_used[cluster],
+                               metadata->shared_resource_count,
+                               &shared_range) < 0)
+        return -ENOSPC;
     for (index = 0; index < count; ++index) {
         int status = reserve_tcsr_ranges(
             server, &server->slots[slots[index]], metadata,
@@ -458,8 +554,11 @@ static int reserve_slots_locked(dayan_server_t *server,
                 release_tcsr_ranges(&server->slots[slots[index]],
                                     &resources[index]);
             }
+            resource_range_release(&server->shared_resource_used[cluster],
+                                   shared_range);
             return status;
         }
+        resources[index].shared = shared_range;
     }
     for (index = 0; index < count; ++index) {
         if (launch_locks_task(metadata))
@@ -562,7 +661,8 @@ static int empty_slot_accepts(const dayan_server_t *server,
         atomic_cache > slot->atomic_cache_capacity ||
         metadata->uram_size > slot->uram_capacity)
         return 0;
-    if (!slot_tcsr_accepts(server, slot, metadata))
+    if (!slot_tcsr_accepts(server, slot, metadata) ||
+        !slot_resource_accepts(server, slot, metadata))
         return 0;
     for (index = 0; index < command->data.launch.argument_count; ++index) {
         const struct server_buffer *buffer =
@@ -801,7 +901,17 @@ static int build_tensor_context(dayan_server_t *server,
     fields.vec = resources->vec;
     fields.macro = resources->macro;
     resources->tensor_context = dayan_context_pack(&fields);
-    return resources->tensor_context == UINT64_MAX ? -EINVAL : 0;
+    if (resources->tensor_context == UINT64_MAX)
+        return -EINVAL;
+    {
+        struct dayan_resource_context_fields resource_fields;
+
+        resource_fields.local = resources->local;
+        resource_fields.shared = resources->shared;
+        resources->resource_context =
+            dayan_resource_context_pack(&resource_fields);
+    }
+    return resources->resource_context == UINT32_MAX ? -EINVAL : 0;
 }
 
 static void unit_task_ids(const struct server_command *command, uint64_t unit,
@@ -889,6 +999,8 @@ static struct dispatch_result dispatch_group(
         return result;
     }
     result.group = group;
+    group->cluster = server->slots[slots[0]].target.cluster;
+    group->shared_resources = resources[0].shared;
     result.status = initialize_shared(server, command, slots, count,
                                       &group->shared_allocation,
                                       &shared_size);
@@ -949,6 +1061,7 @@ static struct dispatch_result dispatch_group(
         desc.uram_size = metadata->uram_size;
         desc.max_child_threads = metadata->max_child_threads;
         desc.tensor_context = invocation->resources.tensor_context;
+        desc.resource_context = invocation->resources.resource_context;
         desc.name = command->data.launch.task_name;
         desc.task_dim[0] = command->data.launch.config.task_dim.x;
         desc.task_dim[1] = command->data.launch.config.task_dim.y;
@@ -1257,6 +1370,13 @@ static void merge_dispatch_result_locked(
         command->data.launch.groups = result.group;
         server_route_pending_outputs_locked(server);
     } else {
+        if (result.group)
+            release_group_resources(server, result.group);
+        else if (count)
+            resource_range_release(
+                &server->shared_resource_used[
+                    server->slots[selected[0]].target.cluster],
+                resources[0].shared);
         if (result.group && result.group->shared_allocation)
             (void)npu_hal_memory_free(server->hal,
                                       result.group->shared_allocation);
@@ -1319,6 +1439,7 @@ static void remove_group_locked(dayan_server_t *server,
         link = &(*link)->next;
     if (*link)
         *link = group->next;
+    release_group_resources(server, group);
     if (group->shared_allocation)
         (void)npu_hal_memory_free(server->hal,
                                   group->shared_allocation);

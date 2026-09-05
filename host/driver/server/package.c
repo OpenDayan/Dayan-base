@@ -154,6 +154,8 @@ int npu_package_view_init(struct npu_package_view *view,
             kernel->mat_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
             kernel->vec_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
             kernel->macro_tcsr_count > NPU_PACKAGE_TCSR_MAX_COUNT ||
+            kernel->local_resource_count > NPU_PACKAGE_RESOURCE_MAX_COUNT ||
+            kernel->shared_resource_count > NPU_PACKAGE_RESOURCE_MAX_COUNT ||
             (kernel->stack_size &&
              kernel->stack_size < NPU_PACKAGE_PROC_MIN_STACK_SIZE) ||
             kernel->stack_size > NPU_PACKAGE_PROC_STACK_SIZE ||

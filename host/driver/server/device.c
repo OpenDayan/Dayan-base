@@ -70,6 +70,15 @@ _Static_assert(sizeof(npu_service_proc_info_t) ==
 
 static void *npu_launch_agent(void *arg);
 
+static int resource_context_valid(uint32_t value)
+{
+    struct dayan_resource_context_fields fields =
+        dayan_resource_context_unpack(value);
+
+    return !(value >> 22) &&
+           dayan_resource_context_fields_valid(&fields);
+}
+
 uint64_t npu_now_ms(void)
 {
     struct timespec now;
@@ -1329,7 +1338,8 @@ int npu_service_launch(npu_service_device_t *device,
         desc->stack_size > RPC_PROC_MAX_STACK_SIZE ||
         desc->printf_buffer_size > RPC_PROC_MAX_PRINTF_SIZE ||
         desc->max_child_threads > RPC_PROC_MAX_CHILD_THREADS ||
-        desc->resource_reserved || !tensor_context_valid(desc->tensor_context) ||
+        !resource_context_valid(desc->resource_context) ||
+        !tensor_context_valid(desc->tensor_context) ||
         !proc_name_valid(desc->name) ||
         !task_valid(desc) ||
         !entry_address_valid(device, desc->target, desc->entry))
@@ -1371,6 +1381,7 @@ int npu_service_launch(npu_service_device_t *device,
     request.max_child_threads = desc->max_child_threads;
     request.uram_base = uram_base;
     request.uram_size = desc->uram_size;
+    request.resource_context = desc->resource_context;
     request.tensor_context = desc->tensor_context;
     request.printf_buffer_size = desc->printf_buffer_size;
     request.argc = desc->argc;

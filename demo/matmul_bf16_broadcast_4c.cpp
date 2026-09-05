@@ -62,15 +62,16 @@
  * sourced from DRAM by cores 01/10 and shared vertically.  Every Core runs
  * one DRAM Loader, one remote Copy worker, and two ordered MAT/Store workers.
  * The DRAM and Copy streams advance monotonically; no worker claims work from
- * a shared iterator.  Cross-Core readiness is expressed only with shared
- * resources in Atomic Cache, while all same-Core dependencies use local
- * resources.  The two MAT workers statically alternate linear jobs and pass
+ * a shared iterator.  Cross-Core readiness is expressed only with hardware
+ * Shared Named Resources, while all same-Core dependencies use Local Named
+ * Resources.  The two MAT workers statically alternate linear jobs and pass
  * a resource token after ordered issue, so MAT instructions cannot overtake.
  *
  * MATMUL_BF16_4C_D2A_MODEL treats the source D2U as a future D2A while
  * retaining the Copy worker as a shared-to-local resource adapter.
  * MATMUL_BF16_4C_BROADCAST_MODEL removes that adapter: remote MAT workers
- * wait on and consume the source Loader's shared resource directly.  Both
+ * wait on and consume the source Loader's Shared Named Resource directly.
+ * Both
  * models assume that the source D2U also fills remote URAM, so Host numerical
  * validation is intentionally disabled.
  */
@@ -118,7 +119,6 @@ struct Constants {
         kClusterColumns = 2,
         kClusterCores = 4,
         kABufferCount = 1,
-        kCoherentCacheLine = 64,
         kUramAlignment = 32,
         kUramWindowBase = 0x00800000,
         kUramWindowStride = 2 * 1024 * 1024,
@@ -260,18 +260,6 @@ static_assert(Layout::total_bytes() == 1441792U,
 static_assert(Layout::total_bytes() <= MATMUL_BF16_4C_URAM_BYTES,
               "output-stationary matmul URAM layout is too large");
 
-struct alignas(Constants::kCoherentCacheLine) SharedABuffer {
-    dayan_shared_resource_t resource;
-};
-
-struct alignas(Constants::kCoherentCacheLine) SharedBBuffer {
-    dayan_shared_resource_t resource;
-};
-
-static_assert(sizeof(SharedABuffer) == Constants::kCoherentCacheLine &&
-                  sizeof(SharedBBuffer) == Constants::kCoherentCacheLine,
-              "each shared resource must occupy one coherent cache line");
-
 struct ClusterShared {
     dayan_cluster_barrier_t barrier;
 #if MATMUL_BF16_4C_D2A_MODEL
@@ -286,9 +274,6 @@ struct ClusterShared {
     uint64_t pipeline_begin[Constants::kClusterCores];
     uint64_t pipeline_end[Constants::kClusterCores];
 #endif
-    SharedABuffer a[Constants::kClusterRows][MATMUL_BF16_4C_SLICES]
-                   [Constants::kABufferCount];
-    SharedBBuffer b[Constants::kClusterColumns][2];
 };
 
 static_assert(sizeof(ClusterShared) <= MATMUL_BF16_4C_ATOMIC_BYTES,
@@ -325,9 +310,6 @@ struct MatmulState {
     ClusterShared *cluster;
     LocalBuffer a[MATMUL_BF16_4C_SLICES][Constants::kABufferCount];
     LocalBuffer b[2];
-#if !MATMUL_BF16_4C_D2A_MODEL
-    dayan_resource_t load_issued[2];
-#endif
     dayan_resource_t mat_turn[2];
     uint64_t generation_count;
     MatConfig mat_config[MATMUL_BF16_4C_SLICES];
@@ -345,6 +327,23 @@ struct MatWorkerArgs {
     MatmulState *state;
     uint32_t worker;
 };
+
+static inline dayan_resource_t shared_a_resource(uint32_t row, int slice,
+                                                 int buffer)
+{
+    return DAYAN_SHARED_RESOURCE(
+        (row * MATMUL_BF16_4C_SLICES + (uint32_t)slice) *
+            Constants::kABufferCount +
+        (uint32_t)buffer);
+}
+
+static inline dayan_resource_t shared_b_resource(uint32_t column, int buffer)
+{
+    return DAYAN_SHARED_RESOURCE(
+        Constants::kClusterRows * MATMUL_BF16_4C_SLICES *
+            Constants::kABufferCount +
+        column * 2U + (uint32_t)buffer);
+}
 
 static inline uint32_t a_source_lane(uint32_t row_lane)
 {
@@ -468,85 +467,42 @@ static inline void configure_loader_rows(int rows, int *configured_rows)
     *configured_rows = rows;
 }
 
-static inline void begin_local_resource(dayan_resource_t *resource,
-                                        uint32_t consumers)
+static inline void begin_local_resource(dayan_resource_t resource)
 {
     require_status(dayan_resource_wait_free(resource));
-    require_status(dayan_resource_alloc(resource, 1U, consumers));
 }
 
-static inline void begin_shared_resource(dayan_shared_resource_t *resource,
-                                         uint32_t consumers)
+static inline void begin_shared_resource(dayan_resource_t resource)
 {
-    require_status(dayan_shared_resource_wait_free(resource));
-    require_status(dayan_shared_resource_alloc(resource, 1U, consumers));
+    require_status(dayan_resource_wait_free(resource));
 }
-
-#if !MATMUL_BF16_4C_D2A_MODEL
-static inline void prepare_load_issue(MatmulState *state,
-                                      uint64_t generation)
-{
-    dayan_resource_t *issue = &state->load_issued[generation & 1U];
-
-    require_status(dayan_resource_wait_free(issue));
-    require_status(dayan_resource_alloc(issue, 1U, 1U));
-}
-
-static inline void publish_load_issue(MatmulState *state,
-                                      uint64_t generation)
-{
-    require_status(dayan_resource_produce(
-        &state->load_issued[generation & 1U]));
-}
-
-static inline void wait_load_issue(MatmulState *state,
-                                   uint64_t generation)
-{
-    dayan_resource_t *issue = &state->load_issued[generation & 1U];
-
-    require_status(dayan_resource_wait_ready(issue));
-    require_status(dayan_resource_consume(issue));
-}
-#endif
 
 template <long LoadGroup>
 static void dram_load_a(MatmulState *state, uint64_t generation,
                         int tile_m, int tile_n, int tile_k,
                         int *configured_rows)
 {
-#if MATMUL_BF16_4C_D2A_MODEL
     (void)generation;
-#endif
     const int columns = cols_for_tile(
         state, tile_n, state->column_lane);
     const int peer_columns = cols_for_tile(
         state, tile_n, state->column_lane ^ 1U);
-#if !MATMUL_BF16_4C_D2A_MODEL
-    const bool signal_copy = generation_has_local_work(
-        state, tile_m, tile_n);
-#endif
     constexpr int a_buffer_index = 0;
-#if !MATMUL_BF16_4C_D2A_MODEL
-    bool issued = false;
-
-    if (signal_copy)
-        prepare_load_issue(state, generation);
-#endif
     for (int slice = 0; slice < MATMUL_BF16_4C_SLICES; ++slice) {
         const int real_rows = rows_for_slice(
             state, tile_m, state->row_lane, slice);
         const bool local_active = real_rows > 0 && columns > 0;
         const bool peer_active = real_rows > 0 && peer_columns > 0;
         LocalBuffer *local = &state->a[slice][a_buffer_index];
-        SharedABuffer *shared =
-            &state->cluster->a[state->row_lane][slice][a_buffer_index];
+        const dayan_resource_t shared_resource = shared_a_resource(
+            state->row_lane, slice, a_buffer_index);
 
         if (!local_active && !peer_active)
             continue;
         if (local_active)
-            begin_local_resource(&local->resource, 1U);
+            begin_local_resource(local->resource);
         if (peer_active)
-            begin_shared_resource(&shared->resource, 1U);
+            begin_shared_resource(shared_resource);
         configure_loader_rows<LoadGroup>(real_rows, configured_rows);
 
         const uint64_t global_row =
@@ -558,23 +514,14 @@ static void dram_load_a(MatmulState *state, uint64_t generation,
             (uint64_t)tile_k * Constants::kTileK * sizeof(uint16_t);
 
         __tx_lsu_dma_d2u<LoadGroup>((long)local->uram, (long)a_dram);
-#if !MATMUL_BF16_4C_D2A_MODEL
-        if (!issued && signal_copy) {
-            publish_load_issue(state, generation);
-            issued = true;
-        }
-#endif
         dayan_wait_lsu();
         if (peer_active)
-            require_status(dayan_shared_resource_produce(
-                &shared->resource));
+            require_status(dayan_resource_produce_lsu(
+                shared_resource, 1U, 0));
         if (local_active)
-            require_status(dayan_resource_produce(&local->resource));
+            require_status(dayan_resource_produce_lsu(
+                local->resource, 1U, 0));
     }
-#if !MATMUL_BF16_4C_D2A_MODEL
-    if (signal_copy && !issued)
-        dayan_thread_exit(-22);
-#endif
 }
 
 template <long LoadGroup>
@@ -588,26 +535,17 @@ static void dram_load_b(MatmulState *state, uint64_t generation,
         state, tile_m, state->row_lane);
     const int peer_users = active_slices(
         state, tile_m, state->row_lane ^ 1U);
-#if !MATMUL_BF16_4C_D2A_MODEL
-    const bool signal_copy = real_columns > 0 && local_users > 0;
-#endif
     const int buffer_index = (int)(generation & 1U);
     LocalBuffer *local = &state->b[buffer_index];
-    SharedBBuffer *shared =
-        &state->cluster->b[state->column_lane][buffer_index];
+    const dayan_resource_t shared_resource = shared_b_resource(
+        state->column_lane, buffer_index);
 
     if (!real_columns || (!local_users && !peer_users))
         return;
     if (local_users)
-        begin_local_resource(&local->resource, (uint32_t)local_users);
+        begin_local_resource(local->resource);
     if (peer_users)
-        begin_shared_resource(
-            &shared->resource,
-            MATMUL_BF16_4C_BROADCAST_MODEL ? (uint32_t)peer_users : 1U);
-#if !MATMUL_BF16_4C_D2A_MODEL
-    if (signal_copy)
-        prepare_load_issue(state, generation);
-#endif
+        begin_shared_resource(shared_resource);
     configure_loader_rows<LoadGroup>(real_columns, configured_rows);
 
     const uint64_t global_column =
@@ -618,15 +556,15 @@ static void dram_load_b(MatmulState *state, uint64_t generation,
         (uint64_t)tile_k * Constants::kTileK * sizeof(uint16_t);
 
     __tx_lsu_dma_d2u<LoadGroup>((long)local->uram, (long)bt_dram);
-#if !MATMUL_BF16_4C_D2A_MODEL
-    if (signal_copy)
-        publish_load_issue(state, generation);
-#endif
     dayan_wait_lsu();
     if (peer_users)
-        require_status(dayan_shared_resource_produce(&shared->resource));
+        require_status(dayan_resource_produce_lsu(
+            shared_resource,
+            MATMUL_BF16_4C_BROADCAST_MODEL ? (uint32_t)peer_users : 1U,
+            0));
     if (local_users)
-        require_status(dayan_resource_produce(&local->resource));
+        require_status(dayan_resource_produce_lsu(
+            local->resource, (uint32_t)local_users, 0));
 }
 
 static void dram_loader(void *argument)
@@ -654,6 +592,7 @@ static void dram_loader(void *argument)
                 &configured_rows);
         }
     }
+    dayan_wait_lsu();
 }
 
 #if !MATMUL_BF16_4C_BROADCAST_MODEL
@@ -676,12 +615,12 @@ static void copy_a(MatmulState *state, uint64_t generation,
         if (!real_rows || !columns)
             continue;
         LocalBuffer *local = &state->a[slice][a_buffer_index];
-        SharedABuffer *shared =
-            &state->cluster->a[state->row_lane][slice][a_buffer_index];
+        const dayan_resource_t shared_resource = shared_a_resource(
+            state->row_lane, slice, a_buffer_index);
 
-        begin_local_resource(&local->resource, 1U);
-        require_status(dayan_shared_resource_wait_ready(
-            &shared->resource));
+        require_status(dayan_resource_wait(
+            DAYAN_RESOURCE_MASK(local->resource),
+            DAYAN_RESOURCE_MASK(shared_resource), 0));
 #if !MATMUL_BF16_4C_D2A_MODEL
         configure_loader_rows<LoadGroup>(real_rows, configured_rows);
         const uint64_t source_uram =
@@ -690,12 +629,12 @@ static void copy_a(MatmulState *state, uint64_t generation,
 
         __tx_lsu_dma_d2u<LoadGroup>((long)local->uram,
                                     (long)source_uram);
-        dayan_wait_lsu();
 #else
         (void)configured_rows;
 #endif
-        require_status(dayan_shared_resource_consume(&shared->resource));
-        require_status(dayan_resource_produce(&local->resource));
+        require_status(dayan_resource_produce_lsu(
+            local->resource, 1U,
+            DAYAN_RESOURCE_MASK(shared_resource)));
     }
 }
 
@@ -715,11 +654,12 @@ static void copy_b(MatmulState *state, uint64_t generation,
     if (!real_columns || !local_users)
         return;
     LocalBuffer *local = &state->b[buffer_index];
-    SharedBBuffer *shared =
-        &state->cluster->b[state->column_lane][buffer_index];
+    const dayan_resource_t shared_resource = shared_b_resource(
+        state->column_lane, buffer_index);
 
-    begin_local_resource(&local->resource, (uint32_t)local_users);
-    require_status(dayan_shared_resource_wait_ready(&shared->resource));
+    require_status(dayan_resource_wait(
+        DAYAN_RESOURCE_MASK(local->resource),
+        DAYAN_RESOURCE_MASK(shared_resource), 0));
 #if !MATMUL_BF16_4C_D2A_MODEL
     configure_loader_rows<LoadGroup>(real_columns, configured_rows);
     const uint64_t source_uram =
@@ -727,12 +667,12 @@ static void copy_b(MatmulState *state, uint64_t generation,
         Layout::b_base(buffer_index);
 
     __tx_lsu_dma_d2u<LoadGroup>((long)local->uram, (long)source_uram);
-    dayan_wait_lsu();
 #else
     (void)configured_rows;
 #endif
-    require_status(dayan_shared_resource_consume(&shared->resource));
-    require_status(dayan_resource_produce(&local->resource));
+    require_status(dayan_resource_produce_lsu(
+        local->resource, (uint32_t)local_users,
+        DAYAN_RESOURCE_MASK(shared_resource)));
 }
 
 static void remote_copy(void *argument)
@@ -757,9 +697,6 @@ static void remote_copy(void *argument)
         (void)tile_k;
         if (!generation_has_local_work(state, tile_m, tile_n))
             continue;
-#if !MATMUL_BF16_4C_D2A_MODEL
-        wait_load_issue(state, generation);
-#endif
         if (copies_a) {
             copy_a<Constants::kRemoteCopy>(
                 state, generation, tile_m, tile_n, &configured_rows);
@@ -768,6 +705,7 @@ static void remote_copy(void *argument)
                 state, generation, tile_m, tile_n, &configured_rows);
         }
     }
+    dayan_wait_lsu();
 }
 #endif
 
@@ -811,7 +749,8 @@ static inline void configure_mat_slice(MatmulState *state)
     state->mat_config[Slice].store_columns = Constants::kTileN;
 }
 
-static inline void pass_mat_turn(MatmulState *state, uint32_t worker);
+static inline void pass_mat_turn(MatmulState *state, uint32_t worker,
+                                 dayan_resource_mask_t consume_ready);
 
 template <long GroupBase, int Slice>
 static void execute_mat_job(MatmulState *state, const MatJob *job,
@@ -849,26 +788,23 @@ static void execute_mat_job(MatmulState *state, const MatJob *job,
      * stream remains strictly ordered, while each worker waits for its own
      * completion token and at most two commands can be outstanding.
      */
-    pass_mat_turn(state, worker);
-    dayan_wait_mat();
-
+    dayan_resource_mask_t consume_ready =
+        DAYAN_RESOURCE_MASK(state->mat_turn[worker]);
 #if MATMUL_BF16_4C_BROADCAST_MODEL
-    if (state->lane == a_source_lane(state->row_lane))
-        require_status(dayan_resource_consume(&a->resource));
-    else
-        require_status(dayan_shared_resource_consume(
-            &state->cluster->a[state->row_lane][Slice]
-                              [a_buffer_index].resource));
-    if (state->lane == b_source_lane(state->column_lane))
-        require_status(dayan_resource_consume(&b->resource));
-    else
-        require_status(dayan_shared_resource_consume(
-            &state->cluster->b[state->column_lane]
-                              [b_buffer_index].resource));
+    consume_ready |= state->lane == a_source_lane(state->row_lane)
+        ? DAYAN_RESOURCE_MASK(a->resource)
+        : DAYAN_RESOURCE_MASK(shared_a_resource(
+              state->row_lane, Slice, a_buffer_index));
+    consume_ready |= state->lane == b_source_lane(state->column_lane)
+        ? DAYAN_RESOURCE_MASK(b->resource)
+        : DAYAN_RESOURCE_MASK(shared_b_resource(
+              state->column_lane, b_buffer_index));
 #else
-    require_status(dayan_resource_consume(&a->resource));
-    require_status(dayan_resource_consume(&b->resource));
+    consume_ready |= DAYAN_RESOURCE_MASK(a->resource) |
+                     DAYAN_RESOURCE_MASK(b->resource);
 #endif
+    pass_mat_turn(state, worker, consume_ready);
+    dayan_wait_mat();
 
     if (job->tile_k + 1 == state->count_k) {
         if (real_rows != config->store_rows) {
@@ -920,41 +856,38 @@ static inline bool prepare_mat_job(MatmulState *state, uint64_t sequence,
 #if MATMUL_BF16_4C_BROADCAST_MODEL
     if (state->lane == a_source_lane(state->row_lane))
         require_status(dayan_resource_wait_ready(
-            &state->a[job->slice][a_buffer_index].resource));
+            state->a[job->slice][a_buffer_index].resource));
     else
-        require_status(dayan_shared_resource_wait_ready(
-            &state->cluster->a[state->row_lane][job->slice]
-                              [a_buffer_index].resource));
+        require_status(dayan_resource_wait_ready(
+            shared_a_resource(state->row_lane, job->slice,
+                              a_buffer_index)));
     if (state->lane == b_source_lane(state->column_lane))
         require_status(dayan_resource_wait_ready(
-            &state->b[b_buffer_index].resource));
+            state->b[b_buffer_index].resource));
     else
-        require_status(dayan_shared_resource_wait_ready(
-            &state->cluster->b[state->column_lane]
-                              [b_buffer_index].resource));
+        require_status(dayan_resource_wait_ready(
+            shared_b_resource(state->column_lane, b_buffer_index)));
 #else
     require_status(dayan_resource_wait_ready(
-        &state->a[job->slice][a_buffer_index].resource));
+        state->a[job->slice][a_buffer_index].resource));
     require_status(dayan_resource_wait_ready(
-        &state->b[b_buffer_index].resource));
+        state->b[b_buffer_index].resource));
 #endif
     return true;
 }
 
 static inline void wait_mat_turn(MatmulState *state, uint32_t worker)
 {
-    dayan_resource_t *turn = &state->mat_turn[worker];
-
-    require_status(dayan_resource_wait_ready(turn));
-    require_status(dayan_resource_consume(turn));
+    require_status(dayan_resource_wait(
+        DAYAN_RESOURCE_MASK(state->mat_turn[worker ^ 1U]),
+        DAYAN_RESOURCE_MASK(state->mat_turn[worker]), 0));
 }
 
-static inline void pass_mat_turn(MatmulState *state, uint32_t worker)
+static inline void pass_mat_turn(MatmulState *state, uint32_t worker,
+                                 dayan_resource_mask_t consume_ready)
 {
-    dayan_resource_t *turn = &state->mat_turn[worker ^ 1U];
-
-    require_status(dayan_resource_wait_free(turn));
-    require_status(dayan_resource_alloc(turn, 0U, 1U));
+    require_status(dayan_resource_produce_mat(
+        state->mat_turn[worker ^ 1U], 1U, consume_ready));
 }
 
 static void mat_worker(void *argument)
@@ -997,7 +930,9 @@ static void mat_worker(void *argument)
                 dayan_thread_exit(-22);
             }
         } else {
-            pass_mat_turn(state, worker);
+            pass_mat_turn(
+                state, worker,
+                DAYAN_RESOURCE_MASK(state->mat_turn[worker]));
         }
     }
 }
@@ -1030,35 +965,6 @@ static int initialize_cluster_shared(ClusterShared *cluster, uint32_t lane,
     if (lane == 0U) {
         cluster->init_status = 0;
         cluster->reserved = 0;
-        for (int row = 0; row < Constants::kClusterRows; ++row) {
-            for (int slice = 0; slice < MATMUL_BF16_4C_SLICES;
-                 ++slice) {
-                for (int index = 0; index < Constants::kABufferCount;
-                     ++index) {
-                    SharedABuffer *buffer =
-                        &cluster->a[row][slice][index];
-
-                    status = dayan_shared_resource_init(&buffer->resource);
-                    if (status < 0)
-                        break;
-                }
-                if (status < 0)
-                    break;
-            }
-            if (status < 0)
-                break;
-        }
-        for (int column = 0;
-             status == 0 && column < Constants::kClusterColumns;
-             ++column) {
-            for (int index = 0; index < 2; ++index) {
-                SharedBBuffer *buffer = &cluster->b[column][index];
-
-                status = dayan_shared_resource_init(&buffer->resource);
-                if (status < 0)
-                    break;
-            }
-        }
         cluster->init_status = status;
     }
     cluster->uram_base[lane] = uram;
@@ -1154,28 +1060,23 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
              ++index) {
             LocalBuffer *buffer = &state.a[slice][index];
 
-            status = dayan_resource_init(&buffer->resource);
-            if (status < 0)
-                dayan_thread_exit(status);
+            buffer->resource = DAYAN_LOCAL_RESOURCE(
+                slice * Constants::kABufferCount + index);
             buffer->uram =
                 state.uram_base + Layout::a_base(slice, index);
         }
     }
     for (int index = 0; index < 2; ++index) {
-        status = dayan_resource_init(&state.b[index].resource);
-        if (status < 0)
-            dayan_thread_exit(status);
+        state.b[index].resource = DAYAN_LOCAL_RESOURCE(
+            MATMUL_BF16_4C_SLICES * Constants::kABufferCount + index);
         state.b[index].uram = state.uram_base + Layout::b_base(index);
-#if !MATMUL_BF16_4C_D2A_MODEL
-        status = dayan_resource_init(&state.load_issued[index]);
-        if (status < 0)
-            dayan_thread_exit(status);
-#endif
-        status = dayan_resource_init(&state.mat_turn[index]);
-        if (status < 0)
-            dayan_thread_exit(status);
+        state.mat_turn[index] = DAYAN_LOCAL_RESOURCE(
+            MATMUL_BF16_4C_SLICES * Constants::kABufferCount + 2 +
+            index);
     }
-    status = dayan_resource_alloc(&state.mat_turn[0], 0U, 1U);
+    status = dayan_resource_wait_free(state.mat_turn[0]);
+    if (status >= 0)
+        status = dayan_resource_produce_mat(state.mat_turn[0], 1U, 0);
     if (status < 0)
         dayan_thread_exit(status);
 
@@ -1189,6 +1090,12 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
 #endif
     dayan_thread_resources_t resources;
     dayan_thread_resources_init(&resources);
+    resources.local_resource_count =
+        MATMUL_BF16_4C_SLICES * Constants::kABufferCount + 4;
+    resources.shared_resource_count =
+        Constants::kClusterRows * MATMUL_BF16_4C_SLICES *
+            Constants::kABufferCount +
+        Constants::kClusterColumns * 2;
     resources.lsu_tcsr_count = 1;
     status = dayan_create_thread("dram-load", dram_loader, &state,
                                  &resources);
@@ -1210,6 +1117,13 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     status = dayan_thread_join_all();
     if (status < 0)
         dayan_thread_exit(status);
+    status = dayan_resource_wait_ready(state.mat_turn[0]);
+    if (status >= 0)
+        status = dayan_resource_consume_lsu(
+            DAYAN_RESOURCE_MASK(state.mat_turn[0]));
+    if (status < 0)
+        dayan_thread_exit(status);
+    dayan_wait_lsu();
 
 #if MATMUL_BF16_4C_D2A_MODEL
     const uint64_t pipeline_end = read_cycle();
@@ -1250,17 +1164,41 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
 }
 
 #if MATMUL_BF16_4C_BROADCAST_MODEL
-DAYAN_KERNEL_DESC(matmul_bf16_broadcast_4c, MATMUL_BF16_4C_WORKERS,
-                  MATMUL_BF16_4C_ATOMIC_BYTES,
-                  MATMUL_BF16_4C_URAM_BYTES, 4, 2, 0, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    matmul_bf16_broadcast_4c, MATMUL_BF16_4C_WORKERS,
+    MATMUL_BF16_4C_ATOMIC_BYTES, MATMUL_BF16_4C_URAM_BYTES,
+    4, 2, 0, 0,
+    MATMUL_BF16_4C_SLICES *
+            matmul_bf16_4c_detail::Constants::kABufferCount +
+        4,
+    matmul_bf16_4c_detail::Constants::kClusterRows *
+            MATMUL_BF16_4C_SLICES *
+            matmul_bf16_4c_detail::Constants::kABufferCount +
+        matmul_bf16_4c_detail::Constants::kClusterColumns * 2);
 #elif MATMUL_BF16_4C_D2A_MODEL
-DAYAN_KERNEL_DESC(matmul_bf16_4c_d2a_model, MATMUL_BF16_4C_WORKERS,
-                  MATMUL_BF16_4C_ATOMIC_BYTES,
-                  MATMUL_BF16_4C_URAM_BYTES, 4, 2, 0, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    matmul_bf16_4c_d2a_model, MATMUL_BF16_4C_WORKERS,
+    MATMUL_BF16_4C_ATOMIC_BYTES, MATMUL_BF16_4C_URAM_BYTES,
+    4, 2, 0, 0,
+    MATMUL_BF16_4C_SLICES *
+            matmul_bf16_4c_detail::Constants::kABufferCount +
+        4,
+    matmul_bf16_4c_detail::Constants::kClusterRows *
+            MATMUL_BF16_4C_SLICES *
+            matmul_bf16_4c_detail::Constants::kABufferCount +
+        matmul_bf16_4c_detail::Constants::kClusterColumns * 2);
 #else
-DAYAN_KERNEL_DESC(matmul_bf16_4c, MATMUL_BF16_4C_WORKERS,
-                  MATMUL_BF16_4C_ATOMIC_BYTES,
-                  MATMUL_BF16_4C_URAM_BYTES, 4, 2, 0, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    matmul_bf16_4c, MATMUL_BF16_4C_WORKERS,
+    MATMUL_BF16_4C_ATOMIC_BYTES, MATMUL_BF16_4C_URAM_BYTES,
+    4, 2, 0, 0,
+    MATMUL_BF16_4C_SLICES *
+            matmul_bf16_4c_detail::Constants::kABufferCount +
+        4,
+    matmul_bf16_4c_detail::Constants::kClusterRows *
+            MATMUL_BF16_4C_SLICES *
+            matmul_bf16_4c_detail::Constants::kABufferCount +
+        matmul_bf16_4c_detail::Constants::kClusterColumns * 2);
 #endif
 
 #if !defined(__DAYAN_DEVICE__)
@@ -1284,7 +1222,7 @@ __host__ static void usage(const char *program)
 #if MATMUL_BF16_4C_D2A_MODEL
 #if MATMUL_BF16_4C_BROADCAST_MODEL
     std::printf("  Broadcast timing model: one source D2U fills local+remote "
-                "URAM; remote MAT waits on the shared resource directly; "
+                "URAM; remote MAT waits on Shared Named Resource directly; "
                 "output is not validated.\n");
 #else
     std::printf("  D2A timing model: one source D2U represents local+remote "

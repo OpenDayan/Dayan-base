@@ -56,6 +56,7 @@ struct server_core_slot {
     uint64_t mat_tcsr_used;
     uint64_t vec_tcsr_used;
     uint64_t macro_tcsr_used;
+    uint64_t local_resource_used;
 };
 
 struct server_proc_resources {
@@ -63,7 +64,10 @@ struct server_proc_resources {
     struct dayan_tcsr_range mat;
     struct dayan_tcsr_range vec;
     struct dayan_tcsr_range macro;
+    struct dayan_resource_range local;
+    struct dayan_resource_range shared;
     uint64_t tensor_context;
+    uint32_t resource_context;
 };
 
 struct server_package_cache {
@@ -185,6 +189,8 @@ struct server_profile_chunk {
 
 struct server_launch_group {
     npu_hal_allocation_t *shared_allocation;
+    struct dayan_resource_range shared_resources;
+    uint32_t cluster;
     uint32_t active;
     struct server_launch_group *next;
 };
@@ -293,6 +299,7 @@ struct dayan_server {
      */
     uint64_t next_cookie;
     struct server_core_slot *slots;
+    uint64_t *shared_resource_used;
     size_t slot_count;
     struct server_session *sessions;
     struct server_package_cache *packages;

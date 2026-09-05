@@ -43,29 +43,30 @@ bootstrap 入口为 \code{proc_bootstrap + (8 - argc) * 4}，只执行所需的�
 上下文切换帧为 128 bytes，依次保存 \code{ra}、\code{s0--s11}、\code{gp}、
 \code{fcsr} 和 reserved word。
 
-\code{struct thread} 的固定前缀为 40 bytes：ID/state 位于 offset 0/4，CPU 指针位于
-8，sp/pc 位于 16/24，type 位于 32。派生对象把 thread 放在 offset 0。
+\code{struct thread} 为 56 bytes、8-byte 对齐。type/state/id 位于 offset 0/1/2，
+parent 和两字节 intrusive node 位于 4--6，hardware-token outstanding 标志位于 7，
+sp/pc 位于 8/16，Context1/Context2 位于 24/32，token extension 位于 36，16-byte 名称
+从 37 开始。派生对象把 thread 放在 offset 0。
 
 \subsection{公开结构体}
 
 \begin{dayantable}{Device 公开结构体布局}{tab:kernel-082}{X[31,l] X[17,l] X[52,l]}
   类型 & 大小/对齐 & 字段 offset \\
-  \code{struct list_head} & 16/8 & \code{next=0}、\code{prev=8}。 \\
-  \code{dayan_resource_t} & 64/8 & state/producer/consumer/lock 为 0/4/8/12，三条 list 为 16/32/48。 \\
-  \code{dayan_shared_resource_t} & 16/8 & 打包 producer/consumer counts 位于 0，reserved 位于 8。 \\
+  \code{dayan_resource_t} & 1/1 & 按值传递的 8-bit 逻辑编号；不含状态或指针。 \\
+  \code{dayan_resource_mask_t} & 8/8 & bit 0--31 为 Local，bit 32--63 为 Shared。 \\
   \code{dayan_cluster_barrier_t} & 16/8 & arrivals/reserved 位于 0/8。 \\
-  \code{dayan_kernel_resource_desc_t} & 32/8 & 16-bit max children/max tasks 为 0/2，32-bit flags 为 4，四类 TCSR count 为 8--11，reserved 为 12，atomic cache/URAM size 为 16/24。 \\
-  \code{dayan_thread_resources_t} & 8/4 & 四类 TCSR count 为 0--3，reserved 为 4。 \\
+  \code{dayan_kernel_resource_desc_t} & 32/8 & 16-bit max children/max tasks 为 0/2，32-bit flags 为 4，四类 TCSR count 为 8--11，打包的 Local/Shared count 为 12，atomic cache/URAM size 为 16/24。 \\
+  \code{dayan_thread_resources_t} & 8/2 & 四类 TCSR count 为 0--3，Local/Shared count 为 4/5，reserved 为 6。 \\
 \end{dayantable}
 
-字段布局属于 ABI；resource 状态只能通过 DAPI 修改。
+字段布局属于 ABI；Named Resource 状态只存在于硬件表中。
 
 Resource descriptor 的已知 flag 为
 \code{DAYAN_KERNEL_RESOURCE_LOCKED_TASK}。它只允许 max tasks 为 0 或 1，并在 Package
 中编码为 \code{NPU_PACKAGE_KERNEL_LOCKED_TASK}；带该位的 Package kernel 只声明
-single-Core task mode。Package/header 与 kernel record 当前均为 v4，Runtime/Server
-socket 协议为 v9，Runtime options/handshake 为 v5；结构尺寸仍分别保持 128/96 bytes
-和既有 56-byte kernel info。旧版本与新 Server 在握手或 package 校验阶段显式失败。
+single-Core task mode。Package/header 与 kernel record 当前均为 v5，Runtime/Server
+socket 协议为 v10，Runtime options/handshake 为 v5；结构尺寸仍分别保持 128/96 bytes
+和 64-byte kernel info。旧版本与新 Server 在握手或 package 校验阶段显式失败。
 
 每个 Hart 的算子 proc ABI 上限为 16 个 slot，root 占一个，因此
 \code{DAYAN\_KERNEL\_MAX\_CHILD\_PROCS} 为 15。init、RPC 与 profile proc 不从该池分配。

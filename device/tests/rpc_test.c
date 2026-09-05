@@ -36,6 +36,7 @@ int main(void)
     assert(offsetof(struct rpc_proc_create_request, task_dim) == 164);
     assert(offsetof(struct rpc_proc_create_request, task_mode) == 120);
     assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 124);
+    assert(offsetof(struct rpc_proc_create_request, resource_context) == 180);
     assert(offsetof(struct rpc_proc_create_request, uram_base) == 184);
     assert(offsetof(struct rpc_proc_create_request, tensor_context) == 200);
     assert(offsetof(struct rpc_proc_create_request, name) == 208);

@@ -21,11 +21,6 @@ struct mem_state {
 
 struct sche_state {
     struct thread init;
-    struct thread_list ready;
-    struct thread_list active;
-    struct thread_list wait_poll;
-    struct thread_list wait_event;
-    uint32_t active_dirty;
     uint32_t profile_enabled;
 };
 

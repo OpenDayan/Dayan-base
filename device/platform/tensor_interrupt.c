@@ -134,6 +134,7 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     for (i = 0; i < 32; ++i)
         record->x[i] = frame->x[i];
     tensor_interrupt_clear_pending();
+    rpc_send_notify();
 }
 
 void tensor_interrupt_drain(void)

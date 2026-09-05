@@ -5,8 +5,6 @@
 #include <stdint.h>
 
 #include "dayan_attrs.h"
-#include "dayan_list.h"
-
 /* Host-owned coherent allocation bound to gp; treat this pointer as read-only. */
 register void *shared __asm__("gp");
 
@@ -15,8 +13,19 @@ register void *shared __asm__("gp");
 #define DAYAN_THREAD_NAME_SIZE              16U
 #define DAYAN_URAM_ALLOCATION_GRANULE       (32U * 1024U)
 #define DAYAN_TCSR_LOGICAL_GROUPS            8U
+#define DAYAN_RESOURCE_LOGICAL_COUNT         32U
+#ifndef DAYAN_RESOURCE_COUNT_PACK
+#define DAYAN_RESOURCE_COUNT_PACK(local, shared) \
+    ((uint32_t)(local) | ((uint32_t)(shared) << 8))
+#define DAYAN_RESOURCE_LOCAL_COUNT(value)  ((uint8_t)(value))
+#define DAYAN_RESOURCE_SHARED_COUNT(value) ((uint8_t)((value) >> 8))
+#endif
+#ifndef DAYAN_KERNEL_RESOURCE_LOCKED_TASK
 #define DAYAN_KERNEL_RESOURCE_LOCKED_TASK   (1U << 0)
+#endif
+#ifndef DAYAN_KERNEL_RESOURCE_FLAGS_ALL
 #define DAYAN_KERNEL_RESOURCE_FLAGS_ALL DAYAN_KERNEL_RESOURCE_LOCKED_TASK
+#endif
 
 #ifndef DAYAN_KERNEL_RESOURCE_DESC_DEFINED
 #define DAYAN_KERNEL_RESOURCE_DESC_DEFINED
@@ -29,7 +38,7 @@ typedef struct dayan_kernel_resource_desc {
     uint8_t mat_tcsr_count;
     uint8_t vec_tcsr_count;
     uint8_t macro_tcsr_count;
-    uint32_t reserved;
+    uint32_t resource_counts;
     uint64_t atomic_cache_size;
     uint64_t uram_size;
 } dayan_kernel_resource_desc_t;
@@ -42,7 +51,9 @@ typedef struct dayan_thread_resources {
     uint8_t mat_tcsr_count;
     uint8_t vec_tcsr_count;
     uint8_t macro_tcsr_count;
-    uint32_t reserved;
+    uint8_t local_resource_count;
+    uint8_t shared_resource_count;
+    uint16_t reserved;
 } dayan_thread_resources_t;
 
 /*
@@ -54,10 +65,18 @@ typedef struct dayan_cluster_barrier {
     uint64_t reserved;
 } dayan_cluster_barrier_t;
 
-enum dayan_resource_state {
-    DAYAN_RESOURCE_FREE = 0,
-    DAYAN_RESOURCE_BUSY = 1,
-    DAYAN_RESOURCE_READY = 2,
+typedef uint8_t dayan_resource_t;
+typedef uint64_t dayan_resource_mask_t;
+
+#define DAYAN_LOCAL_RESOURCE(index)  ((dayan_resource_t)(index))
+#define DAYAN_SHARED_RESOURCE(index) ((dayan_resource_t)(32U + (index)))
+#define DAYAN_RESOURCE_MASK(resource) \
+    ((dayan_resource_mask_t)1ULL << (dayan_resource_t)(resource))
+
+enum dayan_resource_role {
+    DAYAN_RESOURCE_ROLE_NORMAL = 0,
+    DAYAN_RESOURCE_ROLE_PRODUCER = 1,
+    DAYAN_RESOURCE_ROLE_CONSUMER = 2,
 };
 
 enum dayan_task_axis {
@@ -65,24 +84,6 @@ enum dayan_task_axis {
     DAYAN_TASK_Y = 1,
     DAYAN_TASK_Z = 2,
 };
-
-/* Per-hart resource. Treat every field as private. */
-typedef struct dayan_resource {
-    uint32_t producer_count;
-    uint32_t consumer_count;
-    struct thread_list wait_ready;
-    struct thread_list wait_free;
-} dayan_resource_t;
-
-/*
- * Cross-hart resource. Place it within the allocation rooted at shared.
- * Fields are private. counts packs producer_remaining in bits 63:32 and
- * consumer_remaining in bits 31:0.
- */
-typedef struct dayan_shared_resource {
-    uint64_t counts;
-    uint64_t reserved;
-} dayan_shared_resource_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,55 +122,47 @@ DAYAN_API void dayan_wait_dma(void);
 DAYAN_API void dayan_cache_invalidate(const void *address, size_t size);
 DAYAN_API void dayan_cache_flush(const void *address, size_t size);
 
-/* Per-hart resource functions use no atomic operations. */
-/* Functions return 0 on success and a negative value on failure. */
-DAYAN_API int dayan_resource_init(dayan_resource_t *resource);
-/* consumer_count must be nonzero; producer_count may be zero. */
-DAYAN_API int dayan_resource_alloc(dayan_resource_t *resource,
-                                   uint32_t producer_count,
-                                   uint32_t consumer_count);
-DAYAN_API int dayan_resource_produce(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_consume(dayan_resource_t *resource);
-/* Nonblocking: apply the resource transition when prior unit work completes. */
-DAYAN_API int dayan_resource_wait_lsu_produce(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_lsu_consume(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_mat_produce(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_mat_consume(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_vec_produce(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_vec_consume(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_macro_produce(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_macro_consume(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_ready(dayan_resource_t *resource);
-DAYAN_API int dayan_resource_wait_free(dayan_resource_t *resource);
+/*
+ * Logical resources 0..31 are Local and 32..63 are Shared.  Wait returns a
+ * dayan_resource_role for election waits, or a negative error.  A normal
+ * wait has disjoint masks.  An election wait overlaps them in one bit.
+ */
+DAYAN_API int dayan_resource_wait(dayan_resource_mask_t wait_free,
+                                  dayan_resource_mask_t wait_ready,
+                                  int32_t qos);
+DAYAN_API int dayan_resource_wait_free(dayan_resource_t resource);
+DAYAN_API int dayan_resource_wait_ready(dayan_resource_t resource);
 
-/* Shared resources must come from shared and be initialized before publication. */
-DAYAN_API int dayan_shared_resource_init(dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_alloc(dayan_shared_resource_t *resource,
-                                          uint32_t producer_count,
-                                          uint32_t consumer_count);
-DAYAN_API int dayan_shared_resource_produce(dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_consume(dayan_shared_resource_t *resource);
-/* The shared object must remain live until the deferred transition runs. */
-DAYAN_API int dayan_shared_resource_wait_lsu_produce(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_lsu_consume(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_mat_produce(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_mat_consume(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_vec_produce(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_vec_consume(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_macro_produce(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_macro_consume(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_ready(
-    dayan_shared_resource_t *resource);
-DAYAN_API int dayan_shared_resource_wait_free(
-    dayan_shared_resource_t *resource);
+/*
+ * Publish output after earlier work on the selected unit completes.  At the
+ * same completion point, every Resource in consume_ready loses one consumer.
+ */
+DAYAN_API int dayan_resource_produce_lsu(
+    dayan_resource_t output, uint32_t consumer_count,
+    dayan_resource_mask_t consume_ready);
+DAYAN_API int dayan_resource_produce_mat(
+    dayan_resource_t output, uint32_t consumer_count,
+    dayan_resource_mask_t consume_ready);
+DAYAN_API int dayan_resource_produce_vec(
+    dayan_resource_t output, uint32_t consumer_count,
+    dayan_resource_mask_t consume_ready);
+DAYAN_API int dayan_resource_produce_macro(
+    dayan_resource_t output, uint32_t consumer_count,
+    dayan_resource_mask_t consume_ready);
+
+/*
+ * Consume terminal inputs after earlier work on the selected unit completes,
+ * without publishing another Resource.  This closes a finite dependency DAG
+ * and returns its final READY Resources to FREE.
+ */
+DAYAN_API int dayan_resource_consume_lsu(
+    dayan_resource_mask_t consume_ready);
+DAYAN_API int dayan_resource_consume_mat(
+    dayan_resource_mask_t consume_ready);
+DAYAN_API int dayan_resource_consume_vec(
+    dayan_resource_mask_t consume_ready);
+DAYAN_API int dayan_resource_consume_macro(
+    dayan_resource_mask_t consume_ready);
 
 #ifdef __cplusplus
 }

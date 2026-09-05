@@ -488,7 +488,10 @@ proc slot、URAM、coherent memory 和 resident memory 配额约束。不要同�
 Host kernel 第一次提交时，Server 使用 `npu-os-api.elf` 解析 Device object 的公开符号，
 完成 RISC-V `ET_REL` 重定位后，先对目标 Cluster 的全部已启动 Core 执行模块范围
 D-cache invalidate，再写入新的 text/rodata，最后执行 I-cache flush。之后通过
-`RPC_PROC_CREATE` 创建 root proc。
+`RPC_PROC_CREATE` 创建 root proc。BL1 先把 create response 放入 RPC send 队列，再提交
+root 的硬件调度 token；root 正常退出时则反向保留自身 slot，直到 Host 确认
+`RPC_PROC_EXIT` 后才由 send Thread 回收。软重启进入 BL0 前还会排空旧调度 token 并重置
+本 Hart 的 Local Resource 表，避免新 BL1 继承旧 Thread 指针或资源状态。
 
 ### 6.2 Atomic Cache backing
 
@@ -539,9 +542,9 @@ Core 2: 0x00c00000
 Core 3: 0x00e00000
 ```
 
-`matmul_bf16_4c` 在四个 Core 间共享 coherent resource 状态，并通过远端 URAM window
-广播 A/B tile。Cluster barrier 和 shared resource 使用硬件 AMO，不使用不受支持的
-LR/SC。这类需要核间广播和显式生产者/消费者流水的矩阵乘，才适合在
+`matmul_bf16_4c` 通过硬件 Shared Named Resource 和远端 URAM window 在四个 Core 间
+广播 A/B tile。Cluster barrier 使用 coherent allocation 中的 AMO ticket；Named
+Resource 状态位于硬件表，不占用 shared 内存。这类需要核间广播和显式生产者/消费者流水的矩阵乘，才适合在
 每个 Core 内继续创建 loader、remote-copy、MAT 和 store Thread。
 
 ## 7. 如何判断一次运行成功

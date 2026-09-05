@@ -207,22 +207,22 @@ Service 根据可见性选择调度目标，HAL 决定具体 region、地址和�
 \subsection{执行模型}
 
 每个 hart 运行独立的协作式 scheduler。kernel 对应一个 proc，只有在调用 yield、
-等待执行单元、等待 resource、执行阻塞 RPC 或退出时才切回 scheduler。Host mailbox
-使用轮询状态，不会抢占正在执行的 proc。
+等待执行单元、等待 Named Resource、执行阻塞 RPC 或退出时才切回 scheduler。Host mailbox
+不会抢占正在执行的 proc。
 
-\code{dayan_yield} 只把当前 proc 放回本 hart 的 ready queue。系统没有优先级、时间片
+\code{dayan_yield} 提交一个无依赖的硬件 Wait，token 是当前 \code{tp}。系统没有时间片
 或跨 hart 迁移；长时间不进入等待点的 kernel 会阻塞同一 hart 上的其它 proc。
 
-LSU、MAT、VEC 和 MACRO 可以异步执行。\code{dayan_wait_*} 等待调用前已发射到对应
-单元的工作；\code{dayan_resource_wait_*} 与
-\code{dayan_shared_resource_wait_*} 则非阻塞地把完成事件绑定到一次资源
-produce/consume。硬件 Produce 队列同时保证全局 32 项、每单元 2 项；软件不能超过这一
-无阻塞容量，异步事件引用的资源在完成前必须保持有效。
+LSU、MAT、VEC 和 MACRO 可以异步执行。\code{dayan_wait_*} 把当前 \code{tp} 登记到
+对应单元的 Produce 队列，并等待调用前已发射的工作。Named Resource 的 produce/consume
+则在单元完成点直接更新硬件资源表，不生成资源地址 token。全局 Produce 队列只返回
+Thread 指针，scheduler 不维护软件 ready/resource 队列。
 
 \subsection{内存模型}
 
 Device RAM 中的普通数据、栈和私有堆属于单个 hart 的非一致性访问域。跨 hart 数据
-放在 Host coherent window 中；当前 proc 的 allocation 基址由 \code{shared} 读取：
+放在 Host coherent window 中；默认窗口从 \code{0x00400000} 开始、容量为 4 MiB，
+当前 proc 的 allocation 基址由 \code{shared} 读取：
 
 \begin{dayancode}
 #include <dayan_sys.h>
@@ -231,7 +231,7 @@ struct layout *data = (struct layout *)shared;
 \end{dayancode}
 
 \code{shared == NULL} 表示没有 coherent allocation。BL1 在 proc 中保存 allocation
-长度，DAPI 会据此检查 shared resource 和 barrier 的精确边界；Host 和算子仍必须使用
+长度，DAPI 会据此检查 barrier 的精确边界；Host 和算子仍必须使用
 同一布局。\code{shared} 绑定 \code{gp}，只读其值，不要给该变量赋值。
 
 URAM 是每 Core 私有空间。kernel 用 \code{dayan\_uram\_base/size} 读取本实例范围；
@@ -242,19 +242,18 @@ URAM 是每 Core 私有空间。kernel 用 \code{dayan\_uram\_base/size} 读取�
 每 hart 私有堆供 \code{malloc} 使用。初始 region 不足时，Dayan OS 通过 Host RPC
 扩展；私有堆地址不能跨 hart 释放，也不能用于跨核共享。
 
-\subsection{resource 模型}
+\subsection{Named Resource 模型}
 
-两类 resource 都遵循 \code{FREE -> BUSY -> READY -> FREE}。\code{alloc} 设置
-producer/consumer 数量；最后一个 producer 发布 READY，最后一个 consumer 释放为
-FREE。
+硬件为每个 Core 提供 32 项 Local Resource，并为同一 Cluster 提供 32 项 Shared
+Resource。\code{dayan_resource_t} 只是逻辑编号；Local 使用 0--31，Shared 使用
+32--63。Host 根据 kernel descriptor 分配物理窗口，Context2 在切换执行对象时恢复
+Local/Shared base 和 count。算子内存中不存在 resource 对象或等待链表。
 
-\begin{dayantable}{resource 类型}{tab:kernel-012}{X[29,l] X[31,l] X[40,l]}
-  类型 & 存储位置 & 使用范围 \\
-  \code{dayan_resource_t} & 当前 hart 的栈或私有堆 & 同一 hart 内；事件链表等待，不使用原子指令。 \\
-  \code{dayan_shared_resource_t} & \code{shared} allocation & 跨 hart；使用无锁 AMOCAS/AMOADD 状态字和 scheduler poll。 \\
-\end{dayantable}
-
-resource 的函数和所有权规则见第~\ref{sec:kernel-030}~节。
+两类资源都遵循 \code{FREE -> BUSY -> READY -> FREE}。硬件 Wait 同时检查 READY 输入和
+FREE 输出，并原子把输出预留为 BUSY；执行单元完成时，produce 消费输入并以指定 consumer
+count 发布输出。最后一个 consumer 把 READY 项释放为 FREE。有限依赖图末端必须提交
+terminal consume，不能让 READY 项跨 launch 残留。编号、声明和函数语义见
+第~\ref{sec:kernel-030}~节。
 
 \subsection{C++ 范围}
 

@@ -94,7 +94,7 @@ typedef struct npu_service_launch_desc {
     uint64_t uram_offset;
     uint64_t uram_size;
     uint32_t max_child_threads;
-    uint32_t resource_reserved;
+    uint32_t resource_context;
     uint64_t tensor_context;
     uint64_t printf_buffer_size;
     uint64_t args[NPU_SERVICE_LAUNCH_MAX_ARGS];
