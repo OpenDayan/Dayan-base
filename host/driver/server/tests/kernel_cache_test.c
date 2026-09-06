@@ -81,6 +81,17 @@ int npu_hal_memory_address(npu_hal_t *hal,
     return 0;
 }
 
+/* The production helper additionally translates through the ClusterMMU.
+ * This isolated kernel-cache test has no MMU instance, so model the MMU-off
+ * path with the HAL's physical allocation address. */
+int npu_service_mmu_device_address(npu_service_device_t *runtime,
+                                   const npu_hal_allocation_t *allocation,
+                                   npu_hal_core_t viewer, uint64_t *address_out)
+{
+    return npu_hal_memory_address(runtime ? runtime->hal : 0, allocation,
+                                  viewer, address_out);
+}
+
 int npu_hal_memory_write(npu_hal_t *hal,
                          const npu_hal_allocation_t *allocation,
                          npu_hal_core_t viewer, uint64_t offset,
