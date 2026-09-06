@@ -211,12 +211,22 @@ typedef struct npu_profile_slot_define {
 typedef enum npu_profile_proc_state {
     NPU_PROFILE_PROC_RUNNING = 0,
     NPU_PROFILE_PROC_READY = 1,
-    NPU_PROFILE_PROC_WAIT_POLL = 2,
+    NPU_PROFILE_PROC_POLLING = 2,
+    /* Compatibility spelling for the pre-Profiler state name. */
+    NPU_PROFILE_PROC_WAIT_POLL = NPU_PROFILE_PROC_POLLING,
     NPU_PROFILE_PROC_WAIT_EVENT = 3,
     NPU_PROFILE_PROC_WAIT_START = 4,
     NPU_PROFILE_PROC_WAIT_EXIT = 5,
     NPU_PROFILE_PROC_WAIT_PRODUCE = 6,
     NPU_PROFILE_PROC_KILL_WAIT_PRODUCE = 7,
+    NPU_PROFILE_PROC_WAIT_LSU = 8,
+    NPU_PROFILE_PROC_WAIT_MAT = 9,
+    NPU_PROFILE_PROC_WAIT_VEC = 10,
+    NPU_PROFILE_PROC_WAIT_MACRO = 11,
+    NPU_PROFILE_PROC_YIELD = 12,
+    NPU_PROFILE_PROC_WAIT_JOIN = 13,
+    NPU_PROFILE_PROC_WAIT_RESOURCE = 14,
+    NPU_PROFILE_PROC_STATE_MAX = NPU_PROFILE_PROC_WAIT_RESOURCE,
 } npu_profile_proc_state_t;
 
 typedef enum npu_profile_record_tag {
@@ -242,7 +252,7 @@ static inline size_t npu_profile_record_size(uint64_t value)
 {
     uint8_t state = npu_profile_record_state(value);
 
-    if (state <= NPU_PROFILE_PROC_KILL_WAIT_PRODUCE)
+    if (state <= NPU_PROFILE_PROC_STATE_MAX)
         return NPU_PROFILE_RECORD_SIZE;
     if (state == NPU_PROFILE_RECORD_SLOT_DEFINE)
         return NPU_PROFILE_SLOT_DEFINE_SIZE;

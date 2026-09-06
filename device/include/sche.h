@@ -87,10 +87,13 @@ void thread_yield(void);
 /* Register under IRQ exclusion, restore IRQs, then call switch_context. */
 void thread_prepare_wait(struct thread_list *event);
 void thread_wait_event(struct thread_list *event);
+void thread_wait_join(struct thread_list *event);
 void thread_wait_produce(void);
+void thread_wait_unit(enum thread_state state);
 uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
                                int8_t qos);
 void thread_wait_rpc(void);
+void thread_busy_yield(void);
 _Noreturn void thread_exit(void);
 _Noreturn void thread_exit_status(int64_t status);
 

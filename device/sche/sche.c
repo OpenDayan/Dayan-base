@@ -376,7 +376,7 @@ int thread_join(uint32_t id, int64_t *result)
     if (thread_id(child) != id || child->parent != parent_slot)
         return -ECHILD;
     if (runtime->slot_state[slot] != SLOT_ZOMBIE)
-        thread_wait_event(&runtime->wait_exit[TASK_INDEX(slot)]);
+        thread_wait_join(&runtime->wait_exit[TASK_INDEX(slot)]);
     if (result)
         *result = runtime->result[TASK_INDEX(slot)];
     runtime->slot_state[slot] = SLOT_RESERVED;
@@ -590,15 +590,37 @@ leave:
     __builtin_unreachable();
 }
 
+static int thread_state_waits_token(uint8_t state)
+{
+    switch (state) {
+    case THREAD_READY:
+    case THREAD_POLLING:
+    case THREAD_WAIT_PRODUCE:
+    case THREAD_WAIT_LSU:
+    case THREAD_WAIT_MAT:
+    case THREAD_WAIT_VEC:
+    case THREAD_WAIT_MACRO:
+    case THREAD_YIELD:
+    case THREAD_WAIT_RESOURCE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int thread_state_waits_event(uint8_t state)
+{
+    return state == THREAD_WAIT_EVENT || state == THREAD_WAIT_JOIN;
+}
+
 static void kill_mark_thread(struct thread *thread, int64_t status)
 {
     struct thread_runtime *runtime = &cpu_self()->threads;
     uint8_t slot = thread_slot_id(thread);
-    int waiting_token = thread->state == THREAD_READY ||
-                        thread->state == THREAD_WAIT_PRODUCE;
+    int waiting_token = thread_state_waits_token(thread->state);
 
     runtime->result[TASK_INDEX(slot)] = status;
-    if (thread->state == THREAD_WAIT_EVENT)
+    if (thread_state_waits_event(thread->state))
         thread_list_remove(thread);
     runtime->slot_state[slot] = SLOT_KILLED;
     thread->sp = ((uintptr_t)runtime->stacks[TASK_INDEX(slot)] +
@@ -714,7 +736,8 @@ size_t thread_event_wake_all(struct thread_list *event)
     return count;
 }
 
-void thread_prepare_wait(struct thread_list *event)
+static void thread_prepare_wait_state(struct thread_list *event,
+                                      uint8_t state)
 {
     struct thread *thread = current;
     uint8_t slot = thread_slot_id(thread);
@@ -728,14 +751,28 @@ void thread_prepare_wait(struct thread_list *event)
         thread_slot_get(tail)->node.next = slot;
     event->tail = slot;
     cpu_self()->threads.list_owner[slot] = event;
-    thread_state_set(thread, THREAD_WAIT_EVENT);
+    thread_state_set(thread, state);
+}
+
+void thread_prepare_wait(struct thread_list *event)
+{
+    thread_prepare_wait_state(event, THREAD_WAIT_EVENT);
 }
 
 void thread_wait_event(struct thread_list *event)
 {
     uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
-    thread_prepare_wait(event);
+    thread_prepare_wait_state(event, THREAD_WAIT_EVENT);
+    resource_scheduler_interrupt_restore(interrupt_state);
+    switch_context();
+}
+
+void thread_wait_join(struct thread_list *event)
+{
+    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
+
+    thread_prepare_wait_state(event, THREAD_WAIT_JOIN);
     resource_scheduler_interrupt_restore(interrupt_state);
     switch_context();
 }
@@ -746,12 +783,18 @@ void thread_wait_produce(void)
     switch_context();
 }
 
+void thread_wait_unit(enum thread_state state)
+{
+    thread_state_set(current, (uint8_t)state);
+    switch_context();
+}
+
 uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
                                int8_t qos)
 {
     struct thread *thread = current;
 
-    thread_state_set(thread, THREAD_WAIT_PRODUCE);
+    thread_state_set(thread, THREAD_WAIT_RESOURCE);
     resource_scheduler_submit(wait_free, wait_ready, qos, (uintptr_t)thread);
     switch_context();
     return thread->token_ext;
@@ -759,14 +802,21 @@ uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
 
 void thread_wait_rpc(void)
 {
-    thread_state_set(current, THREAD_WAIT_POLL);
+    thread_state_set(current, THREAD_POLLING);
     switch_context();
 }
 
 void thread_yield(void)
 {
-    thread_state_set(current, THREAD_READY);
+    thread_state_set(current, THREAD_YIELD);
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)current, 0, RESOURCE_WAIT);
+    switch_context();
+}
+
+void thread_busy_yield(void)
+{
+    thread_state_set(current, THREAD_POLLING);
+    resource_scheduler_submit(0, 0, -4, (uintptr_t)current);
     switch_context();
 }
 

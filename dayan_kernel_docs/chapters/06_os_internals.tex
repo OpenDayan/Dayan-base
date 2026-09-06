@@ -51,12 +51,16 @@ system、子 Thread 和 root Proc 的 type 分别为 1、2、3，ID 由 slot 和
   状态 & 数值 & 含义 \\
   \code{RUNNING} & 0 & 当前在本 hart 执行。 \\
   \code{READY} & 1 & 已向硬件提交 Wait，等待 Thread token 返回。 \\
-  \code{WAIT_POLL} & 2 & RPC receive 等待 \code{mip.MSIP} 选择。 \\
+  \code{POLLING} & 2 & RPC receive 或 barrier 轮询；barrier 连续 64 次后以最低优先级让出。 \\
   \code{WAIT_EVENT} & 3 & 挂在事件链表，由事件所有者唤醒。 \\
   \code{WAIT_START} & 4 & thread 构造期间的内部状态。 \\
   \code{WAIT_EXIT} & 5 & proc 已结束，不再调度。 \\
   \code{WAIT_PRODUCE} & 6 & 等待异步 Produce token。 \\
   \code{KILL\_WAIT\_PRODUCE} & 7 & 已 kill，只等待 Produce 返回后释放 slot。 \\
+  \code{WAIT_LSU} / \code{WAIT_MAT} / \code{WAIT_VEC} / \code{WAIT_MACRO} & 8--11 & 等待对应执行单元完成。 \\
+  \code{YIELD} & 12 & 主动让出执行权。 \\
+  \code{WAIT_JOIN} & 13 & 等待子 Thread 退出事件。 \\
+  \code{WAIT_RESOURCE} & 14 & 等待 Named Resource。 \\
 \end{dayantable}
 
 \code{switch_context} 先读
@@ -65,7 +69,8 @@ BASE Produce/Bar[0] 弹出一个 Thread 指针。空 token 继续等待；token 
 \code{tp} 时不保存上下文，直接返回原 Thread。软件不扫描 ready、poll 或 resource
 队列。
 
-\code{dayan_yield} 和普通唤醒提交无依赖硬件 Wait。event wait 仍把 Thread 的短 slot node
+\code{dayan_yield} 和普通唤醒提交无依赖硬件 Wait；Profiler 分别记录为 YIELD 和 READY。barrier
+轮询 64 次后提交 qos=-4 的无依赖 Wait，记录为 POLLING。event wait 仍把 Thread 的短 slot node
 挂到 join/RPC/profile 等明确所有者的链表；事件所有者唤醒它时才提交 Wait。
 join 等待目标子 Thread 的退出事件，不轮询条件，也没有通用 predicate wait 接口。RPC receive
 是唯一由 \code{mip.MSIP} 直接选择、无需硬件 token 的路径。

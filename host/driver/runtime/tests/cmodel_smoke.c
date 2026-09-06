@@ -227,7 +227,7 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
                             if (!strcmp(snapshot.records[child].name,
                                         "kill-produce") &&
                                 snapshot.records[child].state ==
-                                    NPU_PROFILE_PROC_WAIT_PRODUCE)
+                                    NPU_PROFILE_PROC_WAIT_LSU)
                                 child_states |= 2U;
                         }
                         if (child_states != 3U)
@@ -801,11 +801,18 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
             case NPU_PROFILE_PROC_READY:
                 saw_ready = 1;
                 break;
-            case NPU_PROFILE_PROC_WAIT_POLL:
+            case NPU_PROFILE_PROC_POLLING:
             case NPU_PROFILE_PROC_WAIT_EVENT:
             case NPU_PROFILE_PROC_WAIT_START:
             case NPU_PROFILE_PROC_WAIT_PRODUCE:
             case NPU_PROFILE_PROC_KILL_WAIT_PRODUCE:
+            case NPU_PROFILE_PROC_WAIT_LSU:
+            case NPU_PROFILE_PROC_WAIT_MAT:
+            case NPU_PROFILE_PROC_WAIT_VEC:
+            case NPU_PROFILE_PROC_WAIT_MACRO:
+            case NPU_PROFILE_PROC_YIELD:
+            case NPU_PROFILE_PROC_WAIT_JOIN:
+            case NPU_PROFILE_PROC_WAIT_RESOURCE:
                 saw_wait = 1;
                 break;
             case NPU_PROFILE_PROC_WAIT_EXIT:

@@ -12,12 +12,22 @@
 enum thread_state {
     THREAD_RUNNING = 0,
     THREAD_READY = 1,
-    THREAD_WAIT_POLL = 2,
+    THREAD_POLLING = 2,
+    /* Compatibility spelling for the pre-Profiler state name. */
+    THREAD_WAIT_POLL = THREAD_POLLING,
     THREAD_WAIT_EVENT = 3,
     THREAD_WAIT_START = 4,
     THREAD_WAIT_EXIT = 5,
     THREAD_WAIT_PRODUCE = 6,
     THREAD_KILL_WAIT_PRODUCE = 7,
+    THREAD_WAIT_LSU = 8,
+    THREAD_WAIT_MAT = 9,
+    THREAD_WAIT_VEC = 10,
+    THREAD_WAIT_MACRO = 11,
+    THREAD_YIELD = 12,
+    THREAD_WAIT_JOIN = 13,
+    THREAD_WAIT_RESOURCE = 14,
+    THREAD_STATE_MAX = THREAD_WAIT_RESOURCE,
 };
 
 enum thread_type {

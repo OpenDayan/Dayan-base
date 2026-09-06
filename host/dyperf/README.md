@@ -59,8 +59,9 @@ Thread 不会合并为一个 `tid`。`scheduler` 轨道由工具根据当前 Pro
 记录。Device 在 START 时为所有现存 Proc 先报告 `SLOT_DEFINE` 和初始状态，之后状态
 切换只报告 8-B 目标状态；采样期间 slot 分配给新 Thread 时再报告一次 24-B 定义，名称
 不会在每次状态切换中重复。工具把这些记录展开成
-`RUNNING`、`READY`、`WAIT_POLL`、`WAIT_EVENT`、`WAIT_START`、`WAIT_EXIT`、
-`WAIT_PRODUCE` 和 `KILL_WAIT_PRODUCE` 状态区间。JSON 中的 `B/E` 只用于表达区间，不是
+`RUNNING`、`READY`、`POLLING`、`WAIT_EVENT`、`WAIT_START`、`WAIT_EXIT`、
+`WAIT_PRODUCE`、`WAIT_LSU`、`WAIT_MAT`、`WAIT_VEC`、`WAIT_MACRO`、`YIELD`、
+`WAIT_JOIN`、`WAIT_RESOURCE` 和 `KILL_WAIT_PRODUCE` 状态区间。JSON 中的 `B/E` 只用于表达区间，不是
 Device 原始状态记录类型。工具会按 Hart 独立扩展 48-bit counter 回绕，并按
 `1 cycle = 1 ns` 转换时间。Chrome Trace 的 `ts` 使用带三位小数的微秒值保存纳秒精度，
 同时设置 `displayTimeUnit: "ns"`。

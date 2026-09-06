@@ -85,7 +85,7 @@ Host 启动算子前一次性分配，子 Thread 资源槽在根 Proc 建立时�
   \code{dayan_task_id} & 返回当前逻辑任务在 X、Y 或 Z 轴上的坐标；非法轴返回 0。 \\
   \code{dayan_task_dim} & 返回启动网格在 X、Y 或 Z 轴上的大小；非法轴返回 0。 \\
   \code{dayan_task_mode} & 返回 1（单 Core）或 4（Cluster 协作）。 \\
-  \code{dayan_cluster_barrier} & 通过 AMOADD.D ticket 执行可复用的无锁四 Core 屏障；仅四 Core 模式且参与者数量为 4 时合法。 \\
+  \code{dayan_cluster_barrier} & 通过 AMOADD.D ticket 执行可复用的无锁 Cluster 屏障；仅四 Core 模式且参与者数量为 1--4 时合法，每 64 次轮询后以最低优先级让出。 \\
 \end{dayantable}
 
 逻辑任务 API 不暴露物理 Cluster 或 Core 编号。四 Core 模式下 Runtime 要求

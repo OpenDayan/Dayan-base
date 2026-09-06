@@ -31,7 +31,6 @@ _Static_assert((uint32_t)THREAD_WAIT_PRODUCE == RPC_PROFILE_PROC_WAIT_PRODUCE,
 _Static_assert((uint32_t)THREAD_KILL_WAIT_PRODUCE ==
                    RPC_PROFILE_PROC_KILL_WAIT_PRODUCE,
                "profile kill-wait-produce state ABI");
-
 _Static_assert(RPC_PROFILE_RECORD_SIZE == 8 &&
                    RPC_PROFILE_SLOT_DEFINE_SIZE == 24 &&
                    RPC_PROFILE_COUNTER_BITS == 48 &&

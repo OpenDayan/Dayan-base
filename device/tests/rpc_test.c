@@ -164,7 +164,16 @@ int main(void)
     assert(RPC_DCACHE_FLUSH_RESPONSE ==
            (RPC_DCACHE_FLUSH | 0x8000));
     assert(RPC_PROFILE_PROC_RUNNING == 0U);
+    assert(RPC_PROFILE_PROC_POLLING == 2U);
     assert(RPC_PROFILE_PROC_KILL_WAIT_PRODUCE == 7U);
+    assert(RPC_PROFILE_PROC_WAIT_LSU == 8U);
+    assert(RPC_PROFILE_PROC_WAIT_MAT == 9U);
+    assert(RPC_PROFILE_PROC_WAIT_VEC == 10U);
+    assert(RPC_PROFILE_PROC_WAIT_MACRO == 11U);
+    assert(RPC_PROFILE_PROC_YIELD == 12U);
+    assert(RPC_PROFILE_PROC_WAIT_JOIN == 13U);
+    assert(RPC_PROFILE_PROC_WAIT_RESOURCE == 14U);
+    assert(RPC_PROFILE_PROC_STATE_MAX == 14U);
     assert(RPC_PROFILE_RECORD_SLOT_DEFINE == 0x80U);
     assert(RPC_PROFILE_SLOT_COUNT == 20U);
     assert(sizeof(struct trap_record) == 328);

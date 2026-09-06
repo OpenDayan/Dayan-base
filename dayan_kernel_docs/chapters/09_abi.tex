@@ -73,8 +73,9 @@ socket 协议为 v10，Runtime options/handshake 为 v5；结构尺寸仍分别�
 
 proc profile 是紧密排列的变长字节流。普通记录为 8 bytes：低 48 bit counter、
 8-bit slot 和 8-bit state；\code{SLOT_DEFINE} 记录为 24 bytes，在同一 header 后追加
-固定 16-byte proc 名称。名称必须在字段内以 NUL 结尾。状态编码与
-\code{THREAD_RUNNING--THREAD_KILL_WAIT_PRODUCE} 的 0--7 一致；Host 将一个 counter
+固定 16-byte proc 名称。名称必须在字段内以 NUL 结尾。状态编码使用同一个 8-bit state
+字段，保留 \code{THREAD_RUNNING--THREAD_KILL_WAIT_PRODUCE} 的 0--7，并扩展到
+\code{WAIT_RESOURCE} 的 14；Host 将一个 counter
 tick 解释为 1 ns。RPC descriptor 的 count/capacity 均以 byte 为单位。
 
 \subsection{目标文件与符号解析}

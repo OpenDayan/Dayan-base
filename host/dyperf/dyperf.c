@@ -334,8 +334,8 @@ static const char *trace_state_name(uint8_t state)
         return "RUNNING";
     case NPU_PROFILE_PROC_READY:
         return "READY";
-    case NPU_PROFILE_PROC_WAIT_POLL:
-        return "WAIT_POLL";
+    case NPU_PROFILE_PROC_POLLING:
+        return "POLLING";
     case NPU_PROFILE_PROC_WAIT_EVENT:
         return "WAIT_EVENT";
     case NPU_PROFILE_PROC_WAIT_START:
@@ -346,6 +346,20 @@ static const char *trace_state_name(uint8_t state)
         return "WAIT_PRODUCE";
     case NPU_PROFILE_PROC_KILL_WAIT_PRODUCE:
         return "KILL_WAIT_PRODUCE";
+    case NPU_PROFILE_PROC_WAIT_LSU:
+        return "WAIT_LSU";
+    case NPU_PROFILE_PROC_WAIT_MAT:
+        return "WAIT_MAT";
+    case NPU_PROFILE_PROC_WAIT_VEC:
+        return "WAIT_VEC";
+    case NPU_PROFILE_PROC_WAIT_MACRO:
+        return "WAIT_MACRO";
+    case NPU_PROFILE_PROC_YIELD:
+        return "YIELD";
+    case NPU_PROFILE_PROC_WAIT_JOIN:
+        return "WAIT_JOIN";
+    case NPU_PROFILE_PROC_WAIT_RESOURCE:
+        return "WAIT_RESOURCE";
     default:
         return 0;
     }

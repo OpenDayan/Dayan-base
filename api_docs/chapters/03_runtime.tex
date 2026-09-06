@@ -164,10 +164,12 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
 \begin{dayantable}{性能采样中的 Proc 状态}{tab:api-runtime-profile-state}{X[49,l] X[51,l]}
   API & 含义 \\
   \code{NPU_PROFILE_PROC_RUNNING} / \code{NPU_PROFILE_PROC_READY} & Proc 正在执行或位于调度器的就绪队列。 \\
-  \code{NPU_PROFILE_PROC_WAIT_POLL} / \code{NPU_PROFILE_PROC_WAIT_EVENT} & Proc 等待轮询条件或事件唤醒。 \\
-  \code{NPU_PROFILE_PROC_WAIT_START} / \code{NPU_PROFILE_PROC_WAIT_EXIT} & Proc/Thread 等待启动，或父执行对象等待子 Thread 退出。 \\
-  \code{NPU_PROFILE_PROC_WAIT_PRODUCE} & Proc 等待异步执行单元完成工作。 \\
-  \code{NPU_PROFILE_PROC_KILL_WAIT_PRODUCE} & Proc 已被终止，但资源槽必须等异步工作完成后才能释放。 \\
+  \code{NPU_PROFILE_PROC_POLLING} & 轮询状态；barrier 轮询 64 次后以最低调度优先级让出。 \\
+  \code{NPU_PROFILE_PROC_WAIT_EVENT} / \code{NPU_PROFILE_PROC_WAIT_JOIN} & 等待事件，或等待子 Thread 退出。 \\
+  \code{NPU_PROFILE_PROC_WAIT_LSU} / \code{NPU_PROFILE_PROC_WAIT_MAT} / \code{NPU_PROFILE_PROC_WAIT_VEC} / \code{NPU_PROFILE_PROC_WAIT_MACRO} & 等待对应异步执行单元完成。 \\
+  \code{NPU_PROFILE_PROC_WAIT_RESOURCE} & 等待 Named Resource；\code{WAIT_PRODUCE} 为兼容的通用异步等待状态。 \\
+  \code{NPU_PROFILE_PROC_YIELD} & Proc 主动调用 \code{dayan_yield} 让出执行权。 \\
+  \code{NPU_PROFILE_PROC_WAIT_START} / \code{NPU_PROFILE_PROC_WAIT_EXIT} / \code{NPU_PROFILE_PROC_KILL_WAIT_PRODUCE} & 等待启动、已退出，或终止后等待异步工作完成。 \\
 \end{dayantable}
 
 \code{npu_profile_record_tag_t} 当前只定义

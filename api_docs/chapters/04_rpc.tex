@@ -117,7 +117,7 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
 
 \begin{dayantable}{性能采样传输类型}{tab:api-rpc-profile-wire}{X[41,l] X[59,l]}
   类型 & ABI / 用途 \\
-  \code{rpc_profile_proc_state} & RUNNING、READY、各类 WAIT 及 KILL\_WAIT\_PRODUCE 共八种采样状态。 \\
+  \code{rpc_profile_proc_state} & 8-bit 状态字段；包含 RUNNING、READY、POLLING、各类等待、YIELD 及 KILL\_WAIT\_PRODUCE。 \\
   \code{rpc_profile_command} & \code{RPC_PROFILE_START} 或 \code{RPC_PROFILE_STOP}。 \\
   \code{rpc_profile_record} & 8 字节；包含 48 位计数器、8 位资源槽编号和 8 位状态或标签。 \\
   \code{rpc_profile_slot_define} & 24 字节；由标签为 \code{SLOT_DEFINE} 的记录头和 16 字节 Proc 名称组成。 \\
@@ -137,7 +137,7 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
   \code{RPC_PROFILE_SNAPSHOT_MAX_BYTES} & 开始采样时，记录所有现有 Proc 的定义和初始状态所需的最大字节数。 \\
 \end{dayantable}
 
-状态值 0--7 的记录长度为 8 字节；标签
+状态值 0--14 的记录长度为 8 字节；标签
 \code{RPC_PROFILE_RECORD_SLOT_DEFINE}（0x80）的记录长度为 24 字节。记录在 Device
 缓冲区内连续排列，不含填充。资源槽 1--16 对应用户 Proc，17--19 对应三个系统 Proc，
 资源槽 0 留给 Host 合成调度器轨道。资源槽分配给新 Proc 时先写名称定义，再写初始状态；
@@ -151,10 +151,12 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
 \begin{dayantable}{性能采样中的 Proc 状态}{tab:api-rpc-profile-state}{X[51,l] X[49,l]}
   API & 含义 \\
   \code{RPC_PROFILE_PROC_RUNNING} / \code{RPC_PROFILE_PROC_READY} & Proc 正在执行，或已提交硬件 Wait 并等待调度 token。 \\
-  \code{RPC_PROFILE_PROC_WAIT_POLL} / \code{RPC_PROFILE_PROC_WAIT_EVENT} & 等待轮询条件或事件。 \\
-  \code{RPC_PROFILE_PROC_WAIT_START} / \code{RPC_PROFILE_PROC_WAIT_EXIT} & Proc/Thread 等待启动，或父执行对象等待子 Thread 退出。 \\
-  \code{RPC_PROFILE_PROC_WAIT_PRODUCE} & 等待异步执行单元完成工作。 \\
-  \code{RPC_PROFILE_PROC_KILL_WAIT_PRODUCE} & Proc 已被终止，但资源槽要等异步工作完成后才能释放。 \\
+  \code{RPC_PROFILE_PROC_POLLING} & 轮询状态；barrier 连续轮询 64 次后以最低调度优先级让出。 \\
+  \code{RPC_PROFILE_PROC_WAIT_EVENT} / \code{RPC_PROFILE_PROC_WAIT_JOIN} & 等待 RPC/profile 事件，或等待子 Thread 退出。 \\
+  \code{RPC_PROFILE_PROC_WAIT_LSU} / \code{RPC_PROFILE_PROC_WAIT_MAT} / \code{RPC_PROFILE_PROC_WAIT_VEC} / \code{RPC_PROFILE_PROC_WAIT_MACRO} & 等待对应异步执行单元完成。 \\
+  \code{RPC_PROFILE_PROC_WAIT_RESOURCE} & 等待 Named Resource；\code{WAIT_PRODUCE} 保留为兼容的通用异步等待状态。 \\
+  \code{RPC_PROFILE_PROC_YIELD} & Proc 主动调用 \code{dayan_yield} 让出执行权。 \\
+  \code{RPC_PROFILE_PROC_WAIT_START} / \code{RPC_PROFILE_PROC_WAIT_EXIT} / \code{RPC_PROFILE_PROC_KILL_WAIT_PRODUCE} & 分别表示等待启动、已退出，以及终止后等待异步工作完成。 \\
 \end{dayantable}
 
 \subsection{Device RPC 函数}

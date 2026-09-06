@@ -1,3 +1,5 @@
+#include <assert.h>
+
 #define main dyperf_command_main
 #include "../dyperf.c"
 #undef main
@@ -89,6 +91,17 @@ int main(int argc, char **argv)
     pid_t command_pid;
     int command_status;
     int status;
+
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_POLLING), "POLLING"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_WAIT_LSU), "WAIT_LSU"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_WAIT_MAT), "WAIT_MAT"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_WAIT_VEC), "WAIT_VEC"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_WAIT_MACRO),
+                   "WAIT_MACRO"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_YIELD), "YIELD"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_WAIT_JOIN), "WAIT_JOIN"));
+    assert(!strcmp(trace_state_name(NPU_PROFILE_PROC_WAIT_RESOURCE),
+                   "WAIT_RESOURCE"));
 
     if (argc != 2)
         return 2;

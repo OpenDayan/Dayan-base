@@ -40,6 +40,7 @@ enum produce_unit {
 };
 
 #define RESOURCE_NO_OUTPUT 0xffU
+#define DAYAN_BARRIER_SPIN_COUNT 64U
 
 static inline void resource_produce_write(uint32_t unit, uint64_t value)
 {
@@ -141,7 +142,8 @@ int dayan_cluster_barrier(uint32_t participants,
     uint64_t ticket, target;
     uint64_t increment = 1;
 
-    if (!descriptor || participants != 4U || descriptor->task_mode != 4U)
+    if (!descriptor || !participants || participants > 4U ||
+        descriptor->task_mode != 4U)
         return -EINVAL;
     base = CONFIG_COHERENT_BASE + descriptor->shared_offset;
     if (descriptor->shared_size < sizeof(*barrier) ||
@@ -154,9 +156,15 @@ int dayan_cluster_barrier(uint32_t participants,
                      : "r"(&barrier->arrivals), "r"(increment)
                      : "memory");
     target = ticket - ticket % participants + participants;
-    while (__atomic_load_n(&barrier->arrivals, __ATOMIC_RELAXED) - target >=
-           ((uint64_t)1 << 63))
-        ;
+    for (uint32_t spins = 0;;) {
+        if (__atomic_load_n(&barrier->arrivals, __ATOMIC_RELAXED) - target <
+            ((uint64_t)1 << 63))
+            break;
+        if (++spins == DAYAN_BARRIER_SPIN_COUNT) {
+            thread_busy_yield();
+            spins = 0;
+        }
+    }
     return 0;
 }
 
@@ -184,25 +192,25 @@ uint32_t dayan_task_mode(void)
 void dayan_wait_lsu(void)
 {
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)current, 0, 1);
-    thread_wait_produce();
+    thread_wait_unit(THREAD_WAIT_LSU);
 }
 
 void dayan_wait_mat(void)
 {
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)current, 0, 2);
-    thread_wait_produce();
+    thread_wait_unit(THREAD_WAIT_MAT);
 }
 
 void dayan_wait_vec(void)
 {
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)current, 0, 3);
-    thread_wait_produce();
+    thread_wait_unit(THREAD_WAIT_VEC);
 }
 
 void dayan_wait_macro(void)
 {
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)current, 0, 4);
-    thread_wait_produce();
+    thread_wait_unit(THREAD_WAIT_MACRO);
 }
 
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));

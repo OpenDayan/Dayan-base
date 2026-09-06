@@ -47,9 +47,11 @@ TP-relative/TLS relocation，链接脚本也会拒绝 `.tdata` 和 `.tbss`。
 
 thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始，其余值
 表示不同等待原因。`thread_start()` 构造后使用 `THREAD_WAIT_START`；root 提交无依赖 Wait 后
-进入 `THREAD_READY`，创建回复完成后才可能被选中执行。运行期使用 `THREAD_WAIT_POLL`、
-`THREAD_WAIT_EVENT`、`THREAD_WAIT_PRODUCE`、`THREAD_KILL_WAIT_PRODUCE` 和
-`THREAD_WAIT_EXIT`。CPU 私有结构同时持有这些线程的 slot 和运行期元数据；hart ID
+进入 `THREAD_READY`，创建回复完成后才可能被选中执行。运行期使用 `THREAD_POLLING`、
+`THREAD_WAIT_EVENT`、`THREAD_WAIT_START`、`THREAD_WAIT_EXIT`、`THREAD_WAIT_LSU`、
+`THREAD_WAIT_MAT`、`THREAD_WAIT_VEC`、`THREAD_WAIT_MACRO`、`THREAD_YIELD`、
+`THREAD_WAIT_JOIN`、`THREAD_WAIT_RESOURCE` 和 `THREAD_KILL_WAIT_PRODUCE`；旧的
+`THREAD_WAIT_PRODUCE` 仍保留为兼容状态。CPU 私有结构同时持有这些线程的 slot 和运行期元数据；hart ID
 由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
 
 固件不允许定义独立的可变全局或函数内 static 变量，包括普通 `.data`/`.bss` 和
@@ -421,9 +423,9 @@ Hart 上交错执行，从而提高 LSU 与计算单元的利用率。
 流水的特殊算子，典型例子是需要在四个 Core 间广播 A/B tile 的矩阵乘。这类
 算子再使用 `kFourCore`、Shared Named Resource 和独立的 loader/copy/MAT/store Thread。
 
-`dayan_cluster_barrier(4, barrier)` 只用于四 Core 调度模式。barrier 是放在当前
+`dayan_cluster_barrier(participants, barrier)` 只用于四 Core 调度模式，`participants` 可为 1--4。barrier 是放在当前
 `shared` allocation 内的零初始化 16-byte 对象。每个 lane 通过 `AMOADD.D`
-领取单调 ticket，直接忙等到达计数跨过本轮边界，不切出当前 Thread，因此不需要 AMOSWAP、LR/SC 或清零
+领取单调 ticket，先轮询 64 次；未到达本轮边界时以最低优先级的 polling Wait 让出，再继续等待，因此不需要 AMOSWAP、LR/SC 或清零
 计数，同一对象也可以跨多轮复用。Server 在启动任何 lane 前，会把本次 launch 的
 整个 shared allocation 初始化为零；不会清空可能仍被其它 kernel 使用的全局
 Atomic Cache backing。

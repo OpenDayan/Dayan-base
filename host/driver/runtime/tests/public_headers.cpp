@@ -15,7 +15,15 @@ static_assert(offsetof(dayan_kernel_resource_desc_t, flags) == 4);
 static_assert(offsetof(dayan_kernel_resource_desc_t, max_tasks_per_core) == 2);
 static_assert(NPU_KERNEL_LOCKED_TASK == NPU_PACKAGE_KERNEL_LOCKED_TASK);
 static_assert(NPU_PROFILE_PROC_RUNNING == 0);
+static_assert(NPU_PROFILE_PROC_POLLING == 2);
 static_assert(NPU_PROFILE_PROC_KILL_WAIT_PRODUCE == 7);
+static_assert(NPU_PROFILE_PROC_WAIT_LSU == 8);
+static_assert(NPU_PROFILE_PROC_WAIT_MAT == 9);
+static_assert(NPU_PROFILE_PROC_WAIT_VEC == 10);
+static_assert(NPU_PROFILE_PROC_WAIT_MACRO == 11);
+static_assert(NPU_PROFILE_PROC_YIELD == 12);
+static_assert(NPU_PROFILE_PROC_WAIT_JOIN == 13);
+static_assert(NPU_PROFILE_PROC_WAIT_RESOURCE == 14);
 
 int public_headers_compile()
 {
