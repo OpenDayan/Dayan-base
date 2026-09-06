@@ -94,7 +94,7 @@ if $nm --defined-only --format=posix "$elf" | \
 fi
 grep -Eq 'beqz[[:space:]]+tp,' <<<"$switch_dump" ||
     fail "first dispatch must skip saving a boot thread"
-for encoding in 0000130b 0006d38b 0002028b 0002228b; do
+for encoding in 0000130b 0006d38b 00020e0b 00022e8b; do
     grep -Fq "$encoding" <<<"$switch_raw" ||
         fail "switch_context hardware instruction $encoding is missing"
 done
@@ -110,6 +110,10 @@ spill_line=$(grep -n -m1 'sd[[:space:]]\+s0,' <<<"$switch_dump" |
     [ -n "$spill_line" ] && [ "$mip_line" -lt "$pop_line" ] &&
     [ "$pop_line" -lt "$same_line" ] && [ "$same_line" -lt "$spill_line" ] ||
     fail "switch_context must select mip/token/same-tp before spilling s0"
+grep -Eq 'li[[:space:]]+t6, 0x80' <<<"$switch_dump" &&
+    grep -Eq 'addi[[:space:]]+t6, t6, -0x1' <<<"$switch_dump" &&
+    grep -Eq 'beqz[[:space:]]+t6,' <<<"$switch_dump" ||
+    fail "empty scheduler pops must batch 128 attempts between MSIP samples"
 switch_selection=$(sed -n "1,$((spill_line - 1))p" <<<"$switch_dump")
 if grep -Eq '(^|[[:space:],(])s(0|1|2|3|4|5|6|7|8|9|10|11)([[:space:],)]|$)' \
         <<<"$switch_selection"; then
@@ -119,12 +123,11 @@ for load in \
     'ld[[:space:]]+t2, 0x8\(t1\)' \
     'ld[[:space:]]+t3, 0x18\(t1\)' \
     'lwu[[:space:]]+t4, 0x20\(t1\)' \
-    'ld[[:space:]]+t5, 0x10\(t1\)'; do
+    'ld[[:space:]]+a3, 0x10\(t1\)'; do
     grep -Eq "$load" <<<"$switch_dump" ||
         fail "switch_context must interleave target context loads with spills"
 done
-profile_dump=$($objdump --disassemble --no-show-raw-insn \
-    --disassemble-symbols=profile_record_thread_state "$elf")
+profile_dump=$(sed -n '/ld[[:space:]]\+t0, 0x0(a1)/,$p' <<<"$switch_dump")
 profile_stack_line=$(grep -n -m1 'addi[[:space:]]\+sp, sp,' \
     <<<"$profile_dump" | cut -d: -f1)
 [ -n "$profile_stack_line" ] || fail "profile full path must preserve its caller"
@@ -133,7 +136,7 @@ if grep -Eq '(^|[[:space:],(])(sp|s[0-9]+)([[:space:],)]|$)|[[:space:]]jalr[[:sp
         <<<"$profile_fast"; then
     fail "profile recording must not use a stack, saved registers or C calls"
 fi
-if grep -Eq '[[:space:]]mul[[:space:]]' <<<"$profile_dump"; then
+if grep -Eq '[[:space:]]mul[[:space:]]' <<<"$context_dump"; then
     fail "profile CPU-local addressing must use a constant shift"
 fi
 if grep -Eq '(jal|jalr).*<profile_record_thread_state' <<<"$switch_dump"; then
@@ -145,6 +148,10 @@ grep -Eq 'bnez[[:space:]]+a1,' <<<"$switch_dump" &&
 if grep -Eq 'lbu[[:space:]]+t0, 0x1\(t1\)|<scheduler_kill_token>' \
         <<<"$switch_dump"; then
     fail "kill handling must use the redirected PC, not a dispatch state check"
+fi
+if grep -Eq 'lbu[[:space:]]+[^,]+, 0x1\(tp\)|<scheduler_reap_thread>' \
+        <<<"$switch_dump"; then
+    fail "context switch must not inspect the outgoing state or reclaim slots"
 fi
 grep -Eq 'lhu[[:space:]]+t4, 0x0\(t1\)' <<<"$profile_fast" ||
     fail "profile slot/state must use one aligned halfword load"

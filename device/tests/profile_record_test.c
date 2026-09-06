@@ -8,6 +8,7 @@
 #include "rpc.h"
 
 _Alignas(64) uint8_t __cpu_start[CONFIG_CPU_LOCAL_SIZE];
+struct thread *scheduler_rpc_receive_threads[CONFIG_HART_COUNT];
 static struct profile_state profiler;
 static struct thread thread;
 static unsigned wakes;

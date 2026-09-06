@@ -29,22 +29,16 @@ static void rpc_transaction_init(struct rpc_transaction *transaction,
     thread_list_init(&transaction->wait);
     transaction->command = command;
     transaction->cleanup = cleanup;
-    transaction->terminal_thread = 0;
     transaction->completed = 0;
     transaction->status = 0;
 }
 
 static void rpc_transaction_send(struct rpc_transaction *transaction)
 {
-    struct thread *terminal_thread = transaction->terminal_thread;
-
     platform_rpc_send(transaction->command);
     transaction->completed = 1;
     transaction->cleanup(transaction);
-    if (terminal_thread)
-        thread_exit_deferred_complete(terminal_thread);
-    else
-        (void)thread_event_wake_all(&transaction->wait);
+    (void)thread_event_wake_all(&transaction->wait);
 }
 
 static void rpc_transaction_submit(struct rpc_transaction *transaction)
@@ -59,12 +53,26 @@ static void rpc_transaction_submit(struct rpc_transaction *transaction)
     (void)thread_event_wake_one(&rpc->send_event);
 }
 
+/* Sender and terminal callers finish queued reports before publishing exit. */
+static void rpc_send_pending(void)
+{
+    struct rpc_state *rpc = &cpu_self()->rpc;
+
+    tensor_interrupt_drain();
+    while (!list_empty(&rpc->send_queue)) {
+        struct rpc_transaction *transaction = list_first_entry(
+            &rpc->send_queue, struct rpc_transaction, node);
+
+        list_del_init(&transaction->node);
+        rpc_transaction_send(transaction);
+    }
+}
+
 static void rpc_send_main(void)
 {
     struct rpc_state *rpc = &cpu_self()->rpc;
 
     for (;;) {
-        struct rpc_transaction *transaction;
         uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
         if (list_empty(&rpc->send_queue) &&
@@ -75,13 +83,7 @@ static void rpc_send_main(void)
         } else {
             resource_scheduler_interrupt_restore(interrupt_state);
         }
-        tensor_interrupt_drain();
-        if (list_empty(&rpc->send_queue))
-            continue;
-        transaction = list_first_entry(&rpc->send_queue,
-                                        struct rpc_transaction, node);
-        list_del_init(&transaction->node);
-        rpc_transaction_send(transaction);
+        rpc_send_pending();
     }
 }
 
@@ -155,10 +157,9 @@ static void rpc_call_cleanup(struct rpc_transaction *transaction)
 }
 
 /* Firmware callers use fixed request/response types that fit one cache line. */
-static void rpc_call_start(struct rpc_call_context *call, uint16_t service,
-                          const void *request, size_t request_size,
-                          void *response, size_t response_size,
-                          struct thread *terminal_thread)
+static void rpc_call_init(struct rpc_call_context *call, uint16_t service,
+                         const void *request, size_t request_size,
+                         void *response, size_t response_size)
 {
     struct rpc_packet *packet = &call->packet;
 
@@ -182,8 +183,6 @@ static void rpc_call_start(struct rpc_call_context *call, uint16_t service,
     rpc_transaction_init(&call->transaction,
                          rpc_command_pack(service, (uintptr_t)packet),
                          rpc_call_cleanup);
-    call->transaction.terminal_thread = terminal_thread;
-    rpc_transaction_submit(&call->transaction);
 }
 
 long rpc_call(uint16_t service,
@@ -192,8 +191,9 @@ long rpc_call(uint16_t service,
 {
     struct rpc_call_context call;
 
-    rpc_call_start(&call, service, request, request_size,
-                    response, response_size, 0);
+    rpc_call_init(&call, service, request, request_size,
+                  response, response_size);
+    rpc_transaction_submit(&call.transaction);
     if (!call.transaction.completed) {
         thread_system_wait_set(current, &call.transaction);
         thread_wait_event(&call.transaction.wait);
@@ -239,6 +239,7 @@ long rpc_heap_release(uintptr_t addr, size_t size)
 long rpc_proc_exit(struct task_proc *task, int64_t result)
 {
     struct rpc_proc_exit_request request;
+    struct rpc_call_context call;
 
     request.hart_id = (uint32_t)platform_hart_id();
     request.proc_id = thread_id(&task->thread);
@@ -246,14 +247,15 @@ long rpc_proc_exit(struct task_proc *task, int64_t result)
     request.flags = RPC_PROC_EXIT_ROOT;
     request.result = result;
     request.cookie = task->descriptor.cookie;
-    if (current == &task->thread) {
-        struct rpc_call_context call;
-
-        rpc_call_start(&call, RPC_PROC_EXIT, &request, sizeof(request),
-                        0, 0, current);
-        thread_exit_defer(&call.transaction);
-    }
-    return rpc_call(RPC_PROC_EXIT, &request, sizeof(request), 0, 0);
+    /*
+     * Terminal callers must finish on this stack without being rescheduled.
+     * Senders never yield in flight; interrupts only queue work, so this
+     * blocking exchange owns the mailbox until the Host acknowledges it.
+     */
+    rpc_call_init(&call, RPC_PROC_EXIT, &request, sizeof(request), 0, 0);
+    rpc_send_pending();
+    rpc_transaction_send(&call.transaction);
+    return call.transaction.status;
 }
 
 static void rpc_trap_cleanup(struct rpc_transaction *transaction)

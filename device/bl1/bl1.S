@@ -1,4 +1,4 @@
-#include "config.h"
+#include "context.h"
 
 .section .text.bl1, "ax", @progbits
 .globl _start
@@ -9,18 +9,17 @@ _start:
     li      t0, CONFIG_HART_COUNT
     bgeu    a0, t0, .Lpark
 
-    /* Each hart gets a disjoint stack. The RISC-V ABI requires 16-byte sp. */
+    /* The linker guarantees aligned stack bases and 16-byte-sized strides. */
     la      sp, __stack_start
     li      t0, CONFIG_STACK_SIZE
     addi    t1, a0, 1
     mul     t0, t0, t1
     add     sp, sp, t0
-    andi    sp, sp, -16
 
     /* Clear CPU-local data; boot has no schedulable thread. */
     la      t2, __cpu_start
     li      t0, CONFIG_CPU_LOCAL_SIZE
-    mul     t1, a0, t0
+    slli    t1, a0, cpu_local_shift
     add     t1, t2, t1
 .Lzero_cpu:
     sd      zero, 0(t1)
@@ -52,8 +51,7 @@ _start:
     /* RPC MSIP is polled; enable only the tensor machine-external IRQ. */
     li      t0, 0x800
     csrw    mie, t0
-    li      t0, 0x8
-    csrs    mstatus, t0
+    csrsi   mstatus, 8
     tail    switch_context
 
 .Lpark:

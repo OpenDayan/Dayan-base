@@ -74,9 +74,6 @@ void thread_wait_produce(void);
 uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
                                int8_t qos);
 void thread_wait_rpc(void);
-void scheduler_reap_thread(struct thread *thread);
-_Noreturn void thread_exit_defer(void *wait);
-void thread_exit_deferred_complete(struct thread *thread);
 _Noreturn void thread_exit(void);
 _Noreturn void thread_exit_status(int64_t status);
 

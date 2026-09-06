@@ -129,10 +129,7 @@ _Noreturn void platform_rpc_halt(void)
 
     *rpc_interrupt_reg(DAYAN_IRQ_ENABLE_CLR) = mask;
     __asm__ volatile("fence iorw, iorw" ::: "memory");
-    __asm__ volatile(
-        "li t0, 8\n"
-        "csrc mstatus, t0"
-        ::: "t0", "memory");
+    __asm__ volatile("csrci mstatus, 8" ::: "memory");
     /*
      * This Hart is about to re-enter BL0 without resetting the tensor block.
      * Its other permanent workers are stopped in switch_context, so discard

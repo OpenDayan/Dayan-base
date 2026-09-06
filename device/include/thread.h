@@ -40,7 +40,6 @@ struct thread {
     uint64_t tensor_context;
     uint32_t resource_context;
     uint8_t token_ext;
-    uint8_t reap_deferred;
     char name[THREAD_NAME_SIZE];
     uint8_t profile_defined;
 };

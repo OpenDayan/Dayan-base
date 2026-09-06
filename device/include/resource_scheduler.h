@@ -16,19 +16,16 @@
 static inline uintptr_t resource_scheduler_interrupt_disable(void)
 {
     uintptr_t previous;
-    uintptr_t mask = 8U;
-
-    __asm__ volatile("csrrc %0, mstatus, %1"
+    __asm__ volatile("csrrci %0, mstatus, 8"
                      : "=r"(previous)
-                     : "r"(mask)
+                     :
                      : "memory");
     return previous;
 }
 
 static inline void resource_scheduler_interrupt_restore(uintptr_t previous)
 {
-    if (previous & 8U)
-        __asm__ volatile("csrsi mstatus, 8" ::: "memory");
+    __asm__ volatile("csrs mstatus, %0" : : "r"(previous & 8U) : "memory");
 }
 
 static inline void resource_scheduler_submit(uint64_t wait_free,

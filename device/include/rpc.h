@@ -407,7 +407,7 @@ long rpc_write_proc(uint32_t proc_id, const void *data, size_t size);
 long rpc_heap_acquire(size_t size, struct rpc_heap_response *response);
 long rpc_heap_release(uintptr_t addr, size_t size);
 struct task_proc;
-/* A root reporting its own exit defers stack reclamation until Host ack. */
+/* Blocks through Host ack without switching; caller then reclaims the family. */
 long rpc_proc_exit(struct task_proc *task, int64_t result);
 
 #endif

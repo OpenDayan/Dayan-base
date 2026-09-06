@@ -31,7 +31,7 @@ enum slot_state {
     SLOT_RESERVED,
     SLOT_CHILD,
     SLOT_ZOMBIE,
-    SLOT_KILLED, /* Token queued or cleanup running; cleared only after switch. */
+    SLOT_KILLED, /* Token pending; cleared once in thread_kill_resume. */
 };
 
 static union thread_slot
@@ -48,6 +48,7 @@ static unsigned char
 
 struct thread *scheduler_rpc_receive_threads[CONFIG_HART_COUNT] SLOT_ARRAY;
 
+_Static_assert(THREAD_RUNNING == 0, "assembly stores zero for RUNNING");
 _Static_assert(offsetof(struct thread, state) == THREAD_STATE_OFFSET,
                "assembly thread state offset");
 _Static_assert(offsetof(struct thread, slot) == THREAD_SLOT_OFFSET &&
@@ -66,9 +67,6 @@ _Static_assert(offsetof(struct thread, resource_context) ==
                "assembly thread Context2 offset");
 _Static_assert(offsetof(struct thread, token_ext) == THREAD_TOKEN_EXT_OFFSET,
                "assembly thread token extension offset");
-_Static_assert(offsetof(struct thread, reap_deferred) ==
-                   THREAD_REAP_DEFERRED_OFFSET,
-               "assembly deferred reap offset");
 
 /* Each Hart owns one cache-line-isolated structure of per-slot arrays. */
 struct thread_runtime {
@@ -228,20 +226,17 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
         thread_schedule(thread);
 }
 
-/* Call only after every family member has left its stack and token queue. */
-static unsigned task_proc_release(uint8_t root)
+/* No family tokens may remain. A terminal caller must next abandon its stack. */
+static void task_proc_release(uint8_t root)
 {
     struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
-    unsigned released = 0;
 
     for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
         if (runtime->slot_owner[TASK_INDEX(slot)] != root)
             continue;
         runtime->slot_owner[TASK_INDEX(slot)] = THREAD_SLOT_NONE;
         runtime->slot_state[slot] = SLOT_FREE;
-        ++released;
     }
-    return released;
 }
 
 struct task_proc *task_proc_create(const struct rpc_proc_create_request *request)
@@ -600,10 +595,31 @@ void proc_profile_snapshot(int reset)
     }
 }
 
-/* Entered via the redirected PC on a fresh stack; no old frame is restored. */
+/*
+ * The redirected PC enters once on a fresh stack. Earlier members leave their
+ * slots reserved; the last member reports completion and releases the family.
+ * No yield occurs between clearing SLOT_KILLED and abandoning this stack.
+ */
 static _Noreturn void thread_kill_resume(void)
 {
-    thread_state_set(current, THREAD_WAIT_EXIT);
+    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread *thread = current;
+    uint8_t slot = thread_slot_id(thread);
+    uint8_t root = runtime->slot_owner[TASK_INDEX(slot)];
+
+    thread_state_set(thread, THREAD_WAIT_EXIT);
+    runtime->slot_state[slot] = slot == root ? SLOT_ROOT : SLOT_ZOMBIE;
+    for (uint8_t member = TASK_SLOT_FIRST; member <= TASK_SLOT_LAST; ++member) {
+        if (runtime->slot_owner[TASK_INDEX(member)] == root &&
+            runtime->slot_state[member] == SLOT_KILLED)
+            goto leave;
+    }
+    (void)rpc_proc_exit((struct task_proc *)thread_slot_get(root),
+                       runtime->result[TASK_INDEX(root)]);
+    task_proc_release(root);
+leave:
+    /* No allocation/switch can reuse this stack before the next handoff. */
+    current = 0;
     switch_context();
     __builtin_unreachable();
 }
@@ -619,34 +635,15 @@ static void kill_mark_thread(struct thread *thread, int64_t status)
     runtime->result[TASK_INDEX(slot)] = status;
     if (thread->state == THREAD_WAIT_EVENT)
         thread_list_remove(thread);
-    if (waiting_token) {
-        /* Keep the slot pending until the redirected thread leaves its stack. */
-        runtime->slot_state[slot] = SLOT_KILLED;
-        thread->sp = ((uintptr_t)hart_thread_stacks[hart][TASK_INDEX(slot)] +
-                       task_child_stack_size(task_proc_for(thread))) &
-                      ~(uintptr_t)0xf;
-        thread->pc = (uintptr_t)thread_kill_resume;
-    }
-    thread_state_set(thread, waiting_token ? THREAD_KILL_WAIT_PRODUCE :
-                                             THREAD_WAIT_EXIT);
-}
-
-static uint32_t family_pending_produce(uint8_t root)
-{
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
-    uint32_t count = 0;
-
-    for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot)
-        count += runtime->slot_owner[TASK_INDEX(slot)] == root &&
-                 runtime->slot_state[slot] == SLOT_KILLED;
-    return count;
-}
-
-static unsigned killed_family_release(uint8_t root)
-{
-    if (family_pending_produce(root))
-        return 0;
-    return task_proc_release(root);
+    runtime->slot_state[slot] = SLOT_KILLED;
+    thread->sp = ((uintptr_t)hart_thread_stacks[hart][TASK_INDEX(slot)] +
+                   task_child_stack_size(task_proc_for(thread))) &
+                  ~(uintptr_t)0xf;
+    thread->pc = (uintptr_t)thread_kill_resume;
+    /* Event/join waiters have no token; submit one dependency-free cleanup. */
+    if (!waiting_token)
+        thread_schedule(thread);
+    thread_state_set(thread, THREAD_KILL_WAIT_PRODUCE);
 }
 
 int proc_kill_all(struct rpc_proc_kill_result *result)
@@ -697,8 +694,6 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
         return -ESRCH;
 
     for (uint8_t root = TASK_SLOT_FIRST; root <= TASK_SLOT_LAST; ++root) {
-        struct task_proc *task = (struct task_proc *)thread_slot_get(root);
-
         if (!(selected_roots & (1U << TASK_INDEX(root))))
             continue;
         for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
@@ -723,10 +718,8 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
                 thread_system_wait_set(thread, 0);
             }
             (void)thread_output_flush(thread);
+            ++result->waiting_produce;
         }
-        (void)rpc_proc_exit(task, runtime->result[TASK_INDEX(root)]);
-        result->waiting_produce += family_pending_produce(root);
-        result->released_slots += killed_family_release(root);
     }
     return 0;
 }
@@ -812,22 +805,6 @@ void thread_yield(void)
     switch_context();
 }
 
-_Noreturn void thread_exit_defer(void *wait)
-{
-    thread_system_wait_set(current, wait);
-    current->reap_deferred = 1;
-    thread_state_set(current, THREAD_WAIT_EXIT);
-    switch_context();
-    __builtin_unreachable();
-}
-
-void thread_exit_deferred_complete(struct thread *thread)
-{
-    thread_system_wait_set(thread, 0);
-    thread->reap_deferred = 0;
-    scheduler_reap_thread(thread);
-}
-
 _Noreturn void thread_exit_status(int64_t status)
 {
     struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
@@ -840,8 +817,10 @@ _Noreturn void thread_exit_status(int64_t status)
         *result = status;
     (void)thread_join_all();
     (void)thread_output_flush(thread);
+    thread_state_set(thread, THREAD_WAIT_EXIT);
     if (thread->type == THREAD_TYPE_TASK_PROC) {
         (void)rpc_proc_exit(task, *result);
+        task_proc_release(slot);
     } else {
         int64_t *parent_result = &runtime->result[TASK_INDEX(thread->parent)];
 
@@ -850,7 +829,8 @@ _Noreturn void thread_exit_status(int64_t status)
             *parent_result = *result;
         (void)thread_event_wake_all(&runtime->wait_exit[TASK_INDEX(slot)]);
     }
-    thread_state_set(thread, THREAD_WAIT_EXIT);
+    /* Join/PROC_EXIT owns reclamation; never save or resume this context. */
+    current = 0;
     switch_context();
     __builtin_unreachable();
 }
@@ -858,22 +838,6 @@ _Noreturn void thread_exit_status(int64_t status)
 _Noreturn void thread_exit(void)
 {
     thread_exit_status(0);
-}
-
-void scheduler_reap_thread(struct thread *thread)
-{
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
-    uint8_t slot = thread_slot_id(thread);
-
-    if (runtime->slot_state[slot] == SLOT_KILLED) {
-        uint8_t root = runtime->slot_owner[TASK_INDEX(slot)];
-
-        runtime->slot_state[slot] = thread->type == THREAD_TYPE_TASK_PROC ?
-                                       SLOT_ROOT : SLOT_ZOMBIE;
-        (void)killed_family_release(root);
-    } else if (thread->type == THREAD_TYPE_TASK_PROC) {
-        (void)task_proc_release(slot);
-    }
 }
 
 void sche_init(void)

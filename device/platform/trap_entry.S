@@ -4,6 +4,11 @@
 .align 2
 .globl trap_entry
 .type trap_entry, @function
+/*
+ * Capture the complete integer/CSR frame for diagnostics. C handlers use no
+ * FP state, preserve gp/tp and never switch threads; s0-s11 survive by the C
+ * ABI. Only caller-saved GPRs need explicit reloads on return.
+ */
 trap_entry:
     csrrw   sp, mscratch, sp
     addi    sp, sp, -TRAP_FRAME_SIZE
@@ -46,39 +51,22 @@ trap_entry:
     sd      t0, TRAP_FRAME_MSTATUS(sp)
     csrr    t0, mepc
     sd      t0, TRAP_FRAME_MEPC(sp)
-    csrr    t0, mcause
-    sd      t0, TRAP_FRAME_MCAUSE(sp)
     csrr    t0, mtval
     sd      t0, TRAP_FRAME_MTVAL(sp)
     csrr    t0, fcsr
     sd      t0, TRAP_FRAME_FCSR(sp)
     sd      zero, TRAP_FRAME_RESERVED(sp)
 
-    /* MSIP is a polled doorbell; only the receive thread may acknowledge it. */
-    ld      t0, TRAP_FRAME_MCAUSE(sp)
-    li      t1, 0x8000000000000003
-    beq     t0, t1, .Ltrap_restore
-    li      t1, 0x800000000000000b
-    beq     t0, t1, .Ltrap_resume_tensor
-
-    mv      a0, sp
-    call    trap_handle
-    /* Leave the trap stack and restore MIE before any blocking RPC or join. */
-    la      t0, trap_exit
-    csrw    mepc, t0
-    j       .Ltrap_restore
-
-.Ltrap_resume_tensor:
+    /* BL1 enables only tensor MEIE; MSIP is polled and cannot trap here. */
+    csrr    t0, mcause
+    sd      t0, TRAP_FRAME_MCAUSE(sp)
+    bgez    t0, .Ltrap_exception
     mv      a0, sp
     call    tensor_interrupt_handle
 
 .Ltrap_restore:
     ld      ra, TRAP_FRAME_X1(sp)
-    ld      gp, TRAP_FRAME_X3(sp)
-    ld      tp, TRAP_FRAME_X4(sp)
     ld      t2, TRAP_FRAME_X7(sp)
-    ld      s0, TRAP_FRAME_X8(sp)
-    ld      s1, TRAP_FRAME_X9(sp)
     ld      a0, TRAP_FRAME_X10(sp)
     ld      a1, TRAP_FRAME_X11(sp)
     ld      a2, TRAP_FRAME_X12(sp)
@@ -87,16 +75,6 @@ trap_entry:
     ld      a5, TRAP_FRAME_X15(sp)
     ld      a6, TRAP_FRAME_X16(sp)
     ld      a7, TRAP_FRAME_X17(sp)
-    ld      s2, TRAP_FRAME_X18(sp)
-    ld      s3, TRAP_FRAME_X19(sp)
-    ld      s4, TRAP_FRAME_X20(sp)
-    ld      s5, TRAP_FRAME_X21(sp)
-    ld      s6, TRAP_FRAME_X22(sp)
-    ld      s7, TRAP_FRAME_X23(sp)
-    ld      s8, TRAP_FRAME_X24(sp)
-    ld      s9, TRAP_FRAME_X25(sp)
-    ld      s10, TRAP_FRAME_X26(sp)
-    ld      s11, TRAP_FRAME_X27(sp)
     ld      t3, TRAP_FRAME_X28(sp)
     ld      t4, TRAP_FRAME_X29(sp)
     ld      t5, TRAP_FRAME_X30(sp)
@@ -106,6 +84,14 @@ trap_entry:
     addi    sp, sp, TRAP_FRAME_SIZE
     csrrw   sp, mscratch, sp
     mret
+
+.Ltrap_exception:
+    mv      a0, sp
+    call    trap_handle
+    /* Leave the trap stack and restore MIE before any blocking RPC or join. */
+    la      t0, trap_exit
+    csrw    mepc, t0
+    j       .Ltrap_restore
 .size trap_entry, . - trap_entry
 
 .section .note.GNU-stack, "", @progbits

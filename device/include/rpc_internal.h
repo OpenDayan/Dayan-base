@@ -16,7 +16,6 @@ struct rpc_transaction {
     struct list_head node;
     uint64_t command;
     rpc_cleanup_fn cleanup;
-    struct thread *terminal_thread;
     long status;
     volatile uint32_t completed;
     struct thread_list wait;

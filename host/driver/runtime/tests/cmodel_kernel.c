@@ -175,9 +175,10 @@ static void kill_produce_child(void *argument)
         dayan_wait_lsu();
 }
 
-void kill_kernel(uint64_t *output, uint64_t value)
+void kill_kernel(uint64_t *output, uint64_t value, uint64_t join_root)
 {
     uintptr_t pending;
+    int child;
 
     *output = value;
     output[8] = 0;
@@ -193,14 +194,18 @@ void kill_kernel(uint64_t *output, uint64_t value)
     }
 
     /* Host has finished PS. Keep the new child unstarted until kill's MSIP. */
-    if (dayan_create_thread("kill-unstarted", trap_child, 0, 0) < 0)
+    child = dayan_create_thread("kill-unstarted", trap_child, 0, 0);
+    if (child < 0)
         dayan_thread_exit(-1);
     output[8] = 1;
     dayan_cache_flush(&output[8], sizeof(output[8]));
     do {
         __asm__ volatile("csrr %0, mip" : "=r"(pending));
     } while (!(pending & 8U));
-    dayan_yield();
+    if (join_root)
+        (void)dayan_thread_join((uint32_t)child, 0);
+    else
+        dayan_yield();
     __asm__ volatile(".word 0");
 }
 

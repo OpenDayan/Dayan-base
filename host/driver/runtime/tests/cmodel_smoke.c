@@ -44,6 +44,8 @@ struct run_state {
 };
 
 struct proc_exit_capture {
+    pthread_mutex_t interrupt_lock;
+    pthread_cond_t interrupt_ready;
     unsigned count;
     unsigned returned;
     unsigned cancelled;
@@ -119,7 +121,10 @@ static void capture_tensor_interrupt(void *context, uint32_t cluster,
     if (cluster || core >= 4 || record->hart_id != core ||
         record->mcause != UINT64_C(0x800000000000000b))
         __atomic_add_fetch(&capture->bad, 1U, __ATOMIC_RELAXED);
-    __atomic_fetch_or(&capture->interrupt_mask, 1U << core, __ATOMIC_RELAXED);
+    pthread_mutex_lock(&capture->interrupt_lock);
+    capture->interrupt_mask |= 1U << core;
+    pthread_cond_signal(&capture->interrupt_ready);
+    pthread_mutex_unlock(&capture->interrupt_lock);
 }
 
 static void capture_proc_exit(void *context, uint32_t cluster,
@@ -149,7 +154,8 @@ static int wait_and_destroy(npu_event_t *event);
 
 static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
                          npu_stream_t *transfer_stream,
-                         npu_kernel_t *kernel, npu_buffer_t *buffer)
+                         npu_kernel_t *kernel, npu_buffer_t *buffer,
+                         uint64_t join_root)
 {
     npu_service_kill_result_t killed;
     npu_service_proc_snapshot_t snapshot;
@@ -169,10 +175,11 @@ static int run_kill_test(dayan_server_t *server, npu_stream_t *stream,
     npu_launch_desc_init(&launch, "kill-test");
     launch.config.task_dim = (NPUTaskDim3){ 1, 1, 1 };
     launch.config.task_mode = (NPUTaskMode)1;
-    launch.arg_count = 2;
+    launch.arg_count = 3;
     npu_kernel_arg_buffer(&launch.args[0], buffer, 0,
                           NPU_KERNEL_ARG_READ | NPU_KERNEL_ARG_WRITE);
     npu_kernel_arg_value(&launch.args[1], value, sizeof(value));
+    npu_kernel_arg_value(&launch.args[2], join_root, sizeof(join_root));
     status = npu_kernel_launch(stream, kernel, &launch, &event);
     if (status < 0) {
         fprintf(stderr, "kill test launch failed: %d\n", status);
@@ -822,7 +829,7 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
 
 int main(int argc, char **argv)
 {
-    npu_package_argument_t arguments[4];
+    npu_package_argument_t arguments[5];
     npu_package_kernel_desc_t kernel_desc[8];
     dayan_server_options_t server_options;
     npu_hal_xdma_options_t xdma_options;
@@ -845,7 +852,10 @@ int main(int argc, char **argv)
     npu_profile_t *profile = 0;
     dayan_server_t *server = 0;
     struct run_state run;
-    struct proc_exit_capture exits = { 0 };
+    struct proc_exit_capture exits = {
+        .interrupt_lock = PTHREAD_MUTEX_INITIALIZER,
+        .interrupt_ready = PTHREAD_COND_INITIALIZER,
+    };
     pthread_t server_thread;
     void *object = 0;
     void *package = 0;
@@ -884,6 +894,7 @@ int main(int argc, char **argv)
     arguments[2] = arguments[0];
     arguments[2].access = NPU_PACKAGE_ARG_READ | NPU_PACKAGE_ARG_WRITE;
     arguments[3] = arguments[1];
+    arguments[4] = arguments[1];
     memset(kernel_desc, 0, sizeof(kernel_desc));
     kernel_desc[0].name = "grid_kernel";
     kernel_desc[0].entry_symbol = "grid_kernel";
@@ -899,6 +910,7 @@ int main(int argc, char **argv)
     kernel_desc[1].entry_symbol = "kill_kernel";
     kernel_desc[1].max_child_threads = 3;
     kernel_desc[1].arguments = &arguments[2];
+    kernel_desc[1].argument_count = 3;
     kernel_desc[2].name = "locked_kernel";
     kernel_desc[2].entry_symbol = "locked_kernel";
     kernel_desc[2].supported_task_modes =
@@ -1151,10 +1163,24 @@ int main(int argc, char **argv)
         status = run_grid(stream, interrupt_kernel, buffer,
                           (NPUTaskDim3){ count, 1, 1 }, count,
                           UINT64_C(0x4567890000006000), output, count);
-        if (status == 0 &&
-            __atomic_load_n(&exits.interrupt_mask, __ATOMIC_RELAXED) !=
-                (1U << count) - 1U)
-            status = -EIO;
+        if (status == 0) {
+            struct timespec deadline;
+
+            /* Hardware reports are asynchronous, including after proc exit. */
+            clock_gettime(CLOCK_REALTIME, &deadline);
+            deadline.tv_sec += 10;
+            pthread_mutex_lock(&exits.interrupt_lock);
+            while (exits.interrupt_mask != (1U << count) - 1U) {
+                int wait_status = pthread_cond_timedwait(
+                    &exits.interrupt_ready, &exits.interrupt_lock, &deadline);
+
+                if (wait_status) {
+                    status = -wait_status;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&exits.interrupt_lock);
+        }
     }
     if (status == 0) {
         stage = "kill after print ack";
@@ -1169,7 +1195,12 @@ int main(int argc, char **argv)
     if (status == 0) {
         stage = "rpc kill family";
         status = run_kill_test(server, stream, transfer_stream,
-                               killable_kernel, buffer);
+                               killable_kernel, buffer, 0);
+    }
+    if (status == 0) {
+        stage = "rpc kill family during join";
+        status = run_kill_test(server, stream, transfer_stream,
+                               killable_kernel, buffer, 1);
     }
     if (status == 0) {
         stage = "profile stop and drain";
@@ -1180,7 +1211,7 @@ int main(int argc, char **argv)
     if (status == 0 &&
         (__atomic_load_n(&exits.bad, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.count, __ATOMIC_RELAXED) !=
-                 10U + (core_count == 1 ? 2U : 0U) +
+                 11U + (core_count == 1 ? 2U : 0U) +
                      (core_count == 4 ? 4U : 1U) +
                      (core_count == 4 ? 8U : 0U) + consecutive_launches +
                      (core_count == 4 ? 4U : 1U) ||
@@ -1190,7 +1221,7 @@ int main(int argc, char **argv)
                      (core_count == 4 ? 8U : 0U) + consecutive_launches ||
          __atomic_load_n(&exits.cancelled, __ATOMIC_RELAXED) ||
          __atomic_load_n(&exits.failed, __ATOMIC_RELAXED) !=
-             (core_count == 4 ? 6U : 3U))) {
+             (core_count == 4 ? 7U : 4U))) {
         stage = "root-only proc exit notification";
         status = -EIO;
     }
@@ -1231,6 +1262,8 @@ int main(int argc, char **argv)
     dayan_server_request_stop(server);
     (void)pthread_join(server_thread, 0);
     dayan_server_destroy(server);
+    pthread_cond_destroy(&exits.interrupt_ready);
+    pthread_mutex_destroy(&exits.interrupt_lock);
     if (status < 0 || run.status < 0)
         return 1;
     puts("cmodel smoke: BL1, logical grid, locked tasks and consecutive "

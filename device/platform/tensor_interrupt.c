@@ -29,8 +29,6 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     uint64_t control;
     size_t i;
 
-    if (!current)
-        platform_halt();
     __builtin_riscv_tx_base_tcsr_read(0, 1);
     __builtin_riscv_tx_base_tcsr_read(0, 2);
     __builtin_riscv_tx_base_tcsr_read(0, 3);
@@ -47,11 +45,14 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     record = tensor_interrupt_record_get(state->pending);
     memset(record, 0, sizeof(*record));
     record->hart_id = (uint32_t)platform_hart_id();
-    record->thread_id = thread_id(current);
-    record->thread_type = current->type;
-    record->thread_state = current->state;
+    /* A terminal thread may have abandoned tp while dispatch waits for work. */
+    if (current) {
+        record->thread_id = thread_id(current);
+        record->thread_type = current->type;
+        record->thread_state = current->state;
+        record->tensor_context = current->tensor_context;
+    }
     record->recent_count = (uint32_t)((control >> 9) & 0x1fU);
-    record->tensor_context = current->tensor_context;
     record->control = control;
     record->interrupt_count = __builtin_riscv_tx_base_tcsr_read(5, 33);
     record->recent[0] = __builtin_riscv_tx_base_tcsr_read(5, 17);
