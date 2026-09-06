@@ -17,13 +17,13 @@
 #include "tensor_context.h"
 
 extern void proc_bootstrap(void);
+extern unsigned char __proc_stack_start[];
+extern unsigned char __proc_printf_start[];
 
 #define THREAD_SLOT_COUNT       RPC_PROFILE_SLOT_COUNT
 #define TASK_SLOT_FIRST         RPC_PROFILE_SLOT_USER_BASE
 #define TASK_SLOT_LAST          CONFIG_PROC_SLOT_COUNT
-#define TASK_SLOT_COUNT         CONFIG_PROC_SLOT_COUNT
 #define SYSTEM_SLOT_FIRST       RPC_PROFILE_SLOT_RPC_RECEIVE
-#define SLOT_ARRAY __attribute__((section(".proc_slots")))
 
 enum slot_state {
     SLOT_FREE = 0,
@@ -33,20 +33,6 @@ enum slot_state {
     SLOT_ZOMBIE,
     SLOT_KILLED, /* Token pending; cleared once in thread_kill_resume. */
 };
-
-static union thread_slot
-    hart_thread_slots[CONFIG_HART_COUNT][THREAD_SLOT_COUNT - 1U]
-    __attribute__((section(".proc_slots"), aligned(64)));
-static unsigned char
-    hart_thread_stacks[CONFIG_HART_COUNT][CONFIG_PROC_SLOT_COUNT]
-                      [CONFIG_PROC_STACK_SIZE]
-    __attribute__((section(".proc_stack"), aligned(64)));
-static unsigned char
-    hart_thread_printf[CONFIG_HART_COUNT][CONFIG_PROC_SLOT_COUNT]
-                      [CONFIG_PROC_PRINTF_SIZE]
-    __attribute__((section(".proc_printf"), aligned(64)));
-
-struct thread *scheduler_rpc_receive_threads[CONFIG_HART_COUNT] SLOT_ARRAY;
 
 _Static_assert(THREAD_RUNNING == 0, "assembly stores zero for RUNNING");
 _Static_assert(offsetof(struct thread, state) == THREAD_STATE_OFFSET,
@@ -68,29 +54,12 @@ _Static_assert(offsetof(struct thread, resource_context) ==
 _Static_assert(offsetof(struct thread, token_ext) == THREAD_TOKEN_EXT_OFFSET,
                "assembly thread token extension offset");
 
-/* Each Hart owns one cache-line-isolated structure of per-slot arrays. */
-struct thread_runtime {
-    void *system_wait[THREAD_SLOT_COUNT - 1U];
-    int64_t result[TASK_SLOT_COUNT];
-    struct thread_list *list_owner[THREAD_SLOT_COUNT];
-    struct thread_list wait_exit[TASK_SLOT_COUNT];
-    uint16_t output_size[TASK_SLOT_COUNT];
-    uint8_t slot_state[THREAD_SLOT_COUNT];
-    uint8_t slot_owner[TASK_SLOT_COUNT];
-    uint8_t generation[THREAD_SLOT_COUNT];
-} __attribute__((aligned(64)));
-
-static struct thread_runtime hart_thread_runtime[CONFIG_HART_COUNT] SLOT_ARRAY;
-
-#define HART_RUNTIME(hart) hart_thread_runtime[(hart)]
 #define TASK_INDEX(slot)   ((slot) - TASK_SLOT_FIRST)
 #define WAIT_INDEX(slot)   ((slot) - 1U)
 
 struct thread *thread_slot_get(uint8_t slot)
 {
-    uintptr_t hart = platform_hart_id();
-
-    return &hart_thread_slots[hart][slot - 1U].thread;
+    return &cpu_self()->threads.slots[slot - 1U].thread;
 }
 
 uint8_t thread_slot_id(const struct thread *thread)
@@ -100,7 +69,7 @@ uint8_t thread_slot_id(const struct thread *thread)
 
 static enum slot_state slot_state_get(uint8_t slot)
 {
-    return (enum slot_state)HART_RUNTIME(platform_hart_id()).slot_state[slot];
+    return (enum slot_state)cpu_self()->threads.slot_state[slot];
 }
 
 void thread_list_init(struct thread_list *list)
@@ -111,9 +80,8 @@ void thread_list_init(struct thread_list *list)
 
 static void thread_list_remove(struct thread *thread)
 {
-    uintptr_t hart = platform_hart_id();
     uint8_t slot = thread_slot_id(thread);
-    struct thread_list *list = HART_RUNTIME(hart).list_owner[slot];
+    struct thread_list *list = cpu_self()->threads.list_owner[slot];
     uint8_t previous = thread->node.prev;
     uint8_t next = thread->node.next;
 
@@ -136,7 +104,7 @@ static struct task_proc *task_proc_for(struct thread *thread)
         return 0;
     slot = thread_slot_id(thread);
     return (struct task_proc *)thread_slot_get(
-        HART_RUNTIME(platform_hart_id()).slot_owner[TASK_INDEX(slot)]);
+        cpu_self()->threads.slot_owner[TASK_INDEX(slot)]);
 }
 
 struct thread *thread_self(void)
@@ -193,7 +161,7 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
                  void *stack, size_t stack_size, void *shared_base,
                  size_t argc, const uintptr_t *args)
 {
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread_runtime *runtime = &cpu_self()->threads;
     uintptr_t top = ((uintptr_t)stack + stack_size) & ~(uintptr_t)0xf;
     struct proc_frame *frame = (struct proc_frame *)(top - sizeof(*frame));
 
@@ -229,7 +197,7 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
 /* No family tokens may remain. A terminal caller must next abandon its stack. */
 static void task_proc_release(uint8_t root)
 {
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread_runtime *runtime = &cpu_self()->threads;
 
     for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
         if (runtime->slot_owner[TASK_INDEX(slot)] != root)
@@ -241,8 +209,7 @@ static void task_proc_release(uint8_t root)
 
 struct task_proc *task_proc_create(const struct rpc_proc_create_request *request)
 {
-    uintptr_t hart = platform_hart_id();
-    struct thread_runtime *runtime = &HART_RUNTIME(hart);
+    struct thread_runtime *runtime = &cpu_self()->threads;
     struct task_proc *task;
     uint8_t root = THREAD_SLOT_NONE;
     unsigned remaining = 1U + request->max_child_threads;
@@ -277,7 +244,7 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
     task->descriptor.cookie = request->cookie;
     thread_start(&task->thread, root, THREAD_TYPE_TASK_PROC, request->name,
                   (thread_fn)(uintptr_t)request->entry,
-                  hart_thread_stacks[hart][TASK_INDEX(root)],
+                  runtime->stacks[TASK_INDEX(root)],
                   task_child_stack_size(task), task_shared_base(task),
                   request->argc, (const uintptr_t *)request->args);
     task->thread.tensor_context = request->tensor_context;
@@ -315,8 +282,7 @@ static uint8_t child_tcsr_mask(struct dayan_tcsr_range parent,
 int thread_create_child(const char *name, thread_fn entry, void *argument,
                         const struct dayan_thread_resources *resources)
 {
-    uintptr_t hart = platform_hart_id();
-    struct thread_runtime *runtime = &HART_RUNTIME(hart);
+    struct thread_runtime *runtime = &cpu_self()->threads;
     struct task_proc *task = task_proc_self();
     struct thread *child;
     struct dayan_context_fields root_context, child_context;
@@ -383,7 +349,7 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
 
     child = thread_slot_get(child_slot);
     thread_start(child, child_slot, THREAD_TYPE_TASK_THREAD, name,
-                  entry, hart_thread_stacks[hart][TASK_INDEX(child_slot)],
+                  entry, runtime->stacks[TASK_INDEX(child_slot)],
                   task_child_stack_size(task), task_shared_base(task), 1, &arg);
     child->parent = thread_slot_id(current);
     child->tensor_context = dayan_context_pack(&child_context);
@@ -395,7 +361,7 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
 
 int thread_join(uint32_t id, int64_t *result)
 {
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread_runtime *runtime = &cpu_self()->threads;
     uint8_t slot = id & THREAD_ID_SLOT_MASK;
     uint8_t parent_slot = thread_slot_id(current);
     struct thread *child;
@@ -419,7 +385,7 @@ int thread_join(uint32_t id, int64_t *result)
 
 int thread_join_all(void)
 {
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread_runtime *runtime = &cpu_self()->threads;
     uint8_t parent_slot = thread_slot_id(current);
 
     if (!task_proc_self())
@@ -439,7 +405,7 @@ void thread_system_wait_set(struct thread *thread, void *wait)
 {
     uint8_t slot = thread_slot_id(thread);
 
-    HART_RUNTIME(platform_hart_id()).system_wait[WAIT_INDEX(slot)] = wait;
+    cpu_self()->threads.system_wait[WAIT_INDEX(slot)] = wait;
 }
 
 int thread_output_enabled(const struct thread *thread)
@@ -451,7 +417,7 @@ int thread_output_enabled(const struct thread *thread)
 
 int thread_output_flush(struct thread *thread)
 {
-    uintptr_t hart = platform_hart_id();
+    struct thread_runtime *runtime = &cpu_self()->threads;
     struct task_proc *task = task_proc_for(thread);
     uint8_t slot;
     uint16_t *size;
@@ -459,11 +425,11 @@ int thread_output_flush(struct thread *thread)
     if (!task)
         return -1;
     slot = thread_slot_id(thread);
-    size = &HART_RUNTIME(hart).output_size[TASK_INDEX(slot)];
+    size = &runtime->output_size[TASK_INDEX(slot)];
     if (!*size)
         return 0;
     if (rpc_write_proc(thread_id(&task->thread),
-                        hart_thread_printf[hart][TASK_INDEX(slot)], *size) < 0)
+                        runtime->output[TASK_INDEX(slot)], *size) < 0)
         return -1;
     *size = 0;
     return 0;
@@ -471,7 +437,7 @@ int thread_output_flush(struct thread *thread)
 
 int thread_output_put(struct thread *thread, char ch)
 {
-    uintptr_t hart = platform_hart_id();
+    struct thread_runtime *runtime = &cpu_self()->threads;
     struct task_proc *task = task_proc_for(thread);
     uint8_t slot;
     uint16_t *size;
@@ -479,11 +445,11 @@ int thread_output_put(struct thread *thread, char ch)
     if (!task || !task->descriptor.child_printf_size)
         return -1;
     slot = thread_slot_id(thread);
-    size = &HART_RUNTIME(hart).output_size[TASK_INDEX(slot)];
+    size = &runtime->output_size[TASK_INDEX(slot)];
     if (*size == task->descriptor.child_printf_size &&
         thread_output_flush(thread) < 0)
         return -1;
-    hart_thread_printf[hart][TASK_INDEX(slot)][(*size)++] = ch;
+    runtime->output[TASK_INDEX(slot)][(*size)++] = ch;
     return *size == task->descriptor.child_printf_size ?
         thread_output_flush(thread) : 0;
 }
@@ -506,7 +472,7 @@ static void snapshot_thread(struct rpc_proc_info *record,
                                   slot_state_get(slot) == SLOT_KILLED) &&
             thread_slot_get(slot)->parent == thread_slot_id(thread);
     record->slot_index = slot_index;
-    record->result = task ? HART_RUNTIME(platform_hart_id()).result[
+    record->result = task ? cpu_self()->threads.result[
                                TASK_INDEX(thread_slot_id(thread))] : 0;
     record->pc = thread->pc;
     memcpy(record->name, thread->name, sizeof(record->name));
@@ -602,7 +568,7 @@ void proc_profile_snapshot(int reset)
  */
 static _Noreturn void thread_kill_resume(void)
 {
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread_runtime *runtime = &cpu_self()->threads;
     struct thread *thread = current;
     uint8_t slot = thread_slot_id(thread);
     uint8_t root = runtime->slot_owner[TASK_INDEX(slot)];
@@ -626,8 +592,7 @@ leave:
 
 static void kill_mark_thread(struct thread *thread, int64_t status)
 {
-    uintptr_t hart = platform_hart_id();
-    struct thread_runtime *runtime = &HART_RUNTIME(hart);
+    struct thread_runtime *runtime = &cpu_self()->threads;
     uint8_t slot = thread_slot_id(thread);
     int waiting_token = thread->state == THREAD_READY ||
                         thread->state == THREAD_WAIT_PRODUCE;
@@ -636,7 +601,7 @@ static void kill_mark_thread(struct thread *thread, int64_t status)
     if (thread->state == THREAD_WAIT_EVENT)
         thread_list_remove(thread);
     runtime->slot_state[slot] = SLOT_KILLED;
-    thread->sp = ((uintptr_t)hart_thread_stacks[hart][TASK_INDEX(slot)] +
+    thread->sp = ((uintptr_t)runtime->stacks[TASK_INDEX(slot)] +
                    task_child_stack_size(task_proc_for(thread))) &
                   ~(uintptr_t)0xf;
     thread->pc = (uintptr_t)thread_kill_resume;
@@ -649,7 +614,7 @@ static void kill_mark_thread(struct thread *thread, int64_t status)
 int proc_kill_all(struct rpc_proc_kill_result *result)
 {
     uintptr_t hart = platform_hart_id();
-    struct thread_runtime *runtime = &HART_RUNTIME(hart);
+    struct thread_runtime *runtime = &cpu_self()->threads;
     uint64_t selector;
     int64_t exit_status;
     uint16_t selected_roots = 0;
@@ -762,7 +727,7 @@ void thread_prepare_wait(struct thread_list *event)
     else
         thread_slot_get(tail)->node.next = slot;
     event->tail = slot;
-    HART_RUNTIME(platform_hart_id()).list_owner[slot] = event;
+    cpu_self()->threads.list_owner[slot] = event;
     thread_state_set(thread, THREAD_WAIT_EVENT);
 }
 
@@ -807,7 +772,7 @@ void thread_yield(void)
 
 _Noreturn void thread_exit_status(int64_t status)
 {
-    struct thread_runtime *runtime = &HART_RUNTIME(platform_hart_id());
+    struct thread_runtime *runtime = &cpu_self()->threads;
     struct thread *thread = current;
     struct task_proc *task = task_proc_for(thread);
     uint8_t slot = thread_slot_id(thread);
@@ -843,13 +808,15 @@ _Noreturn void thread_exit(void)
 void sche_init(void)
 {
     uintptr_t hart = platform_hart_id();
-    struct thread_runtime *runtime = &HART_RUNTIME(hart);
+    struct cpu *cpu = cpu_self();
+    struct thread_runtime *runtime = &cpu->threads;
 
-    cpu_self()->profiler = 0;
-    scheduler_rpc_receive_threads[hart] =
-        thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE);
+    /* BL1 already zeroed CPU Local, including all slots and runtime metadata. */
+    cpu->rpc_receive_thread = thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE);
+    runtime->stacks = (void *)(__proc_stack_start +
+        hart * CONFIG_PROC_SLOT_COUNT * CONFIG_PROC_STACK_SIZE);
+    runtime->output = (void *)(__proc_printf_start +
+        hart * CONFIG_PROC_SLOT_COUNT * CONFIG_PROC_PRINTF_SIZE);
     resource_scheduler_local_init();
-    memset(hart_thread_slots[hart], 0, sizeof(hart_thread_slots[hart]));
-    memset(runtime, 0, sizeof(*runtime));
     memset(runtime->slot_owner, THREAD_SLOT_NONE, sizeof(runtime->slot_owner));
 }

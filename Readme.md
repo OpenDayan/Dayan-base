@@ -24,7 +24,7 @@ Device 代码的算子示例。顶层 Makefile 只负责调度这些子项目。
 | 区域 | 默认配置 | 用途 |
 | --- | --- | --- |
 | RAM | `0x80000000`, 64 MiB | 镜像、CPU-local、每核栈和每核初始堆 |
-| CPU-local | 4 KiB / hart | 每核 profile 开关、allocator、RPC、trap 状态 |
+| CPU-local | 8 KiB / hart | `struct cpu`：线程 slot、调度元数据、profile、allocator、RPC 和异常记录 |
 | 启动栈 | 64 KiB / hart | BL1 和初始化，首次分派后不再使用 |
 | RPC 栈 | 4 KiB × 2 / hart | RPC receive proc 和 send proc 的私有栈 |
 | profile 栈 | 4 KiB / hart | proc profile 满缓冲上报 proc 的私有栈 |
@@ -49,12 +49,20 @@ thread state 的公共值从 `THREAD_RUNNING == 0`、`THREAD_READY == 1` 开始�
 表示不同等待原因。`thread_start()` 构造后使用 `THREAD_WAIT_START`；root 提交无依赖 Wait 后
 进入 `THREAD_READY`，创建回复完成后才可能被选中执行。运行期使用 `THREAD_WAIT_POLL`、
 `THREAD_WAIT_EVENT`、`THREAD_WAIT_PRODUCE`、`THREAD_KILL_WAIT_PRODUCE` 和
-`THREAD_WAIT_EXIT`。CPU 私有结构聚合 profile 开关、allocator、RPC 和 trap 状态；hart ID
+`THREAD_WAIT_EXIT`。CPU 私有结构同时持有这些线程的 slot 和运行期元数据；hart ID
 由平台直接读取 `mhartid`，不在 CPU-local 中重复保存。
 
-普通 `.data`/`.bss` 会被链接脚本拒绝，以免不一致缓存下多个 hart 意外共享
-可变状态。每核状态应放入 `struct cpu`。固件侧同样拒绝 `.coherent` section；跨核
-对象只能放入 Host 给当前 proc 分配的 coherent allocation，并从 `shared` 基址寻址。
+固件不允许定义独立的可变全局或函数内 static 变量，包括普通 `.data`/`.bss` 和
+自定义 section。所有每核持久状态都由 `struct cpu` 持有，线程私有元数据放在其中的
+slot 数组，按线程索引访问；不能把多个线程的独立状态合并成一个每核标量。
+`struct cpu` 本身也不是 `.bss` 全局变量，而是位于链接器预留的 `.cpu` 空间，
+通过 `cpu_self()` 定位。每核预留容量为 2 的幂且覆盖完整 cache line，BL1 负责清零。
+
+栈、printf buffer 和初始 heap 是链接脚本按 Hart 隔离的原始存储预留，不定义 C 全局
+数组；其地址由 CPU Local 中的线程上下文、buffer 指针和 allocator 管理。
+链接器同时检查这些区域的步长，避免只对齐数组首地址、却在 Hart 边界共享 cache line。
+只读常量可以保留在 `.rodata`。固件侧同样拒绝 `.coherent` section；跨核可变对象
+只能放入 Host 给当前 proc 分配的 coherent allocation，并从 `shared` 基址寻址。
 
 ## 构建
 
@@ -65,8 +73,9 @@ make
 make check
 ```
 
-`make check` 会先执行独立脚本中的 ELF/ABI 静态检查，再把 `device/tests/` 中的 list、
-RBTree、allocator、math、RPC ABI 和 printf 测试编译为 RV64 bare-metal ELF，并在
+`make check` 会先执行 ELF/ABI 静态检查，并验证链接器拒绝可变全局、自定义可写 section、
+固件 coherent 对象和未按 cache line 隔离的存储步长，再把 `device/tests/` 中的 list、
+RBTree、allocator、math、RPC ABI、printf 和 profile 测试编译为 RV64 bare-metal ELF，并在
 QEMU `virt` 上逐一运行。QEMU 不在 `PATH` 时可显式指定：
 
 ```sh

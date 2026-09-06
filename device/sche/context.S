@@ -64,13 +64,14 @@ switch_context:
     .insn   4, 0x0006d38b
 
 .Lselected:
-    /* Consume the token metadata; all selected entries now execute as RUNNING. */
-    sb      t2, THREAD_TOKEN_EXT_OFFSET(t1)
-    sb      zero, THREAD_STATE_OFFSET(t1)
     csrr    a2, mhartid
     slli    a2, a2, cpu_local_shift
     la      t0, __cpu_start
     add     a2, a2, t0
+.Lrun_thread:
+    /* t1 is selected and a2 is CPU Local, including on the RPC entry path. */
+    sb      t2, THREAD_TOKEN_EXT_OFFSET(t1)
+    sb      zero, THREAD_STATE_OFFSET(t1)
     csrrci  t5, mstatus, 8
     ld      a1, CPU_PROFILER_OFFSET(a2)
     /* Null means disabled or paused on a full buffer; that path falls through. */
@@ -127,13 +128,13 @@ switch_context:
 
 .Lrpc_receive:
     /* RPC has its own receiver thread and no queue token/extension to consume. */
-    csrr    t0, mhartid
-    la      t1, scheduler_rpc_receive_threads
-    slli    t0, t0, 3
-    add     t1, t1, t0
-    ld      t1, 0(t1)
+    csrr    a2, mhartid
+    slli    a2, a2, cpu_local_shift
+    la      t0, __cpu_start
+    add     a2, a2, t0
+    ld      t1, CPU_RPC_RECEIVE_OFFSET(a2)
     li      t2, 0
-    j       .Lselected
+    j       .Lrun_thread
 
 .Lsame_thread:
     /* Profiling left IRQs masked; restore entry MIE and return to the same caller. */

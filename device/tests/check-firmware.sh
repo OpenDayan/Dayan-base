@@ -214,7 +214,7 @@ stack_sections=$($readelf --sections --wide "$elf" | \
     grep -Ec '\.(stack|rpc_stack|profile_stack|trap_stack|proc_stack)[[:space:]]+NOBITS')
 [ "$stack_sections" -eq 5 ] ||
     fail "per-hart stacks must be NOBITS sections"
-for section in proc_slots proc_printf; do
+for section in cpu proc_printf; do
     $readelf --sections --wide "$elf" | \
         grep -Eq "\\.${section}[[:space:]]+NOBITS" ||
         fail ".${section} must be a NOBITS section"
@@ -238,6 +238,17 @@ proc_stack_start=$(symbol_address __proc_stack_start)
 proc_stack_end=$(symbol_address __proc_stack_end)
 proc_printf_start=$(symbol_address __proc_printf_start)
 proc_printf_end=$(symbol_address __proc_printf_end)
+cpu_start=$(symbol_address __cpu_start)
+cpu_end=$(symbol_address __cpu_end)
+cpu_size=$(symbol_address __cpu_local_size)
+[ $((cpu_end - cpu_start)) -eq $((harts * cpu_size)) ] &&
+    [ $((cpu_start % 64)) -eq 0 ] &&
+    [ $((cpu_size % 64)) -eq 0 ] ||
+    fail "CPU Local must have isolated per-Hart cache lines"
+local_segment=$($readelf --segments --wide "$elf" | \
+    awk -v start="$cpu_start" '$1 == "LOAD" && $3 == start {print}')
+grep -Eq '[[:space:]]RW[[:space:]]' <<<"$local_segment" ||
+    fail "CPU Local and backing pools must be in a writable ELF segment"
 [ $((stack_end - stack_start)) -eq $((harts * stack_size)) ] &&
     [ $((rpc_end - rpc_start)) -eq $((harts * 2 * rpc_stack_size)) ] &&
     [ $((profile_end - profile_start)) -eq \

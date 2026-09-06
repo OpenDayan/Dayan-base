@@ -17,7 +17,7 @@ MAP         := $(BUILD)/$(NAME).map
 API_SYMBOLS := dayan-api.symbols
 
 HARTS           ?= 4
-CPU_LOCAL_SIZE  ?= 0x1000
+CPU_LOCAL_SIZE  ?= 0x2000
 STACK_SIZE      ?= 0x10000
 PROC_SLOT_COUNT ?= 16
 PROC_STACK_SIZE ?= 0x10000
@@ -141,6 +141,8 @@ check: $(ELF) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST)
 		PROC_PRINTF_SIZE="$(PROC_PRINTF_SIZE)" \
 		TRAP_STACK_SIZE="$(TRAP_STACK_SIZE)" \
 		./tests/check-firmware.sh
+	CLANG="$(CLANG)" TEST_BUILD_DIR="$(abspath $(BUILD))/tests/linker" \
+		bash ./tests/check-linker.sh
 	CLANG="$(CLANG)" QEMU_SYSTEM_RISCV64="$(QEMU_SYSTEM_RISCV64)" \
 		TEST_BUILD_DIR="$(abspath $(BUILD))/tests/qemu" \
 		./tests/run-qemu-tests.sh

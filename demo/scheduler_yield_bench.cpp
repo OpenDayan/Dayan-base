@@ -9,86 +9,36 @@
 #include <string.h>
 
 enum : uint64_t {
+    kClusterCores = 4,
     kDefaultIterations = 128,
     kWarmupIterations = 64,
     kResultMagic = 0x5343484544594c44ULL,
 };
 
-struct SchedulerYieldResults {
+/* Each Hart owns a cache line; result writes cannot overwrite another Hart. */
+struct alignas(64) SchedulerYieldResults {
     uint64_t magic;
     uint64_t iterations;
-    uint64_t worker_cycles[2];
-    uint64_t round_trip_cycles;
-    uint64_t handoff_cycles;
+    uint64_t completed;
 };
 
 #if defined(__DAYAN_DEVICE__)
 
 namespace scheduler_yield_bench_detail {
 
-struct BenchState {
-    volatile uint32_t ready;
-    volatile uint32_t start;
-    volatile uint32_t measured;
-    uint64_t iterations;
-    uint64_t start_delay_cycles;
-    uint64_t cycles[2];
+enum : dayan_resource_t {
+    kNotify = DAYAN_SHARED_RESOURCE(0),
+    kDone = DAYAN_SHARED_RESOURCE(1),
 };
 
-struct WorkerArgument {
-    BenchState *state;
-    uint32_t index;
+struct alignas(64) ClusterShared {
+    dayan_cluster_barrier_t finish;
 };
 
-static inline uint64_t read_cycle()
+static inline void require_status(int status)
 {
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
-    return cycle;
-}
-
-static inline void delay_cycles(uint64_t cycles)
-{
-    const uint64_t begin = read_cycle();
-
-    while (read_cycle() - begin < cycles)
-        __asm__ volatile("" ::: "memory");
-}
-
-static void yield_worker(void *opaque)
-{
-    WorkerArgument *argument = (WorkerArgument *)opaque;
-    BenchState *state = argument->state;
-
-    ++state->ready;
-    while (state->ready != 2U)
-        dayan_yield();
-
-    if (argument->index == 0U) {
-        if (state->start_delay_cycles) {
-            printf("[device] scheduler-yield waveform marker: delay=%llu "
-                   "cycles\n",
-                   (unsigned long long)state->start_delay_cycles);
-            delay_cycles(state->start_delay_cycles);
-        }
-        state->start = 1U;
-    } else {
-        while (!state->start)
-            dayan_yield();
-    }
-
-    for (uint64_t i = 0; i < kWarmupIterations; ++i)
-        dayan_yield();
-
-    const uint64_t begin = read_cycle();
-    for (uint64_t i = 0; i < state->iterations; ++i)
-        dayan_yield();
-    state->cycles[argument->index] = read_cycle() - begin;
-
-    ++state->measured;
-    while (state->measured != 2U)
-        dayan_yield();
+    if (status < 0)
+        dayan_thread_exit(status);
 }
 
 } // namespace scheduler_yield_bench_detail
@@ -96,45 +46,51 @@ static void yield_worker(void *opaque)
 #endif
 
 __kernel__ void scheduler_yield_bench(uint64_t iterations,
-                                      uint64_t start_delay_cycles,
                                       SchedulerYieldResults *results)
 {
     using namespace scheduler_yield_bench_detail;
 
-    if (!iterations || !results)
+    const uint32_t lane = dayan_task_id(DAYAN_TASK_X);
+    if (!iterations || iterations > UINT64_MAX - kWarmupIterations ||
+        !results || !shared || dayan_task_mode() != kClusterCores ||
+        dayan_task_dim(DAYAN_TASK_X) != kClusterCores ||
+        dayan_task_dim(DAYAN_TASK_Y) != 1U ||
+        dayan_task_dim(DAYAN_TASK_Z) != 1U)
         dayan_thread_exit(-22);
 
-    BenchState state = {};
-    WorkerArgument arguments[2] = {
-        {&state, 0},
-        {&state, 1},
-    };
-    state.iterations = iterations;
-    state.start_delay_cycles = start_delay_cycles;
+    const uint64_t total = kWarmupIterations + iterations;
+    uint64_t completed = 0;
+    if (lane == 0U) {
+        for (; completed < total; ++completed) {
+            require_status(dayan_resource_wait_free(kNotify));
+            require_status(dayan_resource_produce_lsu(kNotify, 1U, 0));
+        }
+    } else if (lane == 1U) {
+        require_status(dayan_resource_wait_free(kDone));
+        for (; completed < total; ++completed) {
+            require_status(dayan_resource_wait_ready(kNotify));
+            require_status(dayan_resource_consume_lsu(
+                DAYAN_RESOURCE_MASK(kNotify)));
+        }
+    }
 
-    int status = dayan_create_thread("yield-0", yield_worker, &arguments[0],
-                                     nullptr);
-    if (status >= 0)
-        status = dayan_create_thread("yield-1", yield_worker, &arguments[1],
-                                     nullptr);
-    if (status >= 0)
-        status = dayan_thread_join_all();
-    if (status < 0)
-        dayan_thread_exit(status);
-
-    const uint64_t total_cycles = state.cycles[0] + state.cycles[1];
-    const uint64_t round_trip_cycles = total_cycles / (2U * iterations);
-    const uint64_t handoff_cycles = total_cycles / (4U * iterations);
-
-    results->magic = kResultMagic;
-    results->iterations = iterations;
-    results->worker_cycles[0] = state.cycles[0];
-    results->worker_cycles[1] = state.cycles[1];
-    results->round_trip_cycles = round_trip_cycles;
-    results->handoff_cycles = handoff_cycles;
+    /* Harts 2/3 sleep on hardware tokens throughout the notification loop. */
+    if (lane == 1U)
+        require_status(dayan_resource_produce_lsu(kDone, 3U, 0));
+    else {
+        require_status(dayan_resource_wait_ready(kDone));
+        require_status(dayan_resource_consume_lsu(DAYAN_RESOURCE_MASK(kDone)));
+    }
+    dayan_wait_lsu();
+    results[lane].magic = kResultMagic;
+    results[lane].iterations = iterations;
+    results[lane].completed = completed;
+    require_status(dayan_cluster_barrier(
+        kClusterCores, &((ClusterShared *)shared)->finish));
 }
 
-DAYAN_KERNEL_DESC(scheduler_yield_bench, 2, 0, 0, 0, 0, 0, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    scheduler_yield_bench, 0, 64, 0, 0, 0, 0, 0, 0, 2);
 
 #if !defined(__DAYAN_DEVICE__)
 
@@ -145,7 +101,7 @@ extern "C" __host__ char *getenv(const char *name);
 
 __host__ static void usage(const char *program)
 {
-    printf("usage: %s [ITERATIONS [START_DELAY_CYCLES]]\n", program);
+    printf("usage: %s [ITERATIONS]\n", program);
     printf("default iterations: %llu\n",
            (unsigned long long)kDefaultIterations);
 }
@@ -158,7 +114,7 @@ __host__ static int parse_positive(const char *text, uint64_t *value_out)
     if (!text || !*text || !value_out)
         return -1;
     value = strtoull(text, &end, 0);
-    if (!end || *end || !value)
+    if (!end || *end || !value || value > UINT64_MAX - kWarmupIterations)
         return -1;
     *value_out = (uint64_t)value;
     return 0;
@@ -215,14 +171,13 @@ __host__ static int download(npu_stream_t *stream, void *destination,
 __host__ int main(int argc, char **argv)
 {
     uint64_t iterations = kDefaultIterations;
-    uint64_t start_delay_cycles = 0;
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
     npu_runtime_t *runtime = nullptr;
     npu_context_t *context = nullptr;
     npu_stream_t *stream = nullptr;
     npu_buffer_t *results_buffer = nullptr;
-    SchedulerYieldResults results = {};
+    SchedulerYieldResults results[kClusterCores] = {};
     const char *socket_path;
     constexpr uint32_t timeout_ms = 60U * 60U * 1000U;
     int status = 0;
@@ -231,10 +186,8 @@ __host__ int main(int argc, char **argv)
         usage(argv[0]);
         return 0;
     }
-    if (argc > 3 ||
-        (argc >= 2 && parse_positive(argv[1], &iterations) < 0) ||
-        (argc == 3 &&
-         parse_positive(argv[2], &start_delay_cycles) < 0)) {
+    if (argc > 2 ||
+        (argc == 2 && parse_positive(argv[1], &iterations) < 0)) {
         usage(argv[0]);
         return 2;
     }
@@ -261,40 +214,35 @@ __host__ int main(int argc, char **argv)
                         timeout_ms);
     if (status == 0) {
         npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
-                                     "yield-bench");
-        launch_attrs.config.task_dim = NPUTaskDim3{1, 1, 1};
-        launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
+                                     "notify-bench");
+        launch_attrs.config.task_dim = NPUTaskDim3{kClusterCores, 1, 1};
+        launch_attrs.config.task_mode = NPUTaskMode::kFourCore;
         launch_attrs.timeout_ms = timeout_ms;
-        if (start_delay_cycles) {
-            printf("[host] scheduler-yield waveform launch marker: "
-                   "delay=%llu cycles\n",
-                   (unsigned long long)start_delay_cycles);
-            fflush(stdout);
-        }
-        status = scheduler_yield_bench(iterations, start_delay_cycles,
-                                       results_buffer,
+        status = scheduler_yield_bench(iterations, results_buffer,
                                        &launch_attrs);
     }
     if (status == 0)
         status = download(stream, &results, results_buffer, sizeof(results),
                           timeout_ms);
-    if (status == 0 &&
-        (results.magic != kResultMagic || results.iterations != iterations ||
-         !results.worker_cycles[0] || !results.worker_cycles[1]))
-        status = -1;
+    for (uint32_t lane = 0; status == 0 && lane < kClusterCores; ++lane) {
+        const uint64_t expected = lane < 2U ? kWarmupIterations + iterations : 0;
+
+        if (results[lane].magic != kResultMagic ||
+            results[lane].iterations != iterations ||
+            results[lane].completed != expected)
+            status = -1;
+    }
 
     if (status == 0) {
-        printf("[host] scheduler-yield-bench iterations=%llu "
-               "worker0_cycles=%llu worker1_cycles=%llu "
-               "round_trip_cycles=%llu handoff_cycles=%llu\n",
-               (unsigned long long)results.iterations,
-               (unsigned long long)results.worker_cycles[0],
-               (unsigned long long)results.worker_cycles[1],
-               (unsigned long long)results.round_trip_cycles,
-               (unsigned long long)results.handoff_cycles);
-        printf("[host] PASS: scheduler yield benchmark completed\n");
+        printf("[host] shared-notify-bench iterations=%llu warmup=%llu "
+               "sender_completed=%llu receiver_completed=%llu\n",
+               (unsigned long long)iterations,
+               (unsigned long long)kWarmupIterations,
+               (unsigned long long)results[0].completed,
+               (unsigned long long)results[1].completed);
+        printf("[host] PASS: shared resource notification benchmark completed\n");
     } else {
-        printf("[host] FAIL: scheduler yield benchmark status=%d\n", status);
+        printf("[host] FAIL: shared resource notification status=%d\n", status);
     }
 
     if (results_buffer)

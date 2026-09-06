@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "config.h"
+#include "rpc.h"
 #include "thread.h"
 
 struct dayan_thread_resources;
@@ -31,6 +33,21 @@ struct task_proc {
 union thread_slot {
     struct thread thread;
     struct task_proc task_proc;
+};
+
+/* Owned by the current Hart's struct cpu; threads never migrate between Harts. */
+struct thread_runtime {
+    union thread_slot slots[RPC_PROFILE_SLOT_COUNT - 1U];
+    void *system_wait[RPC_PROFILE_SLOT_COUNT - 1U];
+    int64_t result[CONFIG_PROC_SLOT_COUNT];
+    struct thread_list *list_owner[RPC_PROFILE_SLOT_COUNT];
+    struct thread_list wait_exit[CONFIG_PROC_SLOT_COUNT];
+    uint16_t output_size[CONFIG_PROC_SLOT_COUNT];
+    uint8_t slot_state[RPC_PROFILE_SLOT_COUNT];
+    uint8_t slot_owner[CONFIG_PROC_SLOT_COUNT];
+    uint8_t generation[RPC_PROFILE_SLOT_COUNT];
+    unsigned char (*stacks)[CONFIG_PROC_STACK_SIZE];
+    unsigned char (*output)[CONFIG_PROC_PRINTF_SIZE];
 };
 
 void sche_init(void);

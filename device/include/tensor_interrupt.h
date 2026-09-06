@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "config.h"
+
 #define TENSOR_INTERRUPT_RECENT_COUNT   16U
 
 struct tensor_interrupt_record {
@@ -26,6 +28,10 @@ struct tensor_interrupt_record {
 };
 
 struct tensor_interrupt_state {
+    /* Each Host-visible report owns whole cache lines, including its tail. */
+    struct {
+        _Alignas(CONFIG_CACHE_LINE_SIZE) struct tensor_interrupt_record record;
+    } records[2];
     /* Zero means none; 1 and 2 select the per-Hart record buffers. */
     volatile uint8_t pending;
     volatile uint8_t outbound;

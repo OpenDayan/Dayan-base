@@ -40,14 +40,6 @@ _Static_assert(RPC_PROFILE_RECORD_SIZE == 8 &&
                    RPC_PROFILE_RECORD_SLOT_DEFINE == 0x80,
                "assembly profile record encoding");
 
-static struct profile_state profile_states[CONFIG_HART_COUNT]
-    __attribute__((section(".profile_state"), aligned(64)));
-
-static inline struct profile_state *profile_self(void)
-{
-    return &profile_states[platform_hart_id()];
-}
-
 void profile_record_thread_start(struct thread *thread)
 {
     uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
@@ -69,7 +61,7 @@ void profile_record_thread_start(struct thread *thread)
 
 static void profile_main(void)
 {
-    struct profile_state *state = profile_self();
+    struct profile_state *state = &cpu_self()->profile;
 
     for (;;) {
         struct rpc_profile_flush_request request;
@@ -111,7 +103,7 @@ static void profile_main(void)
 
 int profile_configure(struct rpc_profile_config *config)
 {
-    struct profile_state *state = profile_self();
+    struct profile_state *state = &cpu_self()->profile;
     uintptr_t interrupt_state;
     int status = -EINVAL;
 
@@ -167,11 +159,9 @@ int profile_configure(struct rpc_profile_config *config)
 void profile_init(void)
 {
     uintptr_t hart = platform_hart_id();
-    struct profile_state *state = profile_self();
     void *stack;
 
-    memset(state, 0, sizeof(*state));
-    thread_list_init(&state->wake);
+    thread_list_init(&cpu_self()->profile.wake);
     stack = __profile_stack_start + hart * CONFIG_PROFILE_STACK_SIZE;
     thread_start(thread_slot_get(RPC_PROFILE_SLOT_FLUSH), RPC_PROFILE_SLOT_FLUSH,
                   THREAD_TYPE_SYSTEM, "profile-flush", profile_main,

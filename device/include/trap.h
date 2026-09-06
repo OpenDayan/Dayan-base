@@ -46,6 +46,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "config.h"
+
 struct trap_frame {
     uintptr_t x[32];
     uintptr_t mstatus;
@@ -73,7 +75,8 @@ struct trap_record {
 };
 
 struct trap_state {
-    volatile uint8_t active;
+    _Alignas(CONFIG_CACHE_LINE_SIZE) struct trap_record record;
+    _Alignas(CONFIG_CACHE_LINE_SIZE) volatile uint8_t active;
 };
 
 _Static_assert(offsetof(struct trap_frame, x[1]) == TRAP_FRAME_X1,

@@ -6,7 +6,7 @@
 #endif
 
 #ifndef CONFIG_CPU_LOCAL_SIZE
-#define CONFIG_CPU_LOCAL_SIZE 0x1000
+#define CONFIG_CPU_LOCAL_SIZE 0x2000
 #endif
 
 #ifndef CONFIG_STACK_SIZE

@@ -7,21 +7,6 @@
 #include "tensor_interrupt.h"
 #include "trap.h"
 
-struct tensor_interrupt_record_buffer {
-    _Alignas(CONFIG_CACHE_LINE_SIZE) struct tensor_interrupt_record record;
-};
-
-static struct tensor_interrupt_record_buffer
-    tensor_interrupt_records[CONFIG_HART_COUNT][2]
-    __attribute__((section(".tensor_interrupt_records")));
-
-static struct tensor_interrupt_record *tensor_interrupt_record_get(uint8_t id)
-{
-    uintptr_t hart = platform_hart_id();
-
-    return &tensor_interrupt_records[hart][id - 1U].record;
-}
-
 void tensor_interrupt_handle(const struct trap_frame *frame)
 {
     struct tensor_interrupt_state *state;
@@ -36,13 +21,13 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     state = &cpu_self()->tensor_interrupt;
     control = __builtin_riscv_tx_base_tcsr_read(5, 0);
     if (state->pending) {
-        record = tensor_interrupt_record_get(state->pending);
+        record = &state->records[state->pending - 1U].record;
         ++record->dropped_reports;
         __builtin_riscv_tx_base_tcsr_write(1, 5, 0);
         return;
     }
     state->pending = state->outbound == 1U ? 2U : 1U;
-    record = tensor_interrupt_record_get(state->pending);
+    record = &state->records[state->pending - 1U].record;
     memset(record, 0, sizeof(*record));
     record->hart_id = (uint32_t)platform_hart_id();
     /* A terminal thread may have abandoned tp while dispatch waits for work. */
@@ -91,7 +76,7 @@ void tensor_interrupt_drain(void)
         return;
     state->outbound = state->pending;
     state->pending = 0;
-    record = tensor_interrupt_record_get(state->outbound);
+    record = &state->records[state->outbound - 1U].record;
     platform_cache_flush(record, sizeof(*record));
     platform_rpc_send(rpc_command_pack(RPC_TENSOR_INTERRUPT_REPORT,
                                        (uintptr_t)record));

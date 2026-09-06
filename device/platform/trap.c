@@ -8,13 +8,6 @@
 #include "sche.h"
 #include "trap.h"
 
-struct trap_record_buffer {
-    _Alignas(CONFIG_CACHE_LINE_SIZE) struct trap_record record;
-};
-
-static struct trap_record_buffer trap_records[CONFIG_HART_COUNT]
-    __attribute__((section(".trap_records")));
-
 void trap_report_complete(void)
 {
     cpu_self()->trap.active = 0;
@@ -34,7 +27,7 @@ void trap_handle(const struct trap_frame *frame)
         platform_halt();
     cpu->trap.active = 1;
     hart = platform_hart_id();
-    record = &trap_records[hart].record;
+    record = &cpu->trap.record;
     record->hart_id = (uint32_t)hart;
     record->thread_id = thread_id(current);
     record->thread_type = current->type;
@@ -65,7 +58,7 @@ void trap_handle(const struct trap_frame *frame)
 _Noreturn void trap_exit(void)
 {
     /* Reporting and joining may switch threads; use the faulting thread's stack. */
-    if (rpc_report_trap(&trap_records[platform_hart_id()].record) < 0)
+    if (rpc_report_trap(&cpu_self()->trap.record) < 0)
         platform_halt();
     if (current->type == THREAD_TYPE_TASK_PROC ||
         current->type == THREAD_TYPE_TASK_THREAD)

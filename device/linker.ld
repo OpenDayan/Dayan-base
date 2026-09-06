@@ -2,7 +2,7 @@ OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
 __hart_count = DEFINED(CONFIG_HART_COUNT) ? CONFIG_HART_COUNT : 4;
-__cpu_local_size = DEFINED(CONFIG_CPU_LOCAL_SIZE) ? CONFIG_CPU_LOCAL_SIZE : 0x1000;
+__cpu_local_size = DEFINED(CONFIG_CPU_LOCAL_SIZE) ? CONFIG_CPU_LOCAL_SIZE : 0x2000;
 __stack_size = DEFINED(CONFIG_STACK_SIZE) ? CONFIG_STACK_SIZE : 0x10000;
 __proc_slot_count = DEFINED(CONFIG_PROC_SLOT_COUNT) ? CONFIG_PROC_SLOT_COUNT : 16;
 __proc_stack_size = DEFINED(CONFIG_PROC_STACK_SIZE) ? CONFIG_PROC_STACK_SIZE : 0x10000;
@@ -18,15 +18,30 @@ MEMORY
                 LENGTH = DEFINED(CONFIG_RAM_SIZE) ? CONFIG_RAM_SIZE : 0x04000000
 }
 
+/* Reserved CPU-local storage is writable even without any .data/.bss inputs. */
+PHDRS
+{
+    code PT_LOAD FLAGS(5);
+    constants PT_LOAD FLAGS(4);
+    local PT_LOAD FLAGS(6);
+}
+
 SECTIONS
 {
     . = ORIGIN(RAM);
+
+    /* Match before named sections, so a writable .rodata.* cannot escape.
+     * .cpu and backing pools reserve storage without mutable input objects. */
+    .unexpected_writable (NOLOAD) :
+    {
+        INPUT_SECTION_FLAGS(SHF_WRITE) *(*)
+    } > RAM
 
     .text : ALIGN(16)
     {
         KEEP(*(.text.bl1))
         *(.text)
-    } > RAM
+    } > RAM :code
 
     .text.api.libc : ALIGN(16)
     {
@@ -46,14 +61,14 @@ SECTIONS
     .rodata : ALIGN(16)
     {
         *(.rodata .rodata.* .srodata .srodata.*)
-    } > RAM
+    } > RAM :constants
 
     .data : ALIGN(16)
     {
         __data_start = .;
         *(.data .data.* .sdata .sdata.* .got .got.*)
         __data_end = .;
-    } > RAM
+    } > RAM :local
 
     .bss (NOLOAD) : ALIGN(16)
     {
@@ -90,13 +105,6 @@ SECTIONS
         __rpc_stack_end = .;
     } > RAM
 
-    .profile_state ALIGN(64) (NOLOAD) :
-    {
-        __profile_state_start = .;
-        *(.profile_state)
-        __profile_state_end = .;
-    } > RAM
-
     .profile_stack ALIGN(64) (NOLOAD) :
     {
         __profile_stack_start = .;
@@ -111,34 +119,17 @@ SECTIONS
         __trap_stack_end = .;
     } > RAM
 
-    .trap_records ALIGN(64) (NOLOAD) :
-    {
-        *(.trap_records)
-    } > RAM
-
-    .tensor_interrupt_records ALIGN(64) (NOLOAD) :
-    {
-        *(.tensor_interrupt_records)
-    } > RAM
-
-    .proc_slots ALIGN(64) (NOLOAD) :
-    {
-        __proc_slots_start = .;
-        *(.proc_slots)
-        __proc_slots_end = .;
-    } > RAM
-
     .proc_stack ALIGN(64) (NOLOAD) :
     {
         __proc_stack_start = .;
-        *(.proc_stack)
+        . += __hart_count * __proc_slot_count * __proc_stack_size;
         __proc_stack_end = .;
     } > RAM
 
     .proc_printf ALIGN(64) (NOLOAD) :
     {
         __proc_printf_start = .;
-        *(.proc_printf)
+        . += __hart_count * __proc_slot_count * __proc_printf_size;
         __proc_printf_end = .;
     } > RAM
 
@@ -174,34 +165,33 @@ SECTIONS
     }
 
     ASSERT(__hart_count > 0, "at least one hart is required")
-    ASSERT((__cpu_local_size % 8) == 0,
-           "CPU_LOCAL_SIZE must be an 8-byte multiple")
-    ASSERT((__stack_size % 16) == 0,
-           "STACK_SIZE must be a 16-byte multiple")
+    ASSERT(__cpu_local_size >= 64 &&
+           (__cpu_local_size & (__cpu_local_size - 1)) == 0,
+           "CPU_LOCAL_SIZE must be a power of two and cover whole cache lines")
+    ASSERT((__stack_size % 64) == 0,
+           "STACK_SIZE must cover whole cache lines")
     ASSERT(__proc_slot_count == 16,
            "the Hart proc-slot ABI requires exactly 16 slots")
-    ASSERT((__proc_stack_size % 16) == 0,
-           "PROC_STACK_SIZE must be a 16-byte multiple")
-    ASSERT(__proc_printf_size > 0,
-           "PROC_PRINTF_SIZE must be nonzero")
-    ASSERT((__rpc_stack_size % 16) == 0,
-           "RPC_STACK_SIZE must be a 16-byte multiple")
-    ASSERT((__profile_stack_size % 16) == 0,
-           "PROFILE_STACK_SIZE must be a 16-byte multiple")
-    ASSERT((__trap_stack_size % 16) == 0,
-           "TRAP_STACK_SIZE must be a 16-byte multiple")
-    ASSERT((__heap_size % 16) == 0,
-           "HEAP_SIZE must be a 16-byte multiple")
+    ASSERT((__proc_stack_size % 64) == 0,
+           "PROC_STACK_SIZE must cover whole cache lines")
+    ASSERT(__proc_printf_size > 0 && (__proc_printf_size % 64) == 0,
+           "PROC_PRINTF_SIZE must be nonzero and cover whole cache lines")
+    ASSERT((__rpc_stack_size % 64) == 0,
+           "RPC_STACK_SIZE must cover whole cache lines")
+    ASSERT((__profile_stack_size % 64) == 0,
+           "PROFILE_STACK_SIZE must cover whole cache lines")
+    ASSERT((__trap_stack_size % 64) == 0,
+           "TRAP_STACK_SIZE must cover whole cache lines")
+    ASSERT((__heap_size % 64) == 0,
+           "HEAP_SIZE must cover whole cache lines")
     ASSERT(SIZEOF(.data) == 0,
-           "ordinary mutable .data is unsafe; keep state per hart")
+           "mutable .data is forbidden; keep state in struct cpu")
     ASSERT(SIZEOF(.bss) == 0,
-           "ordinary mutable .bss is unsafe; keep state per hart")
+           "mutable .bss is forbidden; keep state in struct cpu")
+    ASSERT(SIZEOF(.unexpected_writable) == 0,
+           "mutable input sections are forbidden; keep state in struct cpu")
     ASSERT(SIZEOF(.init_array) == 0,
            "constructors are unsupported")
-    ASSERT(SIZEOF(.proc_slots) > 0,
-           "per-Hart proc slot metadata is missing")
-    ASSERT(SIZEOF(.profile_state) > 0,
-           "per-Hart profile state is missing")
     ASSERT(SIZEOF(.proc_stack) ==
            __hart_count * __proc_slot_count * __proc_stack_size,
            "per-Hart proc stack reservation has the wrong size")

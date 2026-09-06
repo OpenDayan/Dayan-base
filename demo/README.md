@@ -135,6 +135,29 @@ build/demo/lsu_bandwidth d2u
 build/demo/lsu_bandwidth u2d
 ```
 
+## 用 dyperf 测量跨 Hart 调度通知
+
+`scheduler_yield_bench` 使用四核 Task：Hart0 在 Shared Resource 0 上 wait-free，
+返回后立即 produce；Hart1 wait-ready 后 consume，允许下一轮发送。Hart2/3 在独立的
+Shared Resource 1 上等待结束，测量期间不忙等。默认预热 64 次，随后执行 128 次通知。
+测试内部不读取周期、不计算时间，只回传各 Hart 的完成次数，结果按缓存行隔离。
+
+连接已启动的四核 Server 后运行：
+
+```sh
+make -C demo ../build/demo/scheduler_yield_bench
+build/host/dyperf/dyperf --buffer-size 256K -o perf.json -- \
+  build/demo/scheduler_yield_bench 128
+python3 scripts/analyze_scheduler_notify.py perf.json --iterations 128
+```
+
+分析脚本从 `dyperf` 的原始 counter 配对每轮通知，丢弃预热并检查完整的等待次数。
+主指标是 Hart0 的 wait-free 被调度为 RUNNING，到 Hart1 的 wait-ready 被调度为
+RUNNING 的间隔；另报 Hart1 等待区间和 Hart0 相邻通知的往返间隔。该指标包含发送侧
+恢复、Produce API 和 profile 开销，不等于 Produce 指令到接收函数返回的精确延迟。
+RUNNING 在上下文恢复前记录。跨 Hart 相减要求各 Hart 的 cycle counter 同源且对齐；
+`dyperf` 时间轴上的 `1 cycle = 1 ns` 是显示约定，统计结果以周期为单位。
+
 ## 跨 Core 通知延迟微基准
 
 `shared_notify_latency` 隔离测量硬件 Shared Resource 的 core 0 -> core 1 通知路径。

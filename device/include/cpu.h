@@ -7,6 +7,7 @@
 #include "config.h"
 #include "context.h"
 #include "list.h"
+#include "profile.h"
 #include "rbtree.h"
 #include "rpc_internal.h"
 #include "thread.h"
@@ -20,13 +21,17 @@ struct mem_state {
     size_t available;
 };
 
+/* The only owner of persistent mutable firmware state on one Hart. */
 struct cpu {
     struct profile_state *profiler;
+    struct thread *rpc_receive_thread;
     struct mem_state mem;
     struct rpc_state rpc;
+    struct thread_runtime threads;
+    struct profile_state profile;
     struct trap_state trap;
     struct tensor_interrupt_state tensor_interrupt;
-};
+} __attribute__((aligned(CONFIG_CACHE_LINE_SIZE)));
 
 extern uint8_t __cpu_start[];
 
@@ -35,6 +40,10 @@ _Static_assert(CONFIG_CPU_LOCAL_SIZE > 0 &&
                "CPU local size must be a power of two");
 _Static_assert(offsetof(struct cpu, profiler) == CPU_PROFILER_OFFSET,
                "assembly profiler pointer offset");
+_Static_assert(offsetof(struct cpu, rpc_receive_thread) == CPU_RPC_RECEIVE_OFFSET,
+               "assembly RPC receiver pointer offset");
+_Static_assert(CONFIG_CPU_LOCAL_SIZE % CONFIG_CACHE_LINE_SIZE == 0,
+               "CPU local reservations must not share cache lines");
 _Static_assert(sizeof(struct cpu) <= CONFIG_CPU_LOCAL_SIZE,
                "cpu state exceeds its linker reservation");
 
