@@ -395,7 +395,8 @@ static inline int wait_for_generation(SharedBuffer *buffer,
 {
     for (;;) {
         if (buffer->generation == expected_generation)
-            return dayan_resource_wait_ready(buffer->resource);
+            return dayan_resource_wait_ready(buffer->resource,
+                                              (expected_generation / 2U) & 1U);
 
         /*
          * A READY buffer with another generation still has slower users.

@@ -109,7 +109,8 @@ static void run_receiver(uint64_t sample_count,
 
         require_status(dayan_resource_wait(
             DAYAN_RESOURCE_MASK(kAckResource),
-            DAYAN_RESOURCE_MASK(kNotifyResource), 0));
+            DAYAN_RESOURCE_MASK(kNotifyResource),
+            iteration & 1U ? DAYAN_RESOURCE_MASK(kNotifyResource) : 0, 0));
         const uint64_t receive_cycle = read_mcycle();
         require_status(dayan_resource_produce_lsu(
             kAckResource, 1U, DAYAN_RESOURCE_MASK(kNotifyResource)));
@@ -134,14 +135,15 @@ static void run_sender(uint64_t sample_count,
     for (uint64_t iteration = 0; iteration < total; ++iteration) {
         require_status(dayan_resource_wait(
             DAYAN_RESOURCE_MASK(kNotifyResource),
-            DAYAN_RESOURCE_MASK(kArmedResource), 0));
+            DAYAN_RESOURCE_MASK(kArmedResource),
+            iteration & 1U ? DAYAN_RESOURCE_MASK(kArmedResource) : 0, 0));
 
         const uint64_t send_cycle = read_mcycle();
         require_status(dayan_resource_produce_lsu(
             kNotifyResource, 1U, DAYAN_RESOURCE_MASK(kArmedResource)));
         const uint64_t produce_return_cycle = read_mcycle();
 
-        require_status(dayan_resource_wait_ready(kAckResource));
+        require_status(dayan_resource_wait_ready(kAckResource, iteration & 1U));
         const uint64_t ack_cycle = read_mcycle();
         require_status(dayan_resource_consume_lsu(
             DAYAN_RESOURCE_MASK(kAckResource)));

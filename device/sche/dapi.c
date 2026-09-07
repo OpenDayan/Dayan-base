@@ -216,7 +216,8 @@ void dayan_wait_macro(void)
 void dayan_wait_dma(void) __attribute__((alias("dayan_wait_lsu")));
 
 int dayan_resource_wait(dayan_resource_mask_t wait_free,
-                        dayan_resource_mask_t wait_ready, int32_t qos)
+                        dayan_resource_mask_t wait_ready,
+                        dayan_resource_mask_t phase, int32_t qos)
 {
     uint64_t overlap = wait_free & wait_ready;
     uint64_t allowed = resource_access_mask();
@@ -224,7 +225,7 @@ int dayan_resource_wait(dayan_resource_mask_t wait_free,
     if (qos < -4 || qos > 3 || ((wait_free | wait_ready) & ~allowed) ||
         (overlap && (overlap & (overlap - 1U))))
         return -EINVAL;
-    return (int)thread_wait_resources(wait_free, wait_ready, (int8_t)qos);
+    return (int)thread_wait_resources(wait_free, wait_ready, phase, (int8_t)qos);
 }
 
 int dayan_resource_wait_free(dayan_resource_t resource)
@@ -235,11 +236,11 @@ int dayan_resource_wait_free(dayan_resource_t resource)
     if (resource >= 64U)
         return -EINVAL;
     mask = DAYAN_RESOURCE_MASK(resource);
-    status = dayan_resource_wait(mask, 0, 0);
+    status = dayan_resource_wait(mask, 0, 0, 0);
     return status < 0 ? status : 0;
 }
 
-int dayan_resource_wait_ready(dayan_resource_t resource)
+int dayan_resource_wait_ready(dayan_resource_t resource, uint32_t phase)
 {
     uint64_t mask;
     int status;
@@ -247,7 +248,9 @@ int dayan_resource_wait_ready(dayan_resource_t resource)
     if (resource >= 64U)
         return -EINVAL;
     mask = DAYAN_RESOURCE_MASK(resource);
-    status = dayan_resource_wait(0, mask, 0);
+    if (phase > 1U)
+        return -EINVAL;
+    status = dayan_resource_wait(0, mask, phase ? mask : 0, 0);
     return status < 0 ? status : 0;
 }
 

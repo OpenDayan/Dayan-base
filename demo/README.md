@@ -219,9 +219,24 @@ build/demo/matmul_bf16_1c 128 5088 1272
 make -B -C demo MATMUL_SLICES=1
 ```
 
+## 四 Core BF16 matmul
+
+`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，使用跨 Core 共享加载和
+Local Resource 管理各阶段缓冲。Calc 与 Post 分别维护逐资源的期望 Phase，使用
+`dayan_resource_wait()` 显式指定 Phase 等待输入。MAT/LSU 工作与资源 Consume 提交后，循环
+立即进入下一轮；仅在线程末尾执行一次单元完成等待。
+
+期望 Phase 从运行时初始化后的 0 开始：切片输入每次使用后推进，供多个有效切片共用的
+输入在最后一个有效切片提交后推进，跳过的空切片不改变 Phase。Post 每次提交 C 的
+存储和 Consume 后推进该 C 资源的期望 Phase。
+
+```sh
+build/demo/matmul_bf16_4c
+```
+
 ## 使用 cmodel 一键运行
 
-默认使用 `~/rvtng-cmodel` 和 `~/npu-qemu/build/dl-riscv64`：
+默认使用 `~/rvtng-cmodel` 和其配套的 `deps/npu-qemu/build/dl-riscv64`：
 
 ```sh
 make -C demo run

@@ -19,7 +19,7 @@ link=("$clang" "${flags[@]}" -nostdlib -static -fuse-ld=lld
 "${link[@]}"
 for section in .data .bss .cpu .proc_slots .profile_state .trap_records \
                .tensor_interrupt_records .proc_stack .proc_printf .coherent \
-               .custom_state .rodata.mutable .text.mutable; do
+               .custom_state .rodata.mutable .text.mutable .npu_test; do
     "$clang" "${flags[@]}" -DTEST_QUALIFIER= "-DTEST_SECTION=\"$section\"" \
         -c "$script_dir/linker_global.c" -o "$build/global.o"
     if "${link[@]}" >"$build/rejected.log" 2>&1; then
@@ -38,7 +38,20 @@ if "${link[@]}" >"$build/rejected.log" 2>&1; then
 fi
 grep -Fq 'coherent storage is allocated by Host' "$build/rejected.log"
 
+"$clang" "${flags[@]}" '-DTEST_SECTION=".npu_test"' \
+    -c "$script_dir/linker_global.c" -o "$build/global.o"
+if "${link[@]}" >"$build/rejected.log" 2>&1; then
+    echo 'linker-check: FAIL: accepted a truncated test descriptor' >&2
+    exit 1
+fi
+grep -Fq 'test descriptor table must contain 128-byte records' "$build/rejected.log"
+
 "$clang" "${flags[@]}" -c "$script_dir/linker_global.c" -o "$build/global.o"
+if "${link[@]}" -Wl,--defsym=CONFIG_REQUIRE_TESTS=1 >"$build/rejected.log" 2>&1; then
+    echo 'linker-check: FAIL: accepted a test image without descriptors' >&2
+    exit 1
+fi
+grep -Fq 'device test must register at least one DAYAN_TEST descriptor' "$build/rejected.log"
 for pool in STACK PROC_STACK PROC_PRINTF RPC_STACK PROFILE_STACK TRAP_STACK HEAP; do
     if "${link[@]}" "-Wl,--defsym=CONFIG_${pool}_SIZE=0x1010" \
             >"$build/rejected.log" 2>&1; then

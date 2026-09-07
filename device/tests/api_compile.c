@@ -107,14 +107,14 @@ int operator_api_compile(dayan_resource_t resource,
 #endif
     status = dayan_resource_wait_free(resource);
     status |= dayan_resource_produce_lsu(resource, 1, 0);
-    status |= dayan_resource_wait_ready(resource);
+    status |= dayan_resource_wait_ready(resource, 0);
     status |= dayan_resource_wait(DAYAN_RESOURCE_MASK(next),
-                                  DAYAN_RESOURCE_MASK(resource), 0);
+                                  DAYAN_RESOURCE_MASK(resource), 0, 0);
     status |= dayan_resource_produce_mat(
         next, 1, DAYAN_RESOURCE_MASK(resource));
     status |= dayan_resource_wait_free(shared_resource);
     status |= dayan_resource_produce_vec(shared_resource, 1, 0);
-    status |= dayan_resource_wait_ready(shared_resource);
+    status |= dayan_resource_wait_ready(shared_resource, 0);
     status |= dayan_resource_produce_macro(
         resource, 1, DAYAN_RESOURCE_MASK(shared_resource));
     status |= dayan_resource_consume_lsu(DAYAN_RESOURCE_MASK(resource));

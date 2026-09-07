@@ -35,10 +35,15 @@ static void rpc_transaction_init(struct rpc_transaction *transaction,
 
 static void rpc_transaction_send(struct rpc_transaction *transaction)
 {
-    platform_rpc_send(transaction->command);
+    rpc_send_command(transaction->command);
     transaction->completed = 1;
     transaction->cleanup(transaction);
     (void)thread_event_wake_all(&transaction->wait);
+}
+
+void rpc_send_command(uint64_t command)
+{
+    cpu_self()->rpc.send(command);
 }
 
 static void rpc_transaction_submit(struct rpc_transaction *transaction)
@@ -94,15 +99,6 @@ void rpc_send_notify(void)
     (void)thread_event_wake_one(&rpc->send_event);
 }
 
-__attribute__((weak))
-int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
-{
-    (void)opcode;
-    (void)arg;
-    (void)response_command;
-    return 0;
-}
-
 static void rpc_receive_main(void)
 {
     for (;;) {
@@ -121,7 +117,7 @@ static void rpc_receive_main(void)
     }
 }
 
-void rpc_init(void)
+static void rpc_start(thread_fn receiver, void (*send)(uint64_t), int local)
 {
     struct rpc_state *rpc = &cpu_self()->rpc;
     uintptr_t hart = platform_hart_id();
@@ -130,17 +126,33 @@ void rpc_init(void)
 
     INIT_LIST_HEAD(&rpc->send_queue);
     thread_list_init(&rpc->send_event);
-    platform_rpc_init();
+    rpc->send = send;
+    if (!local)
+        platform_rpc_init();
 
     thread_start(thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE),
                   RPC_PROFILE_SLOT_RPC_RECEIVE, THREAD_TYPE_SYSTEM,
-                  "rpc-receive", rpc_receive_main,
+                  local ? "test-launch" : "rpc-receive", receiver,
                   (void *)base, CONFIG_RPC_STACK_SIZE, 0, 0, 0);
     base += CONFIG_RPC_STACK_SIZE;
     thread_start(thread_slot_get(RPC_PROFILE_SLOT_RPC_SEND),
                   RPC_PROFILE_SLOT_RPC_SEND, THREAD_TYPE_SYSTEM,
-                  "rpc-send", rpc_send_main,
+                  local ? "test-rpc" : "rpc-send", rpc_send_main,
                   (void *)base, CONFIG_RPC_STACK_SIZE, 0, 0, 0);
+    if (local) {
+        cpu_self()->rpc_receive_thread = 0;
+        thread_schedule(thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE));
+    }
+}
+
+void rpc_init(void)
+{
+    rpc_start(rpc_receive_main, platform_rpc_send, 0);
+}
+
+void rpc_start_local(thread_fn launcher, void (*send)(uint64_t command))
+{
+    rpc_start(launcher, send, 1);
 }
 
 static void rpc_call_cleanup(struct rpc_transaction *transaction)

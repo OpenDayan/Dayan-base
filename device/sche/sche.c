@@ -249,6 +249,11 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
                   request->argc, (const uintptr_t *)request->args);
     task->thread.tensor_context = request->tensor_context;
     task->thread.resource_context = request->resource_context;
+    const struct dayan_resource_context_fields resources =
+        dayan_resource_context_unpack(request->resource_context);
+    if (resources.local.count)
+        resource_scheduler_local_init((uint32_t)(
+            ((1ULL << resources.local.count) - 1U) << resources.local.base));
     return task;
 }
 
@@ -790,12 +795,14 @@ void thread_wait_unit(enum thread_state state)
 }
 
 uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
+                               uint64_t phase,
                                int8_t qos)
 {
     struct thread *thread = current;
 
     thread_state_set(thread, THREAD_WAIT_RESOURCE);
-    resource_scheduler_submit(wait_free, wait_ready, qos, (uintptr_t)thread);
+    resource_scheduler_submit(wait_free, wait_ready, phase,
+                              qos, (uintptr_t)thread);
     switch_context();
     return thread->token_ext;
 }
@@ -816,7 +823,7 @@ void thread_yield(void)
 void thread_busy_yield(void)
 {
     thread_state_set(current, THREAD_POLLING);
-    resource_scheduler_submit(0, 0, -4, (uintptr_t)current);
+    resource_scheduler_submit(0, 0, 0, -4, (uintptr_t)current);
     switch_context();
 }
 
@@ -867,6 +874,6 @@ void sche_init(void)
         hart * CONFIG_PROC_SLOT_COUNT * CONFIG_PROC_STACK_SIZE);
     runtime->output = (void *)(__proc_printf_start +
         hart * CONFIG_PROC_SLOT_COUNT * CONFIG_PROC_PRINTF_SIZE);
-    resource_scheduler_local_init();
+    resource_scheduler_local_init(UINT32_MAX);
     memset(runtime->slot_owner, THREAD_SLOT_NONE, sizeof(runtime->slot_owner));
 }

@@ -4,12 +4,14 @@ OBJCOPY     ?= llvm-objcopy
 OBJDUMP     ?= llvm-objdump
 NM          ?= llvm-nm
 READELF     ?= llvm-readelf
+LLVM_AR     ?= llvm-ar
 QEMU_SYSTEM_RISCV64 ?= $(ROOT)/deps/npu-qemu/build/qemu-system-riscv64
 
 ROOT        := ..
 BUILD       ?= $(ROOT)/build/device
 NAME        := npu-os
 ELF         := $(BUILD)/$(NAME).elf
+LIB         := $(BUILD)/lib$(NAME).a
 API_ELF     := $(BUILD)/$(NAME)-api.elf
 BIN         := $(BUILD)/$(NAME).bin
 DUMP        := $(BUILD)/$(NAME).objdump
@@ -102,9 +104,34 @@ $(BUILD)/sche/sche.o $(BUILD)/sche/dapi.o $(BUILD)/platform/platform.o \
 $(BUILD)/platform/tensor_interrupt.o: \
     CFLAGS += $(RVT_ISA_FLAGS)
 
-.PHONY: all clean check FORCE bl0
+.PHONY: all clean check FORCE bl0 libnpu-os.a baremetal-smoke check-baremetal-cmodel
 
-all: $(ELF) $(API_ELF) $(BIN) $(DUMP) bl0
+all: $(ELF) $(LIB) $(API_ELF) $(BIN) $(DUMP) bl0 device-tests
+
+include $(ROOT)/device_tests/rules.mk
+
+libnpu-os.a: $(LIB)
+
+$(LIB): $(OBJECTS) $(CONFIG_STAMP)
+	@mkdir -p $(dir $@)
+	rm -f $@
+	$(LLVM_AR) rcs $@ $(OBJECTS)
+
+baremetal-smoke: device-test-smoke_test
+
+$(BUILD)/tests/baremetal_cmodel.elf: $(DEVICE_TEST_BUILD)/smoke_test/main.c.o \
+        $(BUILD)/tests/baremetal_cmodel.o $(LIB) linker.ld
+	$(CLANG) $(LDFLAGS) -Wl,-Map,$@.map,--gc-sections \
+		$(filter %.o,$^) $(LIB) -o $@
+
+$(BUILD)/tests/baremetal_failure.elf: $(BUILD)/tests/baremetal_failure.o \
+        $(BUILD)/tests/baremetal_cmodel.o $(LIB) linker.ld
+	$(CLANG) $(LDFLAGS) -Wl,-Map,$@.map,--gc-sections \
+		$(filter %.o,$^) $(LIB) -o $@
+
+check-baremetal-cmodel: $(BUILD)/tests/baremetal_cmodel.elf \
+                       $(BUILD)/tests/baremetal_failure.elf bl0
+	BUILD_DIR="$(abspath $(BUILD))" bash ./tests/run-baremetal-cmodel.sh
 
 bl0:
 	$(MAKE) -C bl0 all
@@ -131,7 +158,11 @@ $(BUILD)/%.o: %.S $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
 	$(CLANG) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
-check: $(ELF) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST)
+check: $(ELF) $(LIB) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST) \
+       $(BUILD)/tests/baremetal_api.o baremetal-smoke
+	LLVM_AR="$(LLVM_AR)" NM="$(NM)" READELF="$(READELF)" \
+		SMOKE_ELF="$(abspath $(DEVICE_TEST_BUILD))/smoke_test/smoke_test.elf" \
+		BUILD_DIR="$(abspath $(BUILD))" bash ./tests/check-library.sh
 	NM="$(NM)" OBJDUMP="$(OBJDUMP)" READELF="$(READELF)" \
 		BUILD_DIR="$(abspath $(BUILD))" HARTS="$(HARTS)" \
 		STACK_SIZE="$(STACK_SIZE)" RPC_STACK_SIZE="$(RPC_STACK_SIZE)" \
@@ -146,6 +177,11 @@ check: $(ELF) $(API_ELF) $(API_COMPILE_TEST) $(API_CXX_COMPILE_TEST)
 	CLANG="$(CLANG)" QEMU_SYSTEM_RISCV64="$(QEMU_SYSTEM_RISCV64)" \
 		TEST_BUILD_DIR="$(abspath $(BUILD))/tests/qemu" \
 		./tests/run-qemu-tests.sh
+
+$(BUILD)/tests/baremetal_api.o: tests/baremetal_api.cpp $(wildcard include/api/*.h) $(CONFIG_STAMP)
+	@mkdir -p $(dir $@)
+	$(CLANGXX) -Iinclude/api $(filter-out -std=c11,$(CFLAGS)) \
+		-std=c++17 -fno-exceptions -fno-rtti -c $< -o $@
 
 $(API_COMPILE_TEST): tests/api_compile.c $(wildcard include/api/*.h) \
 		$(CONFIG_STAMP)
@@ -162,13 +198,14 @@ $(API_CXX_COMPILE_TEST): tests/api_compile.c $(wildcard include/api/*.h) \
 $(CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
 	@printf '%s\n' '$(CLANG)' '$(CLANGXX)' '$(CPPFLAGS)' '$(CFLAGS)' \
-		'$(LDFLAGS)' '$(RVT_ISA_FLAGS)' > $@.tmp
+		'$(LDFLAGS)' '$(RVT_ISA_FLAGS)' '$(OBJECTS)' > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
 
 FORCE:
 
 clean:
 	rm -rf $(BUILD)
+	$(MAKE) device-tests-clean
 	$(MAKE) -C bl0 clean
 
 -include $(DEPS)

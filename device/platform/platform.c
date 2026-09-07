@@ -139,7 +139,7 @@ _Noreturn void platform_rpc_halt(void)
      */
     while (__builtin_riscv_tx_base_tcsr_read(0, PRODUCE_BAR_GLOBAL))
         ;
-    resource_scheduler_local_init();
+    resource_scheduler_local_init(UINT32_MAX);
     __asm__ volatile("fence.i" ::: "memory");
     /* Bootrom consumes and acknowledges the pending opcode-0 request. */
     bootrom();

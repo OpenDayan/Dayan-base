@@ -209,6 +209,8 @@ NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 ./run_cmodel_server.sh
 ```
 
+脚本默认使用 `~/rvtng-cmodel` 及其 `deps/npu-qemu/build/dl-riscv64`，保持 MMU 和
+Shared Resource clear 协议匹配；可用 `RVTNG_CMODEL_DIR` 与 `RVTNG_QEMU` 覆盖。
 脚本默认给 QEMU DRAM 和 HAL Normal memory 配置 4096 MiB，可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者。BL1 的 `RAM_SIZE` 仍只描述固件链接区域。
 
 脚本就绪后，在另一个终端运行：
@@ -442,6 +444,16 @@ Local，32--63 表示 Shared。Host 为每个常驻 kernel 分配物理窗口，
 `DAYAN_RESOURCE_ROLE_PRODUCER` 或 `DAYAN_RESOURCE_ROLE_CONSUMER`。单资源便捷接口
 `dayan_resource_wait_free/ready()` 也遵循相同语义，因此 `wait_free()` 成功后调用方必须
 最终发布该资源。
+
+`dayan_resource_wait(free, ready, phase, qos)` 强制要求每个 READY 输入匹配
+`phase` 位图中对应逻辑资源的期望值。硬件只在最后一个 Consume 经 Resource Produce
+提交、使资源回到 FREE 时翻转 Phase。消费者提交异步工作和 Consume 后即可等待下一代，
+无需逐轮等待 MAT/LSU，Thread 退出前仍须排空最后的工作及资源提交。
+每次启动前，Host 通过 Cluster `0x6000` clear 接口初始化本组 Proc 的 Shared 资源；
+Device 在根 Proc 首次调度前用 `LOCAL_RESOURCE_INIT` 初始化分配的 Local 资源。
+初始化按物理掩码只清选中项，状态为 FREE、计数 0、Phase 0；子 Thread 不重复初始化。
+单资源 `dayan_resource_wait_ready(resource, phase)` 的 phase 必须为 0 或 1。
+选举同样使用软件指定的期望 Phase，不自动快照资源当前代，也不提供关闭 Phase 比较的模式。
 
 `dayan_resource_produce_<unit>(output, consumers, inputs)` 在对应执行单元的前序工作完成
 后，原子消费 `inputs` 并把已预留的 `output` 发布为 READY。有限依赖图的最后一批输入

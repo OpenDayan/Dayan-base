@@ -133,6 +133,8 @@ switch_context:
     la      t0, __cpu_start
     add     a2, a2, t0
     ld      t1, CPU_RPC_RECEIVE_OFFSET(a2)
+    /* Bare-metal mode has no Host receiver, even if MSIP is still asserted. */
+    beqz    t1, .Lpop_token
     li      t2, 0
     j       .Lrun_thread
 

@@ -227,12 +227,14 @@ static inline int worker_started(const PipelineState<Traits> *state)
     return !state->abort;
 }
 
+template <uint32_t BufferCount>
 static inline int wait_for_generation(TileBuffer *buffer,
                                       uint64_t generation)
 {
     while (buffer->generation != generation)
         dayan_yield();
-    return dayan_resource_wait_ready(buffer->resource);
+    return dayan_resource_wait_ready(buffer->resource,
+                                      ((generation - 1U) / BufferCount) & 1U);
 }
 
 template <long Group>
@@ -453,7 +455,7 @@ static inline void store_probability(PipelineState<Traits> *state,
         &state->probability[kv_tile % kScoreBufferCount];
     TileBuffer *score = &state->score[kv_tile % kScoreBufferCount];
 
-    require_status(wait_for_generation(probability, kv_tile + 1U));
+    require_status(wait_for_generation<kScoreBufferCount>(probability, kv_tile + 1U));
     __tx_lsu_dma_u2d<1>(
         (long)(state->probability_dram +
                (uint64_t)kv_tile * Traits::kScoreSlotBytes),
@@ -545,7 +547,7 @@ static void lsu_worker(void *argument)
     }
 
     if constexpr (Traits::kFullAttention) {
-        require_status(dayan_resource_wait_ready(state->output_done));
+        require_status(dayan_resource_wait_ready(state->output_done, 0));
         configure_lsu_shape<1>(kQueryRows, kHeadD * sizeof(float),
                                kHeadD * sizeof(float),
                                kHeadD * sizeof(float));
@@ -572,7 +574,7 @@ static void mat_worker(void *argument)
     if (!worker_started(state))
         return;
 
-    require_status(dayan_resource_wait_ready(state->q_ready));
+    require_status(dayan_resource_wait_ready(state->q_ready, 0));
     configure_mat<0, Traits>(
         kQueryRows, kKvTileCols, kHeadD,
         kHeadD * sizeof(typename Traits::Input),
@@ -593,7 +595,7 @@ static void mat_worker(void *argument)
         TileBuffer *score =
             &state->score[kv_tile % kScoreBufferCount];
 
-        require_status(wait_for_generation(kt, kv_tile + 1U));
+        require_status(wait_for_generation<kKtBufferCount>(kt, kv_tile + 1U));
         require_status(dayan_resource_wait_free(score->resource));
         score->generation = kv_tile + 1U;
 
@@ -610,10 +612,10 @@ static void mat_worker(void *argument)
                     &state->probability[pv_tile % kScoreBufferCount];
 
                 require_status(
-                    wait_for_generation(probability, pv_tile + 1U));
+                    wait_for_generation<kScoreBufferCount>(probability, pv_tile + 1U));
                 require_status(dayan_resource_wait_ready(
-                    state->output_for_mat[pv_tile]));
-                require_status(wait_for_generation(pv_kt, pv_tile + 1U));
+                    state->output_for_mat[pv_tile], 0));
+                require_status(wait_for_generation<kKtBufferCount>(pv_kt, pv_tile + 1U));
                 require_status(dayan_resource_wait_free(
                     state->output_for_vec[pv_tile + 1U]));
                 __tx_mat_mma<1>(
@@ -638,10 +640,10 @@ static void mat_worker(void *argument)
         TileBuffer *probability =
             &state->probability[pv_tile % kScoreBufferCount];
 
-        require_status(wait_for_generation(probability, pv_tile + 1U));
+        require_status(wait_for_generation<kScoreBufferCount>(probability, pv_tile + 1U));
         require_status(
-            dayan_resource_wait_ready(state->output_for_mat[pv_tile]));
-        require_status(wait_for_generation(kt, pv_tile + 1U));
+            dayan_resource_wait_ready(state->output_for_mat[pv_tile], 0));
+        require_status(wait_for_generation<kKtBufferCount>(kt, pv_tile + 1U));
         require_status(dayan_resource_wait_free(
             state->output_for_vec[pv_tile + 1U]));
         __tx_mat_mma<1>(
@@ -665,7 +667,7 @@ static void vec_worker(void *argument)
         return;
 
     configure_vec<Traits>();
-    require_status(dayan_resource_wait_ready(state->state_ready));
+    require_status(dayan_resource_wait_ready(state->state_ready, 0));
 
     for (uint32_t kv_tile = 0; kv_tile < kKvTiles; ++kv_tile) {
         TileBuffer *score =
@@ -673,12 +675,12 @@ static void vec_worker(void *argument)
         TileBuffer *probability =
             &state->probability[kv_tile % kScoreBufferCount];
 
-        require_status(wait_for_generation(score, kv_tile + 1U));
+        require_status(wait_for_generation<kScoreBufferCount>(score, kv_tile + 1U));
         require_status(dayan_resource_wait_free(probability->resource));
         probability->generation = kv_tile + 1U;
         if constexpr (Traits::kFullAttention) {
             require_status(dayan_resource_wait_ready(
-                state->output_for_vec[kv_tile]));
+                state->output_for_vec[kv_tile], 0));
             require_status(dayan_resource_wait_free(
                 state->output_for_mat[kv_tile]));
         }
@@ -709,7 +711,7 @@ static void vec_worker(void *argument)
 
     if constexpr (Traits::kFullAttention) {
         require_status(
-            dayan_resource_wait_ready(state->output_for_vec[kKvTiles]));
+            dayan_resource_wait_ready(state->output_for_vec[kKvTiles], 0));
         require_status(dayan_resource_wait_free(state->output_done));
         queue_normalize_output(state->output_uram, state->l_uram);
         start_online_softmax();

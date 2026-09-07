@@ -126,6 +126,10 @@ int npu_hal_wait_command_consumed(npu_hal_t *hal, npu_hal_core_t core,
 int npu_hal_boot_core(npu_hal_t *hal, npu_hal_core_t core, uint64_t entry,
                       uint32_t timeout_ms);
 
+/* Clear only exclusively allocated Shared Resource entries before Proc launch.
+ * The selected physical entries must have no outstanding users or transactions. */
+int npu_hal_shared_resource_init(npu_hal_t *hal, uint32_t cluster, uint32_t mask);
+
 /*
  * ClusterMMU APB4 register access.  Offsets are the DAYAN_MMU_* values from
  * platform_regs.h, relative to the MMU register page rather than to the

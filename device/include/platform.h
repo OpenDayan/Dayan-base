@@ -13,6 +13,11 @@ void platform_cache_invalidate(void *addr, size_t size);
 void platform_data_fence(void);
 void platform_instruction_fence(void);
 
+/* Standalone test hooks; boards may override the default AXI UARTLite output. */
+void platform_test_init(void *coherent_backing);
+long platform_print(const void *data, size_t size);
+void platform_test_complete(int64_t result);
+
 void platform_rpc_init(void);
 void platform_rpc_ready(void);
 _Noreturn void platform_rpc_halt(void);

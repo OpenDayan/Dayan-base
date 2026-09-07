@@ -598,7 +598,8 @@ static void dram_loader(void *argument)
 #if !MATMUL_BF16_4C_BROADCAST_MODEL
 template <long LoadGroup>
 static void copy_a(MatmulState *state, uint64_t generation,
-                   int tile_m, int tile_n, int *configured_rows)
+                   int tile_m, int tile_n, int *configured_rows,
+                   uint64_t *phases)
 {
     (void)generation;
 #if !MATMUL_BF16_4C_D2A_MODEL
@@ -620,7 +621,7 @@ static void copy_a(MatmulState *state, uint64_t generation,
 
         require_status(dayan_resource_wait(
             DAYAN_RESOURCE_MASK(local->resource),
-            DAYAN_RESOURCE_MASK(shared_resource), 0));
+            DAYAN_RESOURCE_MASK(shared_resource), *phases, 0));
 #if !MATMUL_BF16_4C_D2A_MODEL
         configure_loader_rows<LoadGroup>(real_rows, configured_rows);
         const uint64_t source_uram =
@@ -635,12 +636,14 @@ static void copy_a(MatmulState *state, uint64_t generation,
         require_status(dayan_resource_produce_lsu(
             local->resource, 1U,
             DAYAN_RESOURCE_MASK(shared_resource)));
+        *phases ^= DAYAN_RESOURCE_MASK(shared_resource);
     }
 }
 
 template <long LoadGroup>
 static void copy_b(MatmulState *state, uint64_t generation,
-                   int tile_m, int tile_n, int *configured_rows)
+                   int tile_m, int tile_n, int *configured_rows,
+                   uint64_t *phases)
 {
 #if !MATMUL_BF16_4C_D2A_MODEL
     const uint32_t source_lane = b_source_lane(state->column_lane);
@@ -659,7 +662,7 @@ static void copy_b(MatmulState *state, uint64_t generation,
 
     require_status(dayan_resource_wait(
         DAYAN_RESOURCE_MASK(local->resource),
-        DAYAN_RESOURCE_MASK(shared_resource), 0));
+        DAYAN_RESOURCE_MASK(shared_resource), *phases, 0));
 #if !MATMUL_BF16_4C_D2A_MODEL
     configure_loader_rows<LoadGroup>(real_columns, configured_rows);
     const uint64_t source_uram =
@@ -673,11 +676,13 @@ static void copy_b(MatmulState *state, uint64_t generation,
     require_status(dayan_resource_produce_lsu(
         local->resource, (uint32_t)local_users,
         DAYAN_RESOURCE_MASK(shared_resource)));
+    *phases ^= DAYAN_RESOURCE_MASK(shared_resource);
 }
 
 static void remote_copy(void *argument)
 {
     MatmulState *state = (MatmulState *)argument;
+    uint64_t phases = 0;
     const bool copies_a =
         state->lane != a_source_lane(state->row_lane);
 #if MATMUL_BF16_4C_D2A_MODEL
@@ -699,10 +704,10 @@ static void remote_copy(void *argument)
             continue;
         if (copies_a) {
             copy_a<Constants::kRemoteCopy>(
-                state, generation, tile_m, tile_n, &configured_rows);
+                state, generation, tile_m, tile_n, &configured_rows, &phases);
         } else {
             copy_b<Constants::kRemoteCopy>(
-                state, generation, tile_m, tile_n, &configured_rows);
+                state, generation, tile_m, tile_n, &configured_rows, &phases);
         }
     }
     dayan_wait_lsu();
@@ -837,11 +842,41 @@ static void execute_mat_job(MatmulState *state, const MatJob *job,
     }
 }
 
+static dayan_resource_mask_t mat_inputs(const MatmulState *state,
+                                        uint64_t generation, int slice)
+{
+    const int b_index = (int)(generation & 1U);
+    dayan_resource_t a = state->a[slice][0].resource;
+    dayan_resource_t b = state->b[b_index].resource;
+#if MATMUL_BF16_4C_BROADCAST_MODEL
+    if (state->lane != a_source_lane(state->row_lane))
+        a = shared_a_resource(state->row_lane, slice, 0);
+    if (state->lane != b_source_lane(state->column_lane))
+        b = shared_b_resource(state->column_lane, b_index);
+#endif
+    return DAYAN_RESOURCE_MASK(a) | DAYAN_RESOURCE_MASK(b);
+}
+
 static inline bool prepare_mat_job(MatmulState *state, uint64_t sequence,
-                                   MatJob *job)
+                                   MatJob *job, uint64_t *phase_generation,
+                                   uint64_t *phases)
 {
     job->generation = sequence / MATMUL_BF16_4C_SLICES;
     job->slice = (int)(sequence % MATMUL_BF16_4C_SLICES);
+    // Both workers follow all resource lifecycles, including generations where
+    // only the other worker has active slices. Each input advances once per use.
+    for (; *phase_generation < job->generation; ++*phase_generation) {
+        int tile_m, tile_n, tile_k;
+        decode_generation(state, *phase_generation, &tile_m, &tile_n, &tile_k);
+        dayan_resource_mask_t used = 0;
+        if (cols_for_tile(state, tile_n, state->column_lane)) {
+            for (int slice = 0; slice < MATMUL_BF16_4C_SLICES; ++slice) {
+                if (rows_for_slice(state, tile_m, state->row_lane, slice))
+                    used |= mat_inputs(state, *phase_generation, slice);
+            }
+        }
+        *phases ^= used;
+    }
     decode_generation(state, job->generation, &job->tile_m,
                       &job->tile_n, &job->tile_k);
     const int rows = rows_for_slice(
@@ -851,36 +886,18 @@ static inline bool prepare_mat_job(MatmulState *state, uint64_t sequence,
 
     if (!rows || !columns)
         return false;
-    constexpr int a_buffer_index = 0;
-    const int b_buffer_index = (int)(job->generation & 1U);
-#if MATMUL_BF16_4C_BROADCAST_MODEL
-    if (state->lane == a_source_lane(state->row_lane))
-        require_status(dayan_resource_wait_ready(
-            state->a[job->slice][a_buffer_index].resource));
-    else
-        require_status(dayan_resource_wait_ready(
-            shared_a_resource(state->row_lane, job->slice,
-                              a_buffer_index)));
-    if (state->lane == b_source_lane(state->column_lane))
-        require_status(dayan_resource_wait_ready(
-            state->b[b_buffer_index].resource));
-    else
-        require_status(dayan_resource_wait_ready(
-            shared_b_resource(state->column_lane, b_buffer_index)));
-#else
-    require_status(dayan_resource_wait_ready(
-        state->a[job->slice][a_buffer_index].resource));
-    require_status(dayan_resource_wait_ready(
-        state->b[b_buffer_index].resource));
-#endif
+    require_status(dayan_resource_wait(
+        0, mat_inputs(state, job->generation, job->slice), *phases, 0));
     return true;
 }
 
-static inline void wait_mat_turn(MatmulState *state, uint32_t worker)
+static inline void wait_mat_turn(MatmulState *state, uint32_t worker,
+                                 uint32_t phase)
 {
     require_status(dayan_resource_wait(
         DAYAN_RESOURCE_MASK(state->mat_turn[worker ^ 1U]),
-        DAYAN_RESOURCE_MASK(state->mat_turn[worker]), 0));
+        DAYAN_RESOURCE_MASK(state->mat_turn[worker]),
+        phase ? DAYAN_RESOURCE_MASK(state->mat_turn[worker]) : 0, 0));
 }
 
 static inline void pass_mat_turn(MatmulState *state, uint32_t worker,
@@ -897,13 +914,16 @@ static void mat_worker(void *argument)
     const uint32_t worker = args->worker;
     const uint64_t job_count =
         state->generation_count * MATMUL_BF16_4C_SLICES;
+    uint64_t phase_generation = 0;
+    uint64_t phases = 0;
 
     for (uint64_t sequence = worker; sequence < job_count;
          sequence += 2U) {
         MatJob job;
-        const bool active = prepare_mat_job(state, sequence, &job);
+        const bool active = prepare_mat_job(state, sequence, &job,
+                                            &phase_generation, &phases);
 
-        wait_mat_turn(state, worker);
+        wait_mat_turn(state, worker, (sequence / 2U) & 1U);
         if (active) {
             switch (job.slice) {
             case 0:
@@ -1117,7 +1137,8 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     status = dayan_thread_join_all();
     if (status < 0)
         dayan_thread_exit(status);
-    status = dayan_resource_wait_ready(state.mat_turn[0]);
+    status = dayan_resource_wait_ready(state.mat_turn[0],
+        (state.generation_count * MATMUL_BF16_4C_SLICES / 2U) & 1U);
     if (status >= 0)
         status = dayan_resource_consume_lsu(
             DAYAN_RESOURCE_MASK(state.mat_turn[0]));

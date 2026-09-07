@@ -10,6 +10,7 @@
 #define RESOURCE_CONSUME_READY   0x034U
 #define LOCAL_RESOURCE_INIT      0x035U
 #define RESOURCE_TOKEN_EXT       0x036U
+#define RESOURCE_WAIT_PHASE      0x037U
 #define RESOURCE_PRODUCE_BASE    0x020U
 #define PRODUCE_BAR_GLOBAL       0x000U
 
@@ -30,6 +31,7 @@ static inline void resource_scheduler_interrupt_restore(uintptr_t previous)
 
 static inline void resource_scheduler_submit(uint64_t wait_free,
                                              uint64_t wait_ready,
+                                             uint64_t phase,
                                              int8_t qos,
                                              uintptr_t token)
 {
@@ -37,17 +39,18 @@ static inline void resource_scheduler_submit(uint64_t wait_free,
 
     __builtin_riscv_tx_base_tcsr_write(wait_free, 0, RESOURCE_WAIT_FREE);
     __builtin_riscv_tx_base_tcsr_write(wait_ready, 0, RESOURCE_WAIT_READY);
+    __builtin_riscv_tx_base_tcsr_write(phase, 0, RESOURCE_WAIT_PHASE);
     __builtin_riscv_tx_base_tcsr_write((uint8_t)qos & 7U, 0, RESOURCE_WAIT_QOS);
     __builtin_riscv_tx_base_tcsr_write(token, 0, RESOURCE_WAIT);
     resource_scheduler_interrupt_restore(interrupt_state);
 }
 
 static __attribute__((always_inline)) inline void
-resource_scheduler_local_init(void)
+resource_scheduler_local_init(uint32_t mask)
 {
     uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
-    __builtin_riscv_tx_base_tcsr_write(0, 0, LOCAL_RESOURCE_INIT);
+    __builtin_riscv_tx_base_tcsr_write(mask, 0, LOCAL_RESOURCE_INIT);
     resource_scheduler_interrupt_restore(interrupt_state);
 }
 

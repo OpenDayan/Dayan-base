@@ -98,7 +98,7 @@ static int test_deferred_resource_transitions(ContextThreadResult *result)
     if (status == 0)
         status = dayan_resource_produce_lsu(local_resource, 1U, 0);
     if (status == 0)
-        status = dayan_resource_wait_ready(local_resource);
+        status = dayan_resource_wait_ready(local_resource, 0);
     if (status == 0)
         status = dayan_resource_consume_mat(
             DAYAN_RESOURCE_MASK(local_resource));
@@ -111,7 +111,7 @@ static int test_deferred_resource_transitions(ContextThreadResult *result)
     if (status == 0)
         status = dayan_resource_produce_vec(shared_resource, 1U, 0);
     if (status == 0)
-        status = dayan_resource_wait_ready(shared_resource);
+        status = dayan_resource_wait_ready(shared_resource, 0);
     if (status == 0)
         status = dayan_resource_consume_macro(
             DAYAN_RESOURCE_MASK(shared_resource));

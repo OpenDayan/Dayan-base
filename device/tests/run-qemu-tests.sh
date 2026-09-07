@@ -87,6 +87,9 @@ compile_c "$build/printf_test.o" "$script_dir/printf_test.c" \
     -I"$script_dir/printf_include"
 compile_c "$build/profile_record_test.o" "$script_dir/profile_record_test.c"
 compile_c "$build/profile.o" "$device_root/sche/profile.c"
+compile_c "$build/local_test.o" "$script_dir/local_test.c"
+compile_c "$build/test_boot.o" "$device_root/boot/test.c"
+compile_c "$build/test_rpc.o" "$device_root/rpc/test.c"
 "$clang" "${target_flags[@]}" "${includes[@]}" -c \
     "$device_root/sche/context.S" -o "$build/context.o"
 
@@ -110,8 +113,11 @@ link_test printf_test "$build/printf_test.o" "$build/printf.o" \
     "$build/string.o"
 link_test profile_record_test "$build/profile_record_test.o" \
     "$build/context.o" "$build/profile.o" "$build/string.o"
+link_test local_test "$build/local_test.o" "$build/test_boot.o" \
+    "$build/test_rpc.o" "$build/string.o" \
+    -Wl,--defsym=__test_heap_end=0x84000000
 
-tests=(list_test rbtree_test mem_test math_test rpc_test printf_test profile_record_test)
+tests=(list_test rbtree_test mem_test math_test rpc_test printf_test profile_record_test local_test)
 for test_name in "${tests[@]}"; do
     log="$build/$test_name.log"
     echo "qemu-tests: RUN $test_name"

@@ -127,20 +127,22 @@ DAYAN_API void dayan_cache_flush(const void *address, size_t size);
  * Logical resources 0..31 are Local and 32..63 are Shared.  Wait returns a
  * dayan_resource_role for election waits, or a negative error.  A normal
  * wait has disjoint masks.  An election wait overlaps them in one bit.
- * Election registration snapshots the current lifecycle: waiters arriving
- * during BUSY or READY join that same generation as consumers.  The phase
- * changes only when the final consumer returns the Resource to FREE.
- * Before registering again, retire this caller's previous use.  Other masks
- * on the election wait do not defer its phase snapshot until those masks pass.
- * The phase is one bit: never leave an election pending while that Resource
- * completes two lifecycles.  Bound outstanding uses and keep participants in
- * the same per-Resource order; buffer indexes are not hardware phase values.
+ * Every READY input must match its explicit lifecycle phase.  Bit r in phase is
+ * the expected phase of logical Resource r; bits outside wait_ready are ignored.
+ * For an election, this phase selects both the FREE producer and READY consumer
+ * generation.  There is no implicit snapshot of the Resource's current phase.
+ * The final Consume through Resource Produce returns it to FREE and flips phase.
+ * Runtime initializes allocated resources to FREE, count zero, phase zero
+ * before root Procs run; child Threads inherit without reinitializing them.
+ * Track each physical buffer's actual uses, not the global loop or buffer index.
+ * A pending participant must never be overtaken by two complete lifecycles.
  */
 DAYAN_API int dayan_resource_wait(dayan_resource_mask_t wait_free,
                                   dayan_resource_mask_t wait_ready,
-                                  int32_t qos);
+                                  dayan_resource_mask_t phase, int32_t qos);
 DAYAN_API int dayan_resource_wait_free(dayan_resource_t resource);
-DAYAN_API int dayan_resource_wait_ready(dayan_resource_t resource);
+/* phase must be 0 or 1. */
+DAYAN_API int dayan_resource_wait_ready(dayan_resource_t resource, uint32_t phase);
 
 /*
  * Publish output after earlier work on the selected unit completes.  At the

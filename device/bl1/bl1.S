@@ -5,7 +5,9 @@
 .type _start, @function
 .align 2
 _start:
-    /* BL0 leaves the hart id in a0. Harts outside this image stay parked. */
+    /* Also support direct reset at 0x80000000 without a BL0 register contract. */
+    csrci   mstatus, 8
+    csrr    a0, mhartid
     li      t0, CONFIG_HART_COUNT
     bgeu    a0, t0, .Lpark
 
@@ -40,6 +42,9 @@ _start:
     csrw    mscratch, t0
     la      t0, trap_entry
     csrw    mtvec, t0
+    /* Cold reset leaves RNMI disabled; synchronous traps must use mtvec. */
+    li      t0, 8
+    csrs    mnstatus, t0
     /* Enable and reset the single-precision floating-point context. */
     li      t0, 0x6000
     csrs    mstatus, t0
@@ -47,7 +52,7 @@ _start:
 
     call    init
     /* Publish readiness only after init has returned and released its stack. */
-    call    platform_rpc_ready
+    call    boot_ready
     /* RPC MSIP is polled; enable only the tensor machine-external IRQ. */
     li      t0, 0x800
     csrw    mie, t0

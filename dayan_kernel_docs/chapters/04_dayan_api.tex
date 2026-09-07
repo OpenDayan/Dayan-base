@@ -108,13 +108,16 @@ kernel 用 \code{DAYAN_KERNEL_NAMED_RESOURCE_DESC} 或
 descriptor 标志时使用 \code{DAYAN_KERNEL_RESOURCE_DESC_EX}。子 Thread 在
 \code{dayan_thread_resources_t} 中声明自己可见的数量。Host 分配物理窗口，Context2
 完成逻辑到物理编号的映射；算子不创建、初始化、复制或传递资源对象地址。
+每次启动时，Host 运行时通过 Cluster clear 初始化分配的 Shared 资源，Device 运行时
+在根 Proc 首次调度前初始化分配的 Local 资源，初始状态均为 FREE、计数 0、phase 0。
+初始化使用物理范围掩码，不影响其他常驻 Proc；子 Thread 继承资源时不重复初始化。
 
 \subsection{等待与预留}
 
 \begin{dayantable}{Named Resource 等待接口}{tab:kernel-031}{X[38,l] X[62,l]}
   符号 & 行为 \\
-  \code{dayan_resource_wait} & 原子等待全部 \code{wait_ready} 为 READY、全部 \code{wait_free} 为 FREE；成功发射时把后者预留为 BUSY。qos 范围为 $-4$--3。 \\
-  \code{dayan_resource_wait_ready} & 等待一个资源达到 READY。 \\
+  \code{dayan_resource_wait} & 参数为 free、ready、phase、qos。原子等待全部输入为 READY 且匹配 phase 位图、输出为 FREE，并预留输出为 BUSY；qos 范围为 $-4$--3。 \\
+  \code{dayan_resource_wait_ready} & 参数为 resource、phase；等待一个资源达到 READY 且匹配指定的 0/1 phase。 \\
   \code{dayan_resource_wait_free} & 等待一个资源为 FREE，并在返回前把它预留为 BUSY。 \\
 \end{dayantable}
 
@@ -124,13 +127,18 @@ descriptor 标志时使用 \code{DAYAN_KERNEL_RESOURCE_DESC_EX}。子 Thread 在
 \code{DAYAN_RESOURCE_ROLE_NORMAL}。传入未声明的逻辑编号、多个重叠 bit 或非法 qos
 会返回负值。
 
-选举登记时快照资源的当前生命周期。资源已处于 BUSY 或 READY 时登记的参与者仍属于
-当前代，并在 READY 时作为 CONSUMER 返回。内部 phase 在 FREE、BUSY、READY 期间
-保持不变，仅在最后一次消费使 READY 回到 FREE 时翻转。再次参与同一资源的选举前，
-调用者必须先完成上一代的使用；把本地缓冲的 FREE 条件合并进选举 wait，并不会推迟
-phase 的快照时刻。WAIT\_READY 不预扣消费名额，软件必须保证实际消费次数与声明一致。
+所有 READY 输入强制匹配指定 phase；选举也使用软件指定值，不自动快照资源当前代。
+匹配 phase 的 FREE 选举项产生 PRODUCER，匹配 phase 的 READY 选举项产生 CONSUMER；
+BUSY 或 phase 不匹配时继续等待。phase 在 FREE、BUSY、READY 期间保持不变，
+仅在最后一次消费使 READY 回到 FREE 时翻转。
+WAIT\_READY 不预扣消费名额，软件必须保证实际消费次数与声明一致。
 共享 URAM 的生产者还必须等待远端复制完成，才能复用或释放源缓冲。
-phase 只有 1 bit，软件不能让未发射的选举项跨越同一资源的两次完整生命周期，否则会
+\code{dayan_resource_wait} 可在旧代仍 READY 时等待下一代，实际条件为
+\code{READY \&\& resource.phase == expected_phase}。消费者提交工作和对应
+produce/consume 后即可推进到下一次等待；硬件在最后一个 Consume 经 Resource Produce
+完成提交后才翻转 phase。流水循环无需逐轮调用 \code{dayan_wait_mat/lsu}，但退出前
+仍需等待最后的异步工作与资源提交。同一代的多个消费者使用相同期望值。
+phase 只有 1 bit，软件不能让未发射的等待项跨越同一资源的两次完整生命周期，否则会
 发生代号回绕。各阶段应遵循相同的逐资源使用顺序，限制未完成的代数；物理缓冲的
 轮转索引不等同于硬件内部 phase，尤其不能用跳过的空 tile 推算硬件 phase。
 
@@ -145,7 +153,7 @@ phase 只有 1 bit，软件不能让未发射的选举项跨越同一资源的�
 produce/consume 调用只把依赖写入对应执行单元，不等待该单元完成，也不向软件 scheduler
 提交资源指针 token。一个 READY 项的 consumer count 归零后自动回到 FREE。有限依赖图的
 最后一级必须使用 terminal consume，或由后继 produce 的输入 mask 消费，确保所有已预留
-资源最终回到 FREE；否则后续 launch 可能永久等待旧状态。Local 与 Shared 使用同一组
+资源最终回到 FREE；运行时初始化不能代替异步工作排空。Local 与 Shared 使用同一组
 DAPI，跨 Core 仲裁与状态迁移均由硬件完成。
 
 \end{document}

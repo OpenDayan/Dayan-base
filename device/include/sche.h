@@ -91,6 +91,7 @@ void thread_wait_join(struct thread_list *event);
 void thread_wait_produce(void);
 void thread_wait_unit(enum thread_state state);
 uint32_t thread_wait_resources(uint64_t wait_free, uint64_t wait_ready,
+                               uint64_t phase,
                                int8_t qos);
 void thread_wait_rpc(void);
 void thread_busy_yield(void);

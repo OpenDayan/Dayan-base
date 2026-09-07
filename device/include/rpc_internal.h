@@ -25,8 +25,11 @@ struct rpc_state {
     struct list_head send_queue;
     struct rpc_transaction trap;
     struct thread_list send_event;
+    void (*send)(uint64_t command);
 };
 
+void rpc_start_local(thread_fn launcher, void (*send)(uint64_t command));
+void rpc_send_command(uint64_t command);
 int rpc_report_trap(const struct trap_record *record);
 void rpc_send_notify(void);
 

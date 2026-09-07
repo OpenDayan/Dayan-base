@@ -1001,6 +1001,15 @@ static struct dispatch_result dispatch_group(
     result.group = group;
     group->cluster = server->slots[slots[0]].target.cluster;
     group->shared_resources = resources[0].shared;
+    if (group->shared_resources.count) {
+        const uint32_t mask = (uint32_t)(
+            ((UINT64_C(1) << group->shared_resources.count) - 1U) <<
+            group->shared_resources.base);
+        result.status = npu_hal_shared_resource_init(server->hal, group->cluster,
+                                                     mask);
+        if (result.status < 0)
+            return result;
+    }
     result.status = initialize_shared(server, command, slots, count,
                                       &group->shared_allocation,
                                       &shared_size);

@@ -338,6 +338,16 @@ int main(void)
 
         assert(h2c >= 0 && c2h >= 0);
 
+        assert(npu_hal_shared_resource_init(hal, 0, 0x00ffff00U) == 0);
+        assert(pread(h2c, raw, sizeof(uint32_t),
+                     (off_t)DAYAN_RESOURCE_GLOBAL_INIT + 0x10000) ==
+               (ssize_t)sizeof(uint32_t));
+        assert(raw[0] == 0x00ffff00U);
+        assert(npu_hal_shared_resource_init(hal, 0, 0) == 0);
+        assert(npu_hal_shared_resource_init(NULL, 0, 1) == -EINVAL);
+        assert(npu_hal_shared_resource_init(hal, options.cluster_count, 1) ==
+               -EINVAL);
+
         /* 64-bit writes are LO then HI, with HI holding only bits [55:32]. */
         assert(npu_hal_mmu_write64(hal, 0, DAYAN_MMU_PTW_BASE_LO,
                                    UINT64_C(0x00ab00000012f000)) == 0);

@@ -1,5 +1,6 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
+EXTERN(_start)
 
 __hart_count = DEFINED(CONFIG_HART_COUNT) ? CONFIG_HART_COUNT : 4;
 __cpu_local_size = DEFINED(CONFIG_CPU_LOCAL_SIZE) ? CONFIG_CPU_LOCAL_SIZE : 0x2000;
@@ -11,6 +12,8 @@ __rpc_stack_size = DEFINED(CONFIG_RPC_STACK_SIZE) ? CONFIG_RPC_STACK_SIZE : 0x10
 __profile_stack_size = DEFINED(CONFIG_PROFILE_STACK_SIZE) ? CONFIG_PROFILE_STACK_SIZE : 0x1000;
 __trap_stack_size = DEFINED(CONFIG_TRAP_STACK_SIZE) ? CONFIG_TRAP_STACK_SIZE : 0x1000;
 __heap_size = DEFINED(CONFIG_HEAP_SIZE) ? CONFIG_HEAP_SIZE : 0x100000;
+__test_data_start = 0x84000000;
+__test_data_end = 0xc4000000;
 
 MEMORY
 {
@@ -62,6 +65,13 @@ SECTIONS
     {
         *(.rodata .rodata.* .srodata .srodata.*)
     } > RAM :constants
+
+    .npu_test : ALIGN(8)
+    {
+        __npu_test_start = .;
+        KEEP(*(.npu_test))
+        __npu_test_end = .;
+    } > RAM
 
     .data : ALIGN(16)
     {
@@ -139,7 +149,14 @@ SECTIONS
         . += __hart_count * __heap_size;
         __heap_end = .;
     } > RAM
+    .test_backing ALIGN(4096) (NOLOAD) :
+    {
+        __test_backing_start = .;
+        . += SIZEOF(.npu_test) ? 0x400000 : 0;
+    } > RAM
     __ram_used_end = .;
+    __test_heap_start = ALIGN(64);
+    __test_heap_end = MIN(ORIGIN(RAM) + LENGTH(RAM), __test_data_start);
 
     /* Coherent storage is Host-owned and must never enter the firmware ELF. */
     .coherent (NOLOAD) :
@@ -200,6 +217,13 @@ SECTIONS
            "per-Hart proc printf reservation has the wrong size")
     ASSERT(__ram_used_end <= ORIGIN(RAM) + LENGTH(RAM),
            "image, per-hart stacks, and heaps exceed RAM")
+    ASSERT(!SIZEOF(.npu_test) ||
+           (ORIGIN(RAM) == 0x80000000 && __ram_used_end < __test_heap_end),
+           "bare-metal image must start at 0x80000000 and leave heap below test data")
+    ASSERT((SIZEOF(.npu_test) % 128) == 0,
+           "test descriptor table must contain 128-byte records")
+    ASSERT(!DEFINED(CONFIG_REQUIRE_TESTS) || SIZEOF(.npu_test),
+           "device test must register at least one DAYAN_TEST descriptor")
     ASSERT(SIZEOF(.coherent) == 0,
            "coherent storage is allocated by Host, not the firmware linker")
     ASSERT(SIZEOF(.tdata) == 0 && SIZEOF(.tbss) == 0,

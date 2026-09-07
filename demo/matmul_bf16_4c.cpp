@@ -71,7 +71,7 @@ static int extent(int64_t remaining, int size)
 }
 
 // All stages use the same (output tile, K tile, slice) order. phase selects
-// the physical double buffer; the Resource's internal lifecycle bit is opaque.
+// the physical double buffer; Resource lifecycle phases are tracked separately.
 static Node node(const State &s, uint64_t generation, int slice, int lane)
 {
     const uint64_t out = generation / s.kt;
@@ -109,6 +109,7 @@ static void loader(void *argument)
     const int peer = s.lane ^ (b ? 2 : 1);
     const int pair = b ? s.lane & 1 : s.lane >> 1;
     const Cluster &cluster = *(Cluster *)shared;
+    uint64_t phases = 0;
     long checksum = 0;
 
     for (uint64_t gen = 0; gen < s.generations; ++gen) {
@@ -133,12 +134,12 @@ static void loader(void *argument)
                            (uint64_t)n.step * TK * 2;
 
             // Only these two peer Loaders elect on this Resource, once per use.
-            // Reserve local FREE first, then snapshot the election phase. The
-            // copy acknowledgement below prevents either peer lapping a live use.
+            // Both peers track the same shared lifecycles. The copy acknowledgement
+            // keeps the source alive until remote LSU consumption completes.
             check(dayan_resource_wait_free(dst.resource));
             int role = DAYAN_RESOURCE_ROLE_PRODUCER;
             if (paired) {
-                role = dayan_resource_wait(ready_mask, ready_mask, 0);
+                role = dayan_resource_wait(ready_mask, ready_mask, phases, 0);
                 check(role);
             }
             if (role == DAYAN_RESOURCE_ROLE_PRODUCER) {
@@ -157,7 +158,7 @@ static void loader(void *argument)
                 }
                 if (paired) {
                     check(dayan_resource_produce_lsu(ready, 1, 0));
-                    check(dayan_resource_wait_ready(copied));
+                    check(dayan_resource_wait_ready(copied, (phases >> copied) & 1U));
                 }
                 check(dayan_resource_produce_lsu(dst.resource, users,
                                                  paired ? copied_mask : 0));
@@ -172,6 +173,8 @@ static void loader(void *argument)
             } else {
                 dayan_thread_exit(-22);
             }
+            if (paired)
+                phases ^= ready_mask | copied_mask;
         }
     }
     dayan_wait_lsu();
@@ -180,6 +183,7 @@ static void loader(void *argument)
 static void calc(void *argument)
 {
     const State &s = *(State *)argument;
+    uint64_t phases = 0;
     __tx_mat_tcsr_write<MAT_ASTRIDE>(TK * 2);
     __tx_mat_tcsr_write<MAT_BSTRIDE>(TK * 2);
     __tx_mat_tcsr_write<MAT_CSTRIDE>(s.slice_n * 4);
@@ -196,8 +200,9 @@ static void calc(void *argument)
             const Buffer &a = s.a[n.a_index], &b = s.b[n.b_index], &c = s.c[slice];
             const auto inputs = DAYAN_RESOURCE_MASK(a.resource) |
                                 DAYAN_RESOURCE_MASK(b.resource);
-            check(dayan_resource_wait(n.step == 0 ? DAYAN_RESOURCE_MASK(c.resource) : 0,
-                                       inputs, 0));
+            check(dayan_resource_wait(
+                n.step == 0 ? DAYAN_RESOURCE_MASK(c.resource) : 0,
+                inputs, phases, 0));
             __tx_mat_tcsr_write<MAT_M>(n.rows - 1);
             __tx_mat_tcsr_write<MAT_N>(n.cols - 1);
             __tx_mat_tcsr_write<MAT_K>(n.inner - 1);
@@ -209,15 +214,20 @@ static void calc(void *argument)
                 check(dayan_resource_produce_mat(c.resource, 1, inputs));
             else
                 check(dayan_resource_consume_mat(inputs));
-            // Retire input consumption before another wait can see its old READY.
-            dayan_wait_mat();
+            // Sliced inputs advance once per use; the buffered input is shared
+            // by all active slices of this generation.
+            phases ^= DAYAN_RESOURCE_MASK(s.buffer_a ? b.resource : a.resource);
+            if (slice + 1 == n.users)
+                phases ^= DAYAN_RESOURCE_MASK(s.buffer_a ? a.resource : b.resource);
         }
     }
+    dayan_wait_mat();
 }
 
 static void post(void *argument)
 {
     const State &s = *(State *)argument;
+    uint64_t phases = 0;
     long checksum = 0;
     set_lsu_matrix<0>(checksum, s.slice_m, s.slice_n * 4,
                       s.slice_n * 4, s.cfg->c_stride);
@@ -228,17 +238,19 @@ static void post(void *argument)
             if (!n.rows || !n.cols)
                 continue;
             const Buffer &c = s.c[slice];
-            check(dayan_resource_wait_ready(c.resource));
+            const auto mask = DAYAN_RESOURCE_MASK(c.resource);
+            check(dayan_resource_wait(0, mask, phases, 0));
             // No activation yet: store C directly. A future compute stage needs
             // its own Output Buffer; C can be released once that compute completes.
             __tx_lsu_tcsr_write<LSU_DIM0>(n.cols * 4 / 64 - 1);
             __tx_lsu_tcsr_write<LSU_DIM1>(n.rows - 1);
             const uint64_t dst = s.output + n.row * s.cfg->c_stride + n.col * 4;
             __tx_lsu_dma_u2d<0>((long)dst, (long)c.uram);
-            check(dayan_resource_consume_lsu(DAYAN_RESOURCE_MASK(c.resource)));
-            dayan_wait_lsu();
+            check(dayan_resource_consume_lsu(mask));
+            phases ^= mask;
         }
     }
+    dayan_wait_lsu();
 }
 
 static bool config_valid(const MatmulBf16Config *c)

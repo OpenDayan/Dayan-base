@@ -68,7 +68,7 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
     } else if (lane == 1U) {
         require_status(dayan_resource_wait_free(kDone));
         for (; completed < total; ++completed) {
-            require_status(dayan_resource_wait_ready(kNotify));
+            require_status(dayan_resource_wait_ready(kNotify, completed & 1U));
             require_status(dayan_resource_consume_lsu(
                 DAYAN_RESOURCE_MASK(kNotify)));
         }
@@ -78,7 +78,7 @@ __kernel__ void scheduler_yield_bench(uint64_t iterations,
     if (lane == 1U)
         require_status(dayan_resource_produce_lsu(kDone, 3U, 0));
     else {
-        require_status(dayan_resource_wait_ready(kDone));
+        require_status(dayan_resource_wait_ready(kDone, 0));
         require_status(dayan_resource_consume_lsu(DAYAN_RESOURCE_MASK(kDone)));
     }
     dayan_wait_lsu();

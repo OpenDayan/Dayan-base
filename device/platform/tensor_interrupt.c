@@ -78,7 +78,7 @@ void tensor_interrupt_drain(void)
     state->pending = 0;
     record = &state->records[state->outbound - 1U].record;
     platform_cache_flush(record, sizeof(*record));
-    platform_rpc_send(rpc_command_pack(RPC_TENSOR_INTERRUPT_REPORT,
+    rpc_send_command(rpc_command_pack(RPC_TENSOR_INTERRUPT_REPORT,
                                        (uintptr_t)record));
     state->outbound = 0;
 }

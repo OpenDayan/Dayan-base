@@ -43,6 +43,7 @@ required=(
     "$root/build/device/npu-os.elf"
     "$root/build/device/npu-os-api.elf"
     "$root/build/device/npu-os.bin"
+    "$root/build/device/libnpu-os.a"
 )
 for file in "${required[@]}"; do
     [[ -f "$file" ]] || {
@@ -97,6 +98,7 @@ documentation_target="$destdir$datadir/doc/dayan"
 
 "$install_tool" -m 0644 "$root/build/device/npu-os.elf" \
     "$root/build/device/npu-os-api.elf" "$root/build/device/npu-os.bin" \
+    "$root/build/device/libnpu-os.a" "$root/device/linker.ld" \
     "$firmware_target/"
 "$install_tool" -m 0644 "$root/Readme.md" \
     "$documentation_target/README.md"
@@ -106,6 +108,8 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$documentation_target/driver.md"
 "$install_tool" -m 0644 "$root/host/dyperf/README.md" \
     "$documentation_target/dyperf.md"
+"$install_tool" -m 0644 "$root/device/BAREMETAL.md" \
+    "$documentation_target/baremetal.md"
 
 echo "install-dayan: dycc       -> $bindir/dycc"
 echo "install-dayan: dyperf     -> $bindir/dyperf"

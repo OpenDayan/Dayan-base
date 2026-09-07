@@ -13,7 +13,7 @@ NPU_QEMU_BUILD_DIR ?= $(NPU_QEMU_DIR)/build
 NPU_QEMU_BIN ?= $(NPU_QEMU_BUILD_DIR)/qemu-system-riscv64
 NPU_QEMU_DL_BIN ?= $(NPU_QEMU_BUILD_DIR)/dl-riscv64
 
-.PHONY: all clean check install qemu qemu-deps device device-check device-bl0 docs docs-check \
+.PHONY: all clean check install qemu qemu-deps device device-check device-bl0 device-tests docs docs-check \
 	host-driver host-driver-check dycc dycc-check dyperf dyperf-check \
 	demo demo-check
 
@@ -38,6 +38,9 @@ $(NPU_QEMU_DL_BIN): $(NPU_QEMU_BIN)
 
 device:
 	$(MAKE) -C device all
+
+device-tests:
+	$(MAKE) -C device device-tests
 
 device-bl0:
 	$(MAKE) -C device/bl0 all

@@ -13,6 +13,7 @@
 #include "thread.h"
 #include "tensor_interrupt.h"
 #include "trap.h"
+#include "test.h"
 
 struct mem_state {
     struct rb_root free;
@@ -31,6 +32,7 @@ struct cpu {
     struct profile_state profile;
     struct trap_state trap;
     struct tensor_interrupt_state tensor_interrupt;
+    struct test_state test;
 } __attribute__((aligned(CONFIG_CACHE_LINE_SIZE)));
 
 extern uint8_t __cpu_start[];

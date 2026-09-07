@@ -122,11 +122,14 @@ Host 启动算子前一次性分配，子 Thread 资源槽在根 Proc 建立时�
 每个 Core 有 32 项 Local Resource，同一 Cluster 共享 32 项 Shared Resource；DAPI 用
 0--31 和 32--63 的逻辑编号统一访问。Host 按 descriptor 分配物理窗口，Device 通过
 Context2 映射，因此算子不为资源分配对象内存，也不维护软件等待链表。
+每次启动前，Host 运行时通过 Cluster 的 clear 接口初始化本组 Proc 的 Shared 物理窗口；
+Device 运行时在根 Proc 首次调度前初始化其 Local 物理窗口。两者均置为 FREE、计数 0、
+phase 0，且只清理本次分配的资源；子 Thread 继承窗口时不重复初始化。
 
 \begin{dayantable}{Named Resource 等待 dapi}{tab:api-dapi-resource}{X[42,l] X[58,l]}
   API & 行为 \\
-  \code{dayan_resource_wait} & 等待所有 READY 输入和 FREE 输出，并在成功发射时原子把输出预留为 BUSY；qos 范围为 $-4$--3。 \\
-  \code{dayan_resource_wait_ready} & 等待一个资源达到 READY。 \\
+  \code{dayan_resource_wait} & 参数为 free、ready、phase、qos。等待所有输入为 READY 且匹配 phase 位图、输出为 FREE，成功时原子预留输出为 BUSY；qos 范围为 $-4$--3。 \\
+  \code{dayan_resource_wait_ready} & 参数为 resource、phase；等待资源为 READY 且匹配指定的 0/1 phase。 \\
   \code{dayan_resource_wait_free} & 等待一个资源为 FREE，并在返回前将其预留为 BUSY。 \\
 \end{dayantable}
 
@@ -136,11 +139,16 @@ Context2 映射，因此算子不为资源分配对象内存，也不维护软�
 \code{DAYAN_RESOURCE_ROLE_NORMAL}。访问 Context2 未声明的编号、多个重叠 bit 或非法 qos
 返回负值。
 
-选举在登记时快照当前生命周期：BUSY 或 READY 期间登记的参与者仍属于当前代。
-内部 1-bit phase 仅在最后一次消费使 READY 回到 FREE 时翻转，软件不能直接指定它。
-各阶段必须按相同的逐资源顺序推进，并限制未完成的代数，避免尚未发射的选举跨越
+普通 READY 等待和选举都必须指定期望 phase；选举不再自动快照资源当前生命周期。
+1-bit phase 仅在最后一个 Consume 经 Resource Produce 提交、使 READY 回到 FREE 时翻转。
+所有 READY 输入强制比较 phase，没有比较开关。phase 位图为 0 表示期望第 0 代的奇偶值，
+并不关闭检查；仅 FREE 输出不比较 phase。
+各阶段必须按相同的逐资源顺序推进，并限制未完成的代数，避免尚未发射的等待跨越
 两次生命周期而发生回绕。WAIT\_READY 不预扣消费名额；软件须匹配 consumer count，
 并在本地计算和远端复制均完成后才能复用源缓冲。
+消费者提交工作及对应 produce/consume 后，可翻转该资源下一代的期望 phase 并立即登记
+下一次等待，无需每轮等待 MAT 或 LSU；同一代的多次使用仍须保持相同期望 phase。
+Thread 退出前应等待最后的异步工作和资源提交完成。
 
 \begin{dayantable}{Named Resource 完成 dapi}{tab:api-dapi-shared-resource}{X[47,l] X[53,l]}
   API & 行为 \\
