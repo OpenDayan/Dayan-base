@@ -217,6 +217,7 @@ static void profile_clear_locked(dayan_server_t *server)
     server->profile_active = 0;
     server->profile_stopping = 0;
     server->profile_stopped = 0;
+    server->profile_pcu_cluster = 0;
 }
 
 static int session_append_output_locked(struct server_session *session,
@@ -2117,6 +2118,42 @@ static int profile_destroy_locked(dayan_server_t *server,
     return 0;
 }
 
+static int profile_pcu_read_locked(dayan_server_t *server,
+                                   struct server_session *session,
+                                   uint64_t profile_id,
+                                   npu_pcu_batch_t *response)
+{
+    uint32_t cluster = server->profile_pcu_cluster;
+    uint32_t count = server->hal_info.cluster_count;
+    uint32_t mask = server->options.enabled_cluster_mask;
+    int status;
+
+    if (server->profile_owner != session || server->profile_id != profile_id)
+        return -ENOENT;
+    if (!server->profile_active || server->profile_stopping)
+        return -EINVAL;
+    while (cluster < count && !(mask & (UINT32_C(1) << cluster)))
+        ++cluster;
+    if (cluster == count)
+        return -ENODEV;
+    /* The owner's control connection serializes snapshot/stop/destroy.
+     * Release the server lock so counter I/O does not hold up launches. */
+    pthread_mutex_unlock(&server->mutex);
+    status = npu_hal_pcu_snapshot(server->hal, cluster, response);
+    pthread_mutex_lock(&server->mutex);
+    if (status < 0)
+        return status;
+    ++cluster;
+    while (cluster < count && !(mask & (UINT32_C(1) << cluster)))
+        ++cluster;
+    server->profile_pcu_cluster = cluster;
+    if (cluster == count) {
+        server->profile_pcu_cluster = 0;
+        response->flags = NPU_PCU_ROUND_END;
+    }
+    return 0;
+}
+
 static int dispatch_control(dayan_server_t *server,
                             struct server_session *session,
                             const npu_ipc_header_t *header,
@@ -2357,6 +2394,13 @@ static int dispatch_control(dayan_server_t *server,
         status = payload_exact(header, 0) ?
             profile_destroy_locked(server, session, header->object_id) :
             -EMSGSIZE;
+        break;
+    case NPU_IPC_PROFILE_PCU_READ:
+        status = payload_exact(header, 0) ?
+            profile_pcu_read_locked(server, session, header->object_id,
+                                    response) : -EMSGSIZE;
+        if (status == 0)
+            *response_size = sizeof(npu_pcu_batch_t);
         break;
     default:
         status = -ENOSYS;
@@ -2702,6 +2746,7 @@ static void *connection_main(void *argument)
                 npu_ipc_event_info_t event;
                 npu_ipc_kernel_info_t kernel;
                 npu_ipc_transfer_grant_t grant;
+                npu_pcu_batch_t pcu;
                 struct {
                     npu_ipc_output_t header;
                     unsigned char data[NPU_IPC_OUTPUT_CHUNK_SIZE];

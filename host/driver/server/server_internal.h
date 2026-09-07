@@ -317,6 +317,7 @@ struct dayan_server {
     uint32_t profile_stopping;
     uint32_t profile_stopped;
     uint32_t profile_waiters;
+    uint32_t profile_pcu_cluster;
     size_t profile_bytes;
     struct server_profile_chunk *profile_head;
     struct server_profile_chunk *profile_tail;

@@ -17,6 +17,15 @@
 #define DAYAN_RESOURCE_GLOBAL_INIT     0x006000U
 #define DAYAN_CLINT_MSIP_BASE            0x020000U
 
+#define DAYAN_PCU_BASE                  0x030000U
+#define DAYAN_PCU_CORE_STRIDE           0x002000U
+#define DAYAN_PCU_COUNTER(hart, event) \
+    (DAYAN_PCU_BASE + (hart) * DAYAN_PCU_CORE_STRIDE + (event) * 8U)
+#define DAYAN_PCU_CONTROL(cores) \
+    (DAYAN_PCU_BASE + (cores) * DAYAN_PCU_CORE_STRIDE - 8U)
+/* Reserved pending RTL support: rdcycle, latched with this core's counters. */
+#define DAYAN_PCU_CYCLE(hart)           DAYAN_PCU_COUNTER(hart, 1022U)
+
 #define DAYAN_DEVICE_MAILBOX(hart) \
     (DAYAN_DEVICE_MAILBOX_BASE + (hart) * 8U)
 #define DAYAN_IRQ_MAILBOX(hart) \

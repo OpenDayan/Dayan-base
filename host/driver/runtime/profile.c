@@ -177,6 +177,33 @@ out:
     return status;
 }
 
+int npu_profile_pcu_read(npu_profile_t *profile, npu_pcu_batch_t *batch_out)
+{
+    npu_pcu_batch_t batch;
+    npu_runtime_t *runtime;
+    int status;
+
+    if (!profile || !profile->runtime || !batch_out)
+        return -EINVAL;
+    runtime = profile->runtime;
+    pthread_mutex_lock(&runtime->mutex);
+    if (!profile_linked_locked(profile) || profile->destroying ||
+        profile->stopped || profile->stopping || runtime->closing) {
+        pthread_mutex_unlock(&runtime->mutex);
+        return -EINVAL;
+    }
+    pthread_mutex_unlock(&runtime->mutex);
+    status = runtime_control_call(runtime, NPU_IPC_PROFILE_PCU_READ,
+                                  profile->id, 0, 0, &batch, sizeof(batch), 0);
+    if (status < 0)
+        return status;
+    if (!batch.core_count || batch.core_count > NPU_PCU_MAX_CORES ||
+        batch.reserved || (batch.flags & ~NPU_PCU_ROUND_END))
+        return -EPROTO;
+    *batch_out = batch;
+    return 0;
+}
+
 static int profile_destroy(npu_profile_t *profile, int runtime_closing)
 {
     npu_runtime_t *runtime;

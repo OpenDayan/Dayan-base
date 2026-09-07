@@ -173,6 +173,74 @@ static void make_package_object(unsigned char *object, size_t size)
     memcpy(object + sizeof(header), &section, sizeof(section));
 }
 
+static void test_pcu(dayan_server_t *server, npu_runtime_t *runtime,
+                      const npu_runtime_options_t *options,
+                      const char *directory)
+{
+    npu_profile_t profile = { .runtime = runtime };
+    npu_pcu_batch_t batch;
+    npu_runtime_t *foreign = 0;
+    uint64_t value;
+    unsigned int core;
+    int data_fd = open_file(directory, "xdma0_c2h_0", O_RDWR);
+    int control_fd = open_file(directory, "xdma0_h2c_0", O_RDONLY);
+
+    assert(data_fd >= 0 && control_fd >= 0);
+    pthread_mutex_lock(&server->mutex);
+    profile.id = ++server->next_id;
+    server->profile_owner = runtime_session_locked(server, runtime);
+    server->profile_id = profile.id;
+    server->profile_active = 1;
+    pthread_mutex_unlock(&server->mutex);
+    pthread_mutex_lock(&runtime->mutex);
+    assert(!runtime->profiles);
+    runtime->profiles = &profile;
+    pthread_mutex_unlock(&runtime->mutex);
+
+    assert(npu_profile_pcu_read(0, &batch) == -EINVAL);
+    assert(npu_profile_pcu_read(&profile, 0) == -EINVAL);
+    memset(&batch, 0xa5, sizeof(batch));
+    assert(npu_profile_pcu_read(&profile, &batch) == -ENODATA);
+    assert(batch.cluster == UINT32_C(0xa5a5a5a5));
+    for (core = 0; core < 4; ++core) {
+        value = 1000 + core;
+        assert(pwrite(data_fd, &value, 8, DAYAN_PCU_CYCLE(core)) == 8);
+        value = 1200 + core;
+        assert(pwrite(data_fd, &value, 8,
+                      DAYAN_PCU_COUNTER(core, NPU_PCU_SCALAR_COMMIT)) == 8);
+    }
+    assert(npu_profile_pcu_read(&profile, &batch) == 0);
+    assert(batch.cluster == 0 && batch.core_count == 4);
+    assert(batch.flags == NPU_PCU_ROUND_END && !batch.reserved);
+    assert(batch.cores[3].cycle == 1003);
+    assert(batch.cores[3].counters[NPU_PCU_SCALAR_COMMIT] == 1203);
+    assert(pread(control_fd, &value, 8, DAYAN_PCU_CONTROL(4)) == 8);
+    assert(value == 1);
+    assert(npu_profile_pcu_read(&profile, &batch) == 0);
+    assert(batch.cluster == 0 && batch.flags == NPU_PCU_ROUND_END);
+    assert(npu_runtime_open(&foreign, options) == 0);
+    assert(runtime_control_call(foreign, NPU_IPC_PROFILE_PCU_READ,
+                                profile.id, 0, 0, &batch, sizeof(batch), 0) ==
+           -ENOENT);
+    assert(npu_runtime_close(foreign) == 0);
+    assert(runtime_control_call(runtime, NPU_IPC_PROFILE_PCU_READ,
+                                profile.id, &value, 8, &batch,
+                                sizeof(batch), 0) == -EMSGSIZE);
+    pthread_mutex_lock(&server->mutex);
+    server->profile_active = 0;
+    pthread_mutex_unlock(&server->mutex);
+    assert(npu_profile_pcu_read(&profile, &batch) == -EINVAL);
+    pthread_mutex_lock(&server->mutex);
+    server->profile_owner = 0;
+    server->profile_id = 0;
+    pthread_mutex_unlock(&server->mutex);
+    pthread_mutex_lock(&runtime->mutex);
+    runtime->profiles = 0;
+    pthread_mutex_unlock(&runtime->mutex);
+    close(control_fd);
+    close(data_fd);
+}
+
 static void assert_package_cache(dayan_server_t *server, size_t entries,
                                  size_t immutable_entries,
                                  size_t total_references)
@@ -323,6 +391,7 @@ int main(void)
                -ENODEV);
         assert(!profile);
     }
+    test_pcu(server, runtime, &runtime_options, directory);
     assert(npu_context_create(runtime, 0, &context) == 0);
     {
         npu_buffer_desc_t desc;

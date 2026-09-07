@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "npu_pcu.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -347,6 +348,10 @@ int npu_profile_start(npu_runtime_t *runtime,
 int npu_profile_read(npu_profile_t *profile, void *data,
                      uint32_t capacity_bytes, uint32_t timeout_ms,
                      npu_profile_batch_info_t *batch_out);
+/* Poll one cluster; repeat until NPU_PCU_ROUND_END, then start a new round.
+ * Requires the reserved PCU cycle registers to be implemented in hardware.
+ * Returns -ENODATA when all cycle registers in a cluster are zero. */
+int npu_profile_pcu_read(npu_profile_t *profile, npu_pcu_batch_t *batch_out);
 int npu_profile_stop(npu_profile_t *profile);
 int npu_profile_destroy(npu_profile_t *profile);
 

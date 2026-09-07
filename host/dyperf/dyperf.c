@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <math.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,27 @@
 #define DYPERF_DRAIN_TIMEOUT_MS    5000U
 #define DYPERF_TRACE_PID_BASE      UINT64_C(0x10000)
 #define DYPERF_PENDING_BYTES       (NPU_PROFILE_SLOT_DEFINE_SIZE - 1U)
+#define DYPERF_PCU_TID             (UINT64_C(1) << 40)
+#define DYPERF_DEFAULT_CLOCK_HZ    1000000000.0
+#define DYPERF_DEFAULT_PCU_INTERVAL_MS 100U
+#define DYPERF_DEFAULT_LSU_BEAT_BYTES 64U
+
+enum {
+    OPTION_PCU = 256,
+    OPTION_PCU_INTERVAL,
+    OPTION_CLOCK_HZ,
+    OPTION_LSU_BEAT_BYTES,
+};
+
+static const char *const pcu_metric_names[] = {
+    "URAM read mean (%)", "URAM read variance (%^2)",
+    "URAM read stddev (%)", "URAM write mean (%)",
+    "URAM write variance (%^2)", "URAM write stddev (%)",
+    "MAT utilization (%)", "LSU read (GB/s)", "LSU write (GB/s)",
+    "VEC group 0 IPC", "VEC group 1 IPC", "VEC total IPC", "Scalar IPC",
+};
+#define DYPERF_PCU_METRIC_COUNT \
+    (sizeof(pcu_metric_names) / sizeof(pcu_metric_names[0]))
 
 struct trace_thread_order;
 
@@ -40,6 +62,10 @@ struct trace_target {
     int have_cycle;
     int have_execution_state;
     int scheduler_running;
+    int have_pcu;
+    int have_pcu_interval;
+    uint64_t pcu_first_cycle;
+    npu_pcu_core_sample_t pcu_previous;
     size_t thread_count;
     size_t thread_capacity;
     struct trace_thread_order *threads;
@@ -58,6 +84,10 @@ struct trace_writer {
     struct trace_target *targets;
     int first;
     int failed;
+    double clock_hz;
+    uint32_t lsu_beat_bytes;
+    uint32_t pcu_interval_ms;
+    int pcu_enabled;
 };
 
 static volatile sig_atomic_t interrupted;
@@ -109,6 +139,23 @@ static int parse_u64(const char *text, uint64_t *value_out)
     return 0;
 }
 
+static int parse_real(const char *text, int allow_seconds_suffix,
+                      double *value_out)
+{
+    char *end;
+    double value;
+
+    if (!text || !*text || text[0] == '-')
+        return -EINVAL;
+    errno = 0;
+    value = strtod(text, &end);
+    if (errno || end == text || !isfinite(value) || value < 0 ||
+        (*end && !(allow_seconds_suffix && !strcmp(end, "s"))))
+        return -EINVAL;
+    *value_out = value;
+    return 0;
+}
+
 static void usage(FILE *file, const char *program)
 {
     fprintf(file,
@@ -119,6 +166,10 @@ static void usage(FILE *file, const char *program)
             "  -d, --duration-ms MS    capture duration; 0 waits for Ctrl-C or COMMAND\n"
             "  -f, --follow            continuously capture until Ctrl-C or COMMAND exits\n"
             "  -b, --buffer-size SIZE  Device buffer bytes; K/M/G accepted\n"
+            "      --pcu              include PCU metrics (default interval: 0.1 s)\n"
+            "      --pcu-interval SEC enable PCU; delay after each round, 0 = continuous\n"
+            "      --clock-hz HZ      Device cycle frequency (default: 1e9)\n"
+            "      --lsu-beat-bytes N LSU bus bytes per beat (default: 64)\n"
             "  -- COMMAND [ARG...]     profile while COMMAND uses the same Server\n"
             "  -h, --help              show this help\n",
             program, NPU_DEFAULT_SERVER_SOCKET);
@@ -320,11 +371,188 @@ static struct trace_target *trace_target_get(struct trace_writer *writer,
 
 static uint64_t extend_counter(struct trace_target *target, uint64_t counter)
 {
+    if (!target->have_cycle && target->have_pcu) {
+        uint64_t low = target->pcu_first_cycle & NPU_PROFILE_COUNTER_MASK;
+        uint64_t period = UINT64_C(1) << 48;
+
+        target->epoch = target->pcu_first_cycle & ~NPU_PROFILE_COUNTER_MASK;
+        if (counter > low && counter - low > period / 2 &&
+            target->epoch >= period)
+            target->epoch -= period;
+        else if (low > counter && low - counter > period / 2)
+            target->epoch += period;
+    }
     if (target->have_cycle && counter < target->last_counter)
         target->epoch += UINT64_C(1) << 48;
     target->last_counter = counter;
     target->have_cycle = 1;
     return target->epoch + counter;
+}
+
+static long double trace_time_us(const struct trace_writer *writer,
+                                 uint64_t cycle)
+{
+    return (long double)cycle * 1000000.0L / writer->clock_hz;
+}
+
+static void pcu_metrics(const npu_pcu_core_sample_t *previous,
+                        const npu_pcu_core_sample_t *sample,
+                        double clock_hz, uint32_t beat_bytes,
+                        double values[DYPERF_PCU_METRIC_COUNT])
+{
+    double cycles = (double)(sample->cycle - previous->cycle);
+    uint64_t delta[NPU_PCU_COUNTER_COUNT];
+    unsigned int i;
+
+    for (i = 0; i < NPU_PCU_COUNTER_COUNT; ++i)
+        delta[i] = sample->counters[i] - previous->counters[i];
+    for (i = 0; i < 2; ++i) {
+        double mean = 0;
+        double variance = 0;
+        unsigned int bank;
+        unsigned int base = i ? NPU_PCU_URAM_WRITE(0) : NPU_PCU_URAM_READ(0);
+
+        for (bank = 0; bank < NPU_PCU_URAM_BANK_COUNT; ++bank)
+            mean += 100.0 * (double)delta[base + bank] / cycles;
+        mean /= NPU_PCU_URAM_BANK_COUNT;
+        for (bank = 0; bank < NPU_PCU_URAM_BANK_COUNT; ++bank) {
+            double deviation = 100.0 * (double)delta[base + bank] / cycles - mean;
+
+            variance += deviation * deviation;
+        }
+        variance /= NPU_PCU_URAM_BANK_COUNT;
+        values[i * 3] = mean;
+        values[i * 3 + 1] = variance;
+        values[i * 3 + 2] = sqrt(variance);
+    }
+    values[6] = 100.0 * (double)delta[NPU_PCU_MAT_EXEC] / cycles;
+    values[7] = (double)delta[NPU_PCU_LSU_READ] / cycles *
+                beat_bytes * (clock_hz / 1e9);
+    values[8] = (double)delta[NPU_PCU_LSU_WRITE] / cycles *
+                beat_bytes * (clock_hz / 1e9);
+    values[9] = (double)delta[NPU_PCU_VEC_ISSUE(0)] / cycles;
+    values[10] = (double)delta[NPU_PCU_VEC_ISSUE(1)] / cycles;
+    values[11] = values[9] + values[10];
+    values[12] = (double)delta[NPU_PCU_SCALAR_COMMIT] / cycles;
+}
+
+static int trace_pcu_counters(struct trace_writer *writer,
+                              const struct trace_target *target,
+                              uint64_t cycle, const double *values)
+{
+    size_t i;
+
+    for (i = 0; i < DYPERF_PCU_METRIC_COUNT; ++i) {
+        if (trace_item_begin(writer) < 0 ||
+            fprintf(writer->file,
+                    "{\"name\":\"%s\",\"cat\":\"pcu\",\"ph\":\"C\","
+                    "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ","
+                    "\"ts\":%.9Lf,\"args\":{\"value\":%.12g}}",
+                    pcu_metric_names[i], trace_pid(target->cluster, target->hart),
+                    DYPERF_PCU_TID, trace_time_us(writer, cycle),
+                    values ? values[i] : 0.0) < 0)
+            return -EIO;
+    }
+    return 0;
+}
+
+static int trace_pcu_sample(struct trace_writer *writer, uint32_t cluster,
+                            uint32_t hart, const npu_pcu_core_sample_t *sample)
+{
+    struct trace_target *target = trace_target_get(writer, cluster, hart);
+    uint64_t pid = trace_pid(cluster, hart);
+    unsigned int i;
+
+    if (!target)
+        return writer->failed ? -EIO : -ENOMEM;
+    if (target->have_pcu && sample->cycle < target->pcu_previous.cycle)
+        return -ERANGE;
+    if (target->have_pcu && sample->cycle == target->pcu_previous.cycle)
+        return memcmp(sample, &target->pcu_previous, sizeof(*sample)) ?
+               -EPROTO : 0;
+    if (!sample->cycle)
+        return 0;
+    if (!target->have_pcu) {
+        if (trace_item_begin(writer) < 0 ||
+            fprintf(writer->file,
+                    "{\"name\":\"thread_name\",\"ph\":\"M\","
+                    "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ","
+                    "\"args\":{\"name\":\"PCU intervals\"}}",
+                    pid, DYPERF_PCU_TID) < 0)
+            return -EIO;
+        target->pcu_first_cycle = sample->cycle;
+    } else {
+        const npu_pcu_core_sample_t *previous = &target->pcu_previous;
+        double values[DYPERF_PCU_METRIC_COUNT];
+
+        pcu_metrics(previous, sample, writer->clock_hz,
+                     writer->lsu_beat_bytes, values);
+        if (trace_pcu_counters(writer, target, previous->cycle, values) < 0 ||
+            trace_item_begin(writer) < 0 ||
+            fprintf(writer->file,
+                    "{\"name\":\"PCU interval\",\"cat\":\"pcu\",\"ph\":\"X\","
+                    "\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ","
+                    "\"ts\":%.9Lf,\"dur\":%.9Lf,\"args\":{"
+                    "\"start_cycle\":%" PRIu64 ",\"end_cycle\":%" PRIu64 ","
+                    "\"cycles\":%" PRIu64,
+                    pid, DYPERF_PCU_TID, trace_time_us(writer, previous->cycle),
+                    trace_time_us(writer, sample->cycle - previous->cycle),
+                    previous->cycle, sample->cycle,
+                    sample->cycle - previous->cycle) < 0)
+            return -EIO;
+        for (i = 0; i < DYPERF_PCU_METRIC_COUNT; ++i) {
+            if (fprintf(writer->file, ",\"%s\":%.12g", pcu_metric_names[i],
+                        values[i]) < 0)
+                return -EIO;
+        }
+        if (fputs("}}", writer->file) == EOF)
+            return -EIO;
+        target->have_pcu_interval = 1;
+    }
+    if (trace_item_begin(writer) < 0 ||
+        fprintf(writer->file,
+                "{\"name\":\"PCU snapshot\",\"cat\":\"pcu\",\"ph\":\"i\","
+                "\"s\":\"t\",\"pid\":%" PRIu64 ",\"tid\":%" PRIu64 ","
+                "\"ts\":%.9Lf,\"args\":{\"cycle\":%" PRIu64 ",\"counters\":[",
+                pid, DYPERF_PCU_TID, trace_time_us(writer, sample->cycle),
+                sample->cycle) < 0)
+        return -EIO;
+    for (i = 0; i < NPU_PCU_COUNTER_COUNT; ++i) {
+        if (fprintf(writer->file, "%s%" PRIu64, i ? "," : "",
+                    sample->counters[i]) < 0)
+            return -EIO;
+    }
+    if (fputs("]}}", writer->file) == EOF)
+        return -EIO;
+    target->pcu_previous = *sample;
+    target->have_pcu = 1;
+    return 0;
+}
+
+static int read_pcu_round(npu_profile_t *profile, struct trace_writer *writer)
+{
+    npu_pcu_batch_t batch;
+    int status;
+
+    do {
+        uint32_t core;
+
+        status = npu_profile_pcu_read(profile, &batch);
+        if (status < 0)
+            break;
+        for (core = 0; core < batch.core_count; ++core) {
+            status = trace_pcu_sample(writer, batch.cluster, core,
+                                       &batch.cores[core]);
+            if (status < 0)
+                break;
+        }
+    } while (status == 0 && !(batch.flags & NPU_PCU_ROUND_END));
+    if (status == -ENODATA)
+        fprintf(stderr, "dyperf: PCU cycle registers are zero; snapshot "
+                "timestamps require RTL support (reserved per-core slot 1022)\n");
+    else if (status < 0)
+        fprintf(stderr, "dyperf: PCU snapshot failed: %s\n", strerror(-status));
+    return status;
 }
 
 static const char *trace_state_name(uint8_t state)
@@ -378,8 +606,8 @@ static int trace_state_event(struct trace_writer *writer,
 
     if (!name)
         return -EPROTO;
-    length = snprintf(timestamp, sizeof(timestamp), "%" PRIu64 ".%03" PRIu64,
-                      cycle / 1000U, cycle % 1000U);
+    length = snprintf(timestamp, sizeof(timestamp), "%.9Lf",
+                      trace_time_us(writer, cycle));
     if (length < 0 || (size_t)length >= sizeof(timestamp))
         return -EOVERFLOW;
     if (trace_item_begin(writer) < 0 ||
@@ -680,6 +908,8 @@ static int trace_writer_open(struct trace_writer *writer, const char *path)
     memset(writer, 0, sizeof(*writer));
     writer->file = fopen(path, "w");
     writer->first = 1;
+    writer->clock_hz = DYPERF_DEFAULT_CLOCK_HZ;
+    writer->lsu_beat_bytes = DYPERF_DEFAULT_LSU_BEAT_BYTES;
     if (!writer->file)
         return -errno;
     if (fputs("{\"traceEvents\":[", writer->file) == EOF) {
@@ -707,12 +937,20 @@ static int trace_writer_close(struct trace_writer *writer)
         for (closing = writer->targets; status == 0 && closing;
              closing = closing->next) {
             status = trace_thread_sort_metadata(writer, closing);
+            if (status == 0 && closing->have_pcu_interval)
+                status = trace_pcu_counters(writer, closing,
+                                             closing->pcu_previous.cycle, 0);
         }
     }
     if (writer->file &&
-        fputs("],\"displayTimeUnit\":\"ns\",\"metadata\":{"
-              "\"time_unit\":\"ns\",\"cycle_ns\":1}}\n",
-              writer->file) == EOF)
+        fprintf(writer->file,
+                "],\"displayTimeUnit\":\"ns\",\"metadata\":{"
+                "\"time_unit\":\"ns\",\"cycle_ns\":%.12g,"
+                "\"clock_hz\":%.12g,\"pcu_enabled\":%s,"
+                "\"pcu_interval_ms\":%u,\"lsu_beat_bytes\":%u}}\n",
+                1e9 / writer->clock_hz, writer->clock_hz,
+                writer->pcu_enabled ? "true" : "false",
+                writer->pcu_interval_ms, writer->lsu_beat_bytes) < 0)
         status = -EIO;
     if (writer->file && fclose(writer->file) < 0)
         status = -errno;
@@ -756,6 +994,10 @@ int main(int argc, char **argv)
         { "duration-ms", required_argument, 0, 'd' },
         { "follow", no_argument, 0, 'f' },
         { "buffer-size", required_argument, 0, 'b' },
+        { "pcu", no_argument, 0, OPTION_PCU },
+        { "pcu-interval", required_argument, 0, OPTION_PCU_INTERVAL },
+        { "clock-hz", required_argument, 0, OPTION_CLOCK_HZ },
+        { "lsu-beat-bytes", required_argument, 0, OPTION_LSU_BEAT_BYTES },
         { "help", no_argument, 0, 'h' },
         { 0, 0, 0, 0 },
     };
@@ -763,6 +1005,12 @@ int main(int argc, char **argv)
     const char *output_path = "dayan-trace.json";
     uint64_t buffer_size = NPU_PROFILE_DEFAULT_BUFFER_SIZE;
     uint64_t duration_value = DYPERF_DEFAULT_DURATION_MS;
+    uint32_t pcu_interval_ms = DYPERF_DEFAULT_PCU_INTERVAL_MS;
+    uint32_t lsu_beat_bytes = DYPERF_DEFAULT_LSU_BEAT_BYTES;
+    double clock_hz = DYPERF_DEFAULT_CLOCK_HZ;
+    uint64_t next_pcu_ms = 0;
+    int pcu_enabled = 0;
+    int pcu_ready = 0;
     char **command = 0;
     npu_runtime_options_t runtime_options;
     npu_profile_options_t profile_options;
@@ -785,6 +1033,7 @@ int main(int argc, char **argv)
     while ((option = getopt_long(argc, argv, "+s:o:d:b:fh", long_options,
                                  0)) != -1) {
         uint64_t value;
+        double real;
 
         switch (option) {
         case 's':
@@ -817,6 +1066,33 @@ int main(int argc, char **argv)
         case 'h':
             usage(stdout, argv[0]);
             return 0;
+        case OPTION_PCU:
+            pcu_enabled = 1;
+            break;
+        case OPTION_PCU_INTERVAL:
+            if (parse_real(optarg, 1, &real) < 0 ||
+                real > (double)UINT32_MAX / 1000.0) {
+                fprintf(stderr, "dyperf: invalid PCU interval: %s\n", optarg);
+                return 2;
+            }
+            pcu_interval_ms = (uint32_t)ceil(real * 1000.0);
+            pcu_enabled = 1;
+            break;
+        case OPTION_CLOCK_HZ:
+            if (parse_real(optarg, 0, &clock_hz) < 0 ||
+                clock_hz < 1.0 || clock_hz > 1e12) {
+                fprintf(stderr, "dyperf: invalid clock frequency: %s\n", optarg);
+                return 2;
+            }
+            break;
+        case OPTION_LSU_BEAT_BYTES:
+            if (parse_u64(optarg, &value) < 0 || !value ||
+                value > 4096 || (value & (value - 1))) {
+                fprintf(stderr, "dyperf: invalid LSU beat size: %s\n", optarg);
+                return 2;
+            }
+            lsu_beat_bytes = (uint32_t)value;
+            break;
         default:
             usage(stderr, argv[0]);
             return 2;
@@ -848,6 +1124,10 @@ int main(int argc, char **argv)
         return 1;
     }
     writer_open = 1;
+    writer.clock_hz = clock_hz;
+    writer.lsu_beat_bytes = lsu_beat_bytes;
+    writer.pcu_interval_ms = pcu_interval_ms;
+    writer.pcu_enabled = pcu_enabled;
     npu_runtime_options_init(&runtime_options);
     runtime_options.server_socket = socket_path;
     status = npu_runtime_open(&runtime, &runtime_options);
@@ -865,6 +1145,13 @@ int main(int argc, char **argv)
         goto out;
     }
     profile_started = 1;
+    if (pcu_enabled) {
+        status = read_pcu_round(profile, &writer);
+        if (status < 0)
+            goto stop;
+        pcu_ready = 1;
+        next_pcu_ms = monotonic_ms() + pcu_interval_ms;
+    }
     if (command) {
         status = command_start(command, socket_path, &command_pid);
         if (status < 0) {
@@ -894,6 +1181,22 @@ int main(int argc, char **argv)
         }
         if (duration_value && elapsed >= duration_value)
             break;
+        if (pcu_enabled) {
+            uint64_t now = monotonic_ms();
+
+            if (now >= next_pcu_ms) {
+                status = read_pcu_round(profile, &writer);
+                if (status < 0)
+                    break;
+                now = monotonic_ms();
+                next_pcu_ms = now + pcu_interval_ms;
+            }
+            if (next_pcu_ms - now < timeout)
+                timeout = (uint32_t)(next_pcu_ms - now);
+            elapsed = now - start_ms;
+            if (duration_value && elapsed >= duration_value)
+                break;
+        }
         if (duration_value && duration_value - elapsed < timeout)
             timeout = (uint32_t)(duration_value - elapsed);
         status = read_one(profile, &writer, timeout, &end);
@@ -905,6 +1208,8 @@ int main(int argc, char **argv)
             break;
     }
 stop:
+    if (pcu_ready && status == 0)
+        status = read_pcu_round(profile, &writer);
     {
         int stop_status = npu_profile_stop(profile);
 

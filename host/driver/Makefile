@@ -101,6 +101,10 @@ $(BUILD)/tests/package_test: runtime/tests/package_test.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+$(BUILD)/tests/pcu_test: hal/tests/pcu_test.c $(BUILD)/hal/pcu.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
+
 # Links server/mmu.c against stub HAL and allocator definitions in the test
 # itself, so the page-table logic is exercised without a device.
 $(BUILD)/tests/mmu_test: server/tests/mmu_test.c $(BUILD)/server/mmu.o
@@ -148,9 +152,11 @@ layer-check: $(RUNTIME_STATIC)
 		grep -E ' (dayan_server_|npu_service_|npu_hal_(open|close|get_info|register_|irq_|boot_|memory_))'
 
 check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
+	$(BUILD)/tests/pcu_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
 	$(BUILD)/tests/mmu_test $(BUILD)/tests/kernel_cache_test $(BUILD)/tests/public_headers.o
 	$(BUILD)/tests/hal_test
+	$(BUILD)/tests/pcu_test
 	$(BUILD)/tests/package_test
 	$(BUILD)/tests/socket_test
 	$(BUILD)/tests/mmu_test

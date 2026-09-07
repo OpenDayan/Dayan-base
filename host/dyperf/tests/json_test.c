@@ -64,6 +64,7 @@ static int rejects_record(const unsigned char *data, uint32_t size)
     memset(&writer, 0, sizeof(writer));
     writer.file = tmpfile();
     writer.first = 1;
+    writer.clock_hz = DYPERF_DEFAULT_CLOCK_HZ;
     if (!writer.file)
         return 0;
     status = trace_write_batch(&writer, &batch, data);

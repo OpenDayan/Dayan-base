@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "dataplane.h"
+#include "npu_pcu.h"
 
 #define NPU_IPC_MAGIC             UINT32_C(0x4e594144) /* DAYN, little endian */
 #define NPU_IPC_VERSION           10U
@@ -53,6 +54,7 @@ typedef enum npu_ipc_opcode {
     NPU_IPC_PROFILE_STOP,
     NPU_IPC_PROFILE_READ,
     NPU_IPC_PROFILE_DESTROY,
+    NPU_IPC_PROFILE_PCU_READ,
 } npu_ipc_opcode_t;
 
 typedef struct npu_ipc_header {

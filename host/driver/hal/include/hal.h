@@ -8,6 +8,7 @@
 
 #include "npu_hal_config.h"
 #include "dataplane.h"
+#include "npu_pcu.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,6 +113,9 @@ int npu_hal_register_read(npu_hal_t *hal, uint32_t cluster, uint64_t offset,
                           void *value, size_t size);
 int npu_hal_register_write(npu_hal_t *hal, uint32_t cluster, uint64_t offset,
                            const void *value, size_t size);
+/* Caller serializes the complete snapshot against other PCU users. */
+int npu_hal_pcu_snapshot(npu_hal_t *hal, uint32_t cluster,
+                          npu_pcu_batch_t *batch);
 int npu_hal_irq_status(npu_hal_t *hal, uint32_t cluster, uint32_t *status);
 /* Returns -ETIMEDOUT with cluster/status reset when no IRQ arrives. */
 int npu_hal_irq_wait(npu_hal_t *hal, uint32_t timeout_ms,
