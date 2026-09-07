@@ -74,7 +74,8 @@ BASE Produce/Bar[0] 弹出一个 Thread 指针。空 token 继续等待；token 
 挂到 join/RPC/profile 等明确所有者的链表；事件所有者唤醒它时才提交 Wait。
 join 等待目标子 Thread 的退出事件，不轮询条件，也没有通用 predicate wait 接口。RPC receive
 是唯一由 \code{mip.MSIP} 直接选择、无需硬件 token 的路径。
-由中断唤醒的系统事件在短临界区内检查条件并登记 waiter，恢复中断后再切换，避免漏唤醒。
+调度、资源提交和 Profiler 按协作式执行，不设置中断临界区；张量中断表示不可恢复异常，
+不保证中断后的执行结果。
 root 启动参数由 Host Service 校验，子 Thread 参数由 Device API 入口校验；
 内部 \code{thread_start} 只构造上下文。
 

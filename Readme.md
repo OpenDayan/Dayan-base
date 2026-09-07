@@ -274,8 +274,9 @@ Device 发送前后都轮询 `IRQ_STATUS` (`0x2000`) 中自己的 bit，只有 H
 receive Thread；它调用 `rpc_receive(opcode, arg, &response)`，同步发送回复并等待 Host
 确认，最后清除 `msip`。整个接收事务不会挂起，也不向硬件队列提交接收线程 token。
 send Thread 在发送队列为空时使用 event wait，有事务时阻塞写 Device → Host mailbox，
-忙等 Host 清除状态位，再执行事务 cleanup 并唤醒调用者。空队列与待上报中断的检查和
-等待登记在同一短临界区完成，防止 tensor 中断丢失唤醒。receive handler 返回 1 表示发送 `response`，返回 0 表示
+忙等 Host 清除状态位，再执行事务 cleanup 并唤醒调用者。send Thread 检查发送队列和
+待上报中断后直接登记等待，不屏蔽中断；Tensor 中断表示不可恢复异常，不保证异常后的执行结果。
+receive handler 返回 1 表示发送 `response`，返回 0 表示
 无响应，负值表示请求已消费但失败。handler 在清除当前 `msip` 前运行；若它发起阻塞式
 反向 RPC，Host 必须在等待 response 的同时继续服务 Device→Host mailbox。
 create-proc 只使用静态 slot 和栈，不扩堆、不等待其它线程。配套 Service 用

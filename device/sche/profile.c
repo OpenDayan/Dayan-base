@@ -6,7 +6,6 @@
 #include "errno.h"
 #include "platform.h"
 #include "profile.h"
-#include "resource_scheduler.h"
 #include "rpc.h"
 #include "sche.h"
 #include "string.h"
@@ -24,7 +23,6 @@ _Static_assert(RPC_PROFILE_RECORD_SIZE == 8 &&
 
 void profile_record_thread_start(struct thread *thread)
 {
-    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
     struct profile_state *state = cpu_self()->profiler;
     uint64_t cycle;
 
@@ -38,7 +36,6 @@ void profile_record_thread_start(struct thread *thread)
         thread->profile_defined = 1;
         profile_record_thread_state(thread);
     }
-    resource_scheduler_interrupt_restore(interrupt_state);
 }
 
 static void profile_main(void)
@@ -49,15 +46,11 @@ static void profile_main(void)
         struct rpc_profile_flush_request request;
         struct rpc_profile_flush_response response;
         long status;
-        uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
 
         if (!state->full_pending) {
-            thread_prepare_wait(&state->wake);
-            resource_scheduler_interrupt_restore(interrupt_state);
-            switch_context();
+            thread_wait_event(&state->wake);
             continue;
         }
-        resource_scheduler_interrupt_restore(interrupt_state);
         platform_cache_flush(state->buffer, state->next - state->buffer);
         memset(&request, 0, sizeof(request));
         request.hart_id = (uint32_t)platform_hart_id();
@@ -75,10 +68,8 @@ static void profile_main(void)
         if (status >= 0 && !response.flags && !response.status &&
             response.generation == state->generation &&
             response.continue_profile == 1U) {
-            interrupt_state = resource_scheduler_interrupt_disable();
             cpu_self()->profiler = state;
             proc_profile_snapshot(0);
-            resource_scheduler_interrupt_restore(interrupt_state);
         }
     }
 }
@@ -86,7 +77,6 @@ static void profile_main(void)
 int profile_configure(struct rpc_profile_config *config)
 {
     struct profile_state *state = &cpu_self()->profile;
-    uintptr_t interrupt_state;
     int status = -EINVAL;
 
     if (config->flags || config->hart_id != platform_hart_id() ||
@@ -111,10 +101,8 @@ int profile_configure(struct rpc_profile_config *config)
         state->end = state->buffer + config->capacity;
         state->generation = config->generation;
         state->full_pending = 0;
-        interrupt_state = resource_scheduler_interrupt_disable();
         cpu_self()->profiler = state;
         proc_profile_snapshot(1);
-        resource_scheduler_interrupt_restore(interrupt_state);
         status = 0;
         break;
     case RPC_PROFILE_STOP:

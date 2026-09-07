@@ -7,6 +7,7 @@
 .type switch_context, @function
 /*
  * Cooperative dispatch on the current Hart; there is no scheduler thread.
+ * Tensor IRQs indicate unrecoverable failures; dispatch does not mask them.
  *
  * Entry contract:
  *   tp identifies the outgoing thread, or is zero on boot/terminal exit.
@@ -26,9 +27,8 @@
  *
  * For a different thread, save ra, s0-s11, gp and fcsr in a 128-byte frame,
  * publish the outgoing sp/restore PC, and install the target sp, Context1,
- * Context2 and tp. IRQs are masked from profile cursor access through this
- * handoff, then MIE is restored to its entry value before jumping to the
- * target's saved PC. Exit/join paths own slot reclamation;
+ * Context2 and tp before jumping to the target's saved PC.
+ * Exit/join paths own slot reclamation;
  * dispatch does not inspect the outgoing state or run a reaper.
  *
  * Saved PCs select switch_context_restore, initial proc_bootstrap, or the
@@ -42,7 +42,6 @@
  *   tp: outgoing thread until handoff; t1: selected thread until handoff.
  *   t0: selection scratch, then outgoing frame base.
  *   t2: token extension, then target sp; t3/t4: target Context1/Context2.
- *   t5: saved entry mstatus through profiling and handoff.
  *   t6: empty-pop budget, outgoing fcsr, then the outgoing restore PC.
  *   a1/a2: active profiler/current CPU; a3: profile continuation, then target PC.
  */
@@ -72,7 +71,6 @@ switch_context:
     /* t1 is selected and a2 is CPU Local, including on the RPC entry path. */
     sb      t2, THREAD_TOKEN_EXT_OFFSET(t1)
     sb      zero, THREAD_STATE_OFFSET(t1)
-    csrrci  t5, mstatus, 8
     ld      a1, CPU_PROFILER_OFFSET(a2)
     /* Null means disabled or paused on a full buffer; that path falls through. */
     bnez    a1, .Lprofile_switch
@@ -115,14 +113,11 @@ switch_context:
 .Lload_context:
     /* t2/t3/t4/a3 hold the target sp/Context1/Context2/PC tuple. */
     mv      sp, t2
-    /* Keep IRQs masked until the target stack, hardware mappings and tp agree. */
     /* Context1: BASE unit, address 0x010, source t3 (x28). */
     .insn   4, 0x00020e0b
     /* Context2: BASE unit, address 0x011, source t4 (x29). */
     .insn   4, 0x00022e8b
     mv      tp, t1
-    andi    t5, t5, 8
-    csrs    mstatus, t5
     /* The destination restores a saved frame, bootstraps, or handles RPC kill. */
     jr      a3
 
@@ -139,9 +134,6 @@ switch_context:
     j       .Lrun_thread
 
 .Lsame_thread:
-    /* Profiling left IRQs masked; restore entry MIE and return to the same caller. */
-    andi    t5, t5, 8
-    csrs    mstatus, t5
     ret
 
 .Lfirst_thread:
@@ -156,12 +148,12 @@ switch_context:
     /* Fall straight into the shared writer; a3 returns to dispatch without jal. */
     la      a3, .Lprofile_done
 /*
- * Append one timestamp48/slot8/state8 record. Enter with IRQs masked,
- * a non-null profiler and at least eight free bytes; names are defined in C.
- * t1 = thread, a1 = profiler, a2 = cpu, a3 = continuation, t5 = saved mstatus.
+ * Append one timestamp48/slot8/state8 record. Enter with a non-null profiler
+ * and at least eight free bytes; names are defined in C.
+ * t1 = thread, a1 = profiler, a2 = cpu, a3 = continuation.
  * Scratch: t0 = cursor, t2 = end threshold, t3 = record, t4 = slot/state halfword.
- * Preserve t1, t5 and ra; other caller-saved registers may be clobbered.
- * Return through a3 with IRQs still masked. No stack use on the normal path.
+ * Preserve t1 and ra; other caller-saved registers may be clobbered.
+ * Return through a3. No stack use on the normal path.
  * Slot and state occupy adjacent bytes, so one aligned lhu supplies both.
  * Pause below 32 free bytes, reserving room for the next name + state pair.
  */
@@ -190,12 +182,10 @@ switch_context:
     addi    sp, sp, -32
     sd      ra, 24(sp)
     sd      t1, 16(sp)
-    sd      t5, 8(sp)
     sd      a3, 0(sp)
     addi    a0, a1, PROFILE_WAKE_OFFSET
     call    thread_event_wake_one
     ld      a3, 0(sp)
-    ld      t5, 8(sp)
     ld      t1, 16(sp)
     ld      ra, 24(sp)
     addi    sp, sp, 32
@@ -208,19 +198,16 @@ switch_context:
 .type profile_record_thread_state, @function
 /*
  * C entry: a0 is the thread whose state changed outside dispatch. Reuse the
- * writer with the same IRQ exclusion, but return via the C caller's ra.
+ * writer and return via the C caller's ra.
  */
 profile_record_thread_state:
     csrr    a2, mhartid
     slli    a2, a2, cpu_local_shift
     la      t0, __cpu_start
     add     a2, a2, t0
-    csrrci  t5, mstatus, 8
     ld      a1, CPU_PROFILER_OFFSET(a2)
     bnez    a1, .Lprofile_state
 .Lprofile_return:
-    andi    t5, t5, 8
-    csrs    mstatus, t5
     ret
 
 .Lprofile_state:
@@ -236,7 +223,7 @@ profile_record_thread_state:
 /*
  * Selected with sp at a saved switch frame and tp/hardware mappings installed.
  * Restore this thread's ABI state, pop the frame and return to its original
- * switch_context caller. The dispatch path has already restored entry MIE.
+ * switch_context caller.
  */
 switch_context_restore:
     ld      ra, SWITCH_FRAME_RA(sp)

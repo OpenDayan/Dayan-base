@@ -72,7 +72,6 @@ int thread_join(uint32_t id, int64_t *result);
 int thread_join_all(void);
 int proc_snapshot(struct rpc_proc_ps_snapshot *snapshot);
 /* Emits a slot definition and initial state for every existing proc. */
-/* START and resume hold IRQs disabled until definitions are published. */
 void proc_profile_snapshot(int reset);
 int proc_kill_all(struct rpc_proc_kill_result *result);
 void thread_system_wait_set(struct thread *thread, void *wait);
@@ -84,8 +83,6 @@ size_t thread_event_wake_one(struct thread_list *event);
 size_t thread_event_wake_all(struct thread_list *event);
 void thread_list_init(struct thread_list *list);
 void thread_yield(void);
-/* Register under IRQ exclusion, restore IRQs, then call switch_context. */
-void thread_prepare_wait(struct thread_list *event);
 void thread_wait_event(struct thread_list *event);
 void thread_wait_join(struct thread_list *event);
 void thread_wait_produce(void);

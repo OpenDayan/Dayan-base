@@ -260,7 +260,6 @@ static int resource_produce(uint32_t unit, dayan_resource_t output,
 {
     uint64_t output_mask;
     uint64_t allowed = resource_access_mask();
-    uintptr_t interrupt_state;
 
     if (output >= 64U || !consumer_count || consumer_count > UINT8_MAX ||
         (consume_ready & ~allowed))
@@ -269,10 +268,8 @@ static int resource_produce(uint32_t unit, dayan_resource_t output,
     if (!(output_mask & allowed) || (output_mask & consume_ready))
         return -EINVAL;
 
-    interrupt_state = resource_scheduler_interrupt_disable();
     __builtin_riscv_tx_base_tcsr_write(consume_ready, 0, RESOURCE_CONSUME_READY);
     resource_produce_write(unit, output | (consumer_count << 8));
-    resource_scheduler_interrupt_restore(interrupt_state);
     return 0;
 }
 
@@ -296,15 +293,12 @@ static int resource_consume(uint32_t unit,
                             dayan_resource_mask_t consume_ready)
 {
     uint64_t allowed = resource_access_mask();
-    uintptr_t interrupt_state;
 
     if (!consume_ready || (consume_ready & ~allowed))
         return -EINVAL;
 
-    interrupt_state = resource_scheduler_interrupt_disable();
     __builtin_riscv_tx_base_tcsr_write(consume_ready, 0, RESOURCE_CONSUME_READY);
     resource_produce_write(unit, RESOURCE_NO_OUTPUT);
-    resource_scheduler_interrupt_restore(interrupt_state);
     return 0;
 }
 

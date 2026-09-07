@@ -14,7 +14,7 @@ demo/
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
-├── matmul_bf16_4c.cpp           # 2x2 Cluster OS：Load、Copy、双 MAT、独立 C-Store
+├── matmul_bf16_4c.cpp           # 2x2 Cluster：4 个 slice、共享输入双缓冲、独立 Post
 ├── run_matmul_cmodel.sh
 ├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
@@ -221,18 +221,50 @@ make -B -C demo MATMUL_SLICES=1
 
 ## 四 Core BF16 matmul
 
-`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，使用跨 Core 共享加载和
-Local Resource 管理各阶段缓冲。Calc 与 Post 分别维护逐资源的期望 Phase，使用
-`dayan_resource_wait()` 显式指定 Phase 等待输入。MAT/LSU 工作与资源 Consume 提交后，循环
-立即进入下一轮；仅在线程末尾执行一次单元完成等待。
+`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，每核固定使用
+`512×384×256` tile，分成 4 个 slice。`M<N` 时 A 双缓冲供 4 个 B slice 共用，
+B 每片为 `96×256 BF16`；反之 B 双缓冲供 4 个 A slice 共用，A 每片为
+`128×256 BF16`。切片输入和 C 都是每 slice 单缓冲。C 每份为 `512×96` 或
+`128×384` 个 FP32 元素，占用 192 KiB，4 份共 768 KiB。
 
-期望 Phase 从运行时初始化后的 0 开始：切片输入每次使用后推进，供多个有效切片共用的
+A 共享路径实际使用 1,472 KiB URAM，B 共享路径实际使用 1,408 KiB。两种布局
+统一声明 1,536 KiB URAM、10 个 Local Resource，四核共享 12 个 Shared Resource。
+共享输入按连续 K 代次选择双缓冲，每个输出 slice 的所有 K 步使用固定的 C 缓冲；
+Post 写回并释放后，该缓冲才能用于下一输出 tile。
+
+Loader、MAT 和 Post 恢复统一的 `MAT_BATCH_SWIZZLE(5,3,5)`，跨核复制仍按原始
+物理字节搬运。
+
+每核运行两个 Loader、根 Calc Proc 和一个 Post Thread。Local Resource 管理各阶段
+缓冲，Calc 与 Post 分别维护逐资源的期望 Phase，使用 `dayan_resource_wait()`
+显式指定 Phase 等待输入。MAT/LSU 工作与资源 Consume 提交后，循环立即进入下一轮；
+仅在线程末尾执行一次单元完成等待。
+
+Local 的期望 Phase 从运行时初始化后的 0 开始：切片输入每次使用后推进，供多个有效切片共用的
 输入在最后一个有效切片提交后推进，跳过的空切片不改变 Phase。Post 每次提交 C 的
-存储和 Consume 后推进该 C 资源的期望 Phase。
+存储和 Consume 后推进该 C 资源的期望 Phase。资源 Phase 不会在跨 C tile 时重置，
+硬件 Phase 仅在最后一份消费计数通过 Produce 提交后翻转。
+
+本地 D2U 完成即可发布本地输入 READY，Local 消费计数只包含本地 MAT 使用次数。
+Shared READY 只有一个远端复制消费者：对端 LSU 完成复制后，在同一次 Produce 中
+发布目标 Local READY 并消费 Shared。Loader 通过一次 Wait 同时预留 Local FREE
+和参与指定 Phase 的 Shared 选举，确保本地 MAT 与上一代远端复制均完成后才能复用
+源缓冲。发出 Produce 后即处理下一份输入，不再单独等待复制确认。
+
+Shared 的期望 Phase 从 0 开始，按每个共享槽的实际使用推进。尾块只有一侧 Core 有输出时，
+无输出的一侧仍等待并消费 Shared，但不预留 Local 或发出 DMA；两侧都无输出时才共同跳过。
+这样从配对加载进入单侧尾块、再回到配对加载时，仍受同一套 Shared 生命周期保护。
+Post 提交 U2D 和异步 Consume 后继续处理下一个 slice；Calc 在下一输出 tile 的
+第一个 K 步等待对应 C slice 释放。
 
 ```sh
+make -C demo ../build/demo/matmul_bf16_4c
+# 连接已启动的四核 Server；非默认 socket 可设置 DAYAN_SERVER_SOCKET。
 build/demo/matmul_bf16_4c
 ```
+
+可用 `./run_cmodel_server.sh` 启动四核 cmodel Server，再在另一终端运行上述命令。
+吞吐收益需以 RTL 测量为准。
 
 ## 使用 cmodel 一键运行
 
@@ -266,34 +298,19 @@ bash demo/run_matmul_cmodel.sh 64 384 248
 四 Core 版本固定启动 4 个 Hart，并以 Cluster mode 提交 `task_dim={4,1,1}`：
 
 ```sh
-make -C demo run-matmul-4c
-bash demo/run_matmul_4c_cmodel.sh 256 768 248
+# 终端一
+NPU_CMODEL_HARTS=4 ./run_cmodel_server.sh
+# 终端二
+build/demo/matmul_bf16_4c
 ```
 
-默认 case 为 `M=1024, N=1536, K=1536`：M 正好覆盖一个完整的 2-Core tile，
-N 正好覆盖两个完整的 2-Core tile，K 包含 6 个分片，可以充分展开 slice 流水并
-避免 M/N 边缘碎片。每个 Core 使用 `tileM=512`、`tileN=384`、
-`tileK=256`。两套本地数据流由模板同时编入 kernel：当 `M < N` 时，每个 Core
-双缓冲完整的 A tile，并把 B/C 切成四个 96 列 slice，占用 1.4375MiB URAM；否则
-保留四个 128 行 A/C slice 和两个完整 B tile 的双缓冲，占用 1.375MiB URAM。
-K 尾块使用实际 `MAT_K` 和窄 DMA 请求处理，不要求 K 是 256 的整数倍。M 维在两行
-Core 之间连续等分，每行再按 512 行推进；N 维按 384 列 tile 交错分给两列 Core。
-
-每对 Core 只从 DRAM 读取一份 A 或 B tile：core 00/11 负责 A，core 01/10 负责
-B。每个 Hart 创建一个 DRAM Loader、一个远端 Copy worker、两个 Mat worker 和一个
-C-Store worker。DRAM Loader 将 D2U 输出发布到 Shared Resource，Copy 用一次硬件 Wait
-同时等待 Shared 输入并预留 Local 输出，再从源 Core URAM 拉取数据。MAT 只消费本地
-Resource。共享资源统一表示为逻辑 sliced buffer 与 buffered buffer，模板按
-路径把它们映射到 A 或 B，避免为两套算法维护重复的 Atomic Cache 状态。两个 Mat
-worker 静态交替处理线性 job：MAT 完成提交同时消费 A/B/当前 turn，并发布下一 turn，
-因此最多两条 MAT outstanding，发射顺序不会反转。
-最后一个 K 分片完成后，MAT 只发布对应 C slice 的本地 Resource；C-Store 按 slice
-顺序取走结果，每次发射两条 U2D 后统一等待完成，再释放 C buffer 供下一 output tile
-使用。这样 MAT 不再承担写回等待，同时保持 RTL 可安全承载的两路 Store outstanding。
-整个数据面不使用自写 generation 原子轮询或动态抢任务。
-对应日志为
-`build/demo/matmul_4c_cmodel.log`、`build/demo/matmul_4c_dayan_server.log` 和
-`build/demo/matmul_bf16_4c.log`。
+M 维在两行 Core 之间连续等分，各行 Core 按 512 行推进；N 维按 384 列 tile
+交错分给两列 Core。默认 case 每核负责 `512×768` 个输出，M 方向包含一个
+512 行 tile，N 方向包含两个 384 列 tile，K 包含 6 个分片。K 尾块使用实际
+`MAT_K` 和窄 DMA 请求处理，不要求 K 是 256 的整数倍。
+每对 Loader 通过 Shared Resource 选举 DRAM 加载者，对端从其 URAM 复制同一份输入。
+最后一个 K 分片完成后发布对应 C slice，Post 写回并异步消费，随后释放该缓冲。
+cmodel 日志默认位于 `build/cmodel/cmodel.log`。
 
 ## 四 Core 直接广播性能模型
 

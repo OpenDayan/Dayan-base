@@ -6,7 +6,6 @@
 #include "errno.h"
 #include "platform.h"
 #include "platform_regs.h"
-#include "resource_scheduler.h"
 #include "rpc.h"
 #include "rpc_internal.h"
 #include "string.h"
@@ -78,16 +77,9 @@ static void rpc_send_main(void)
     struct rpc_state *rpc = &cpu_self()->rpc;
 
     for (;;) {
-        uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
-
         if (list_empty(&rpc->send_queue) &&
-            !cpu_self()->tensor_interrupt.pending) {
-            thread_prepare_wait(&rpc->send_event);
-            resource_scheduler_interrupt_restore(interrupt_state);
-            switch_context();
-        } else {
-            resource_scheduler_interrupt_restore(interrupt_state);
-        }
+            !cpu_self()->tensor_interrupt.pending)
+            thread_wait_event(&rpc->send_event);
         rpc_send_pending();
     }
 }

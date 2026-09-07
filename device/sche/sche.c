@@ -145,15 +145,11 @@ static void thread_state_set(struct thread *thread, uint8_t state)
 
 void thread_schedule(struct thread *thread)
 {
-    uintptr_t interrupt_state;
-
     thread_state_set(thread, THREAD_READY);
-    interrupt_state = resource_scheduler_interrupt_disable();
     /* WAIT clears its staging registers after every accepted submission. */
     if (thread->type == THREAD_TYPE_SYSTEM)
         __builtin_riscv_tx_base_tcsr_write(3, 0, RESOURCE_WAIT_QOS);
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)thread, 0, RESOURCE_WAIT);
-    resource_scheduler_interrupt_restore(interrupt_state);
 }
 
 void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
@@ -718,16 +714,12 @@ int proc_kill_all(struct rpc_proc_kill_result *result)
 
 size_t thread_event_wake_one(struct thread_list *event)
 {
-    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
     struct thread *thread;
 
-    if (event->head == THREAD_SLOT_NONE) {
-        resource_scheduler_interrupt_restore(interrupt_state);
+    if (event->head == THREAD_SLOT_NONE)
         return 0;
-    }
     thread = thread_slot_get(event->head);
     thread_list_remove(thread);
-    resource_scheduler_interrupt_restore(interrupt_state);
     thread_schedule(thread);
     return 1;
 }
@@ -759,26 +751,15 @@ static void thread_prepare_wait_state(struct thread_list *event,
     thread_state_set(thread, state);
 }
 
-void thread_prepare_wait(struct thread_list *event)
-{
-    thread_prepare_wait_state(event, THREAD_WAIT_EVENT);
-}
-
 void thread_wait_event(struct thread_list *event)
 {
-    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
-
     thread_prepare_wait_state(event, THREAD_WAIT_EVENT);
-    resource_scheduler_interrupt_restore(interrupt_state);
     switch_context();
 }
 
 void thread_wait_join(struct thread_list *event)
 {
-    uintptr_t interrupt_state = resource_scheduler_interrupt_disable();
-
     thread_prepare_wait_state(event, THREAD_WAIT_JOIN);
-    resource_scheduler_interrupt_restore(interrupt_state);
     switch_context();
 }
 

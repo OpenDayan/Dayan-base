@@ -26,11 +26,11 @@ struct MatmulBf16Shape {
 namespace matmul_bf16_4c_detail {
 
 // Local: sliced operand + two buffered tiles + C slices. Shared: each pair's
-// input-ready and copy-complete resources, with no additional URAM storage.
+// input-ready resources, consumed once after the peer's copy completes.
 enum : int {
     TM = MatmulBf16Shape::kTileM, TN = MatmulBf16Shape::kTileN,
     TK = MatmulBf16Shape::kTileK, Slices = MatmulBf16Shape::kSlices,
-    LocalResources = 2 * Slices + 2, SharedResources = 4 * (Slices + 2),
+    LocalResources = 2 * Slices + 2, SharedResources = 2 * (Slices + 2),
 };
 enum : uint64_t {
     Swizzle = MAT_BATCH_SWIZZLE(5, 3, 5),
@@ -116,16 +116,15 @@ static void loader(void *argument)
         for (int slice = 0; slice < (buffered ? 1 : Slices); ++slice) {
             const Node n = node(s, gen, slice, s.lane);
             const Node other = node(s, gen, slice, peer);
-            if (!n.rows || !n.cols)
+            const bool active = n.rows && n.cols;
+            const bool peer_active = other.rows && other.cols;
+            if (!active && !peer_active)
                 continue;
             const Buffer &dst = b ? s.b[n.b_index] : s.a[n.a_index];
             const int index = buffered ? 2 * Slices + pair * 2 + n.phase
                                        : pair * Slices + slice;
             const auto ready = DAYAN_SHARED_RESOURCE(index);
-            const auto copied = DAYAN_SHARED_RESOURCE(2 * (Slices + 2) + index);
             const auto ready_mask = DAYAN_RESOURCE_MASK(ready);
-            const auto copied_mask = DAYAN_RESOURCE_MASK(copied);
-            const bool paired = other.rows && other.cols;
             const int rows = b ? n.cols : n.rows;
             const int bytes = n.inner * 2;
             const uint32_t users = buffered ? n.users : 1;
@@ -133,18 +132,16 @@ static void loader(void *argument)
             uint64_t src = s.input[b] + (b ? n.col : n.row) * stride +
                            (uint64_t)n.step * TK * 2;
 
-            // Only these two peer Loaders elect on this Resource, once per use.
-            // Both peers track the same shared lifecycles. The copy acknowledgement
-            // keeps the source alive until remote LSU consumption completes.
-            check(dayan_resource_wait_free(dst.resource));
-            int role = DAYAN_RESOURCE_ROLE_PRODUCER;
-            if (paired) {
-                role = dayan_resource_wait(ready_mask, ready_mask, phases, 0);
-                check(role);
-            }
-            if (role == DAYAN_RESOURCE_ROLE_PRODUCER) {
-                if (paired)
-                    check(dayan_resource_wait_free(copied));
+            // Reuse needs both local MAT completion and the prior peer copy.
+            // An inactive peer still consumes Shared so tail transitions retain
+            // the same lifecycle protection; it never reserves a local buffer.
+            const int role = dayan_resource_wait(
+                active ? DAYAN_RESOURCE_MASK(dst.resource) | ready_mask : 0,
+                ready_mask, phases, 0);
+            check(role);
+            if (!active) {
+                check(dayan_resource_consume_lsu(ready_mask));
+            } else if (role == DAYAN_RESOURCE_ROLE_PRODUCER) {
                 set_lsu_matrix<0>(checksum, rows, TK * 2, stride, TK * 2);
                 __tx_lsu_tcsr_write<LSU_URAMWRITESWIZZLEMBS>(Swizzle);
                 // One full-burst DMA and, for a K tail, one short DMA.
@@ -156,25 +153,19 @@ static void loader(void *argument)
                     __tx_lsu_dma_d2u<0>((long)(dst.uram + pos), (long)(src + pos));
                     pos += count * request;
                 }
-                if (paired) {
-                    check(dayan_resource_produce_lsu(ready, 1, 0));
-                    check(dayan_resource_wait_ready(copied, (phases >> copied) & 1U));
-                }
-                check(dayan_resource_produce_lsu(dst.resource, users,
-                                                 paired ? copied_mask : 0));
+                check(dayan_resource_produce_lsu(dst.resource, users, 0));
+                check(dayan_resource_produce_lsu(ready, 1, 0));
             } else if (role == DAYAN_RESOURCE_ROLE_CONSUMER) {
                 // Remote URAM is mapped in the D address space. Copy padded
                 // rows verbatim, preserving the swizzle already applied by DRAM load.
                 src = cluster.uram[peer] + dst.uram - s.uram;
                 set_lsu_matrix<0>(checksum, rows, TK * 2, TK * 2, TK * 2);
                 __tx_lsu_dma_d2u<0>((long)dst.uram, (long)src);
-                check(dayan_resource_produce_lsu(copied, 1, ready_mask));
-                check(dayan_resource_produce_lsu(dst.resource, users, 0));
+                check(dayan_resource_produce_lsu(dst.resource, users, ready_mask));
             } else {
                 dayan_thread_exit(-22);
             }
-            if (paired)
-                phases ^= ready_mask | copied_mask;
+            phases ^= ready_mask;
         }
     }
     dayan_wait_lsu();
@@ -338,7 +329,7 @@ DAYAN_KERNEL_NAMED_RESOURCE_DESC(
     matmul_bf16_4c, MatmulBf16Shape::kWorkers,
     MatmulBf16Shape::kAtomicBytes, MatmulBf16Shape::kUramBytes,
     3, 1, 0, 0, 2 * MatmulBf16Shape::kSlices + 2,
-    4 * (MatmulBf16Shape::kSlices + 2));
+    2 * (MatmulBf16Shape::kSlices + 2));
 
 #if !defined(__DAYAN_DEVICE__)
 
