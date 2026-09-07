@@ -124,6 +124,16 @@ descriptor 标志时使用 \code{DAYAN_KERNEL_RESOURCE_DESC_EX}。子 Thread 在
 \code{DAYAN_RESOURCE_ROLE_NORMAL}。传入未声明的逻辑编号、多个重叠 bit 或非法 qos
 会返回负值。
 
+选举登记时快照资源的当前生命周期。资源已处于 BUSY 或 READY 时登记的参与者仍属于
+当前代，并在 READY 时作为 CONSUMER 返回。内部 phase 在 FREE、BUSY、READY 期间
+保持不变，仅在最后一次消费使 READY 回到 FREE 时翻转。再次参与同一资源的选举前，
+调用者必须先完成上一代的使用；把本地缓冲的 FREE 条件合并进选举 wait，并不会推迟
+phase 的快照时刻。WAIT\_READY 不预扣消费名额，软件必须保证实际消费次数与声明一致。
+共享 URAM 的生产者还必须等待远端复制完成，才能复用或释放源缓冲。
+phase 只有 1 bit，软件不能让未发射的选举项跨越同一资源的两次完整生命周期，否则会
+发生代号回绕。各阶段应遵循相同的逐资源使用顺序，限制未完成的代数；物理缓冲的
+轮转索引不等同于硬件内部 phase，尤其不能用跳过的空 tile 推算硬件 phase。
+
 \subsection{完成与资源回收}
 
 \begin{dayantable}{Named Resource 完成接口}{tab:kernel-032}{X[42,l] X[58,l]}

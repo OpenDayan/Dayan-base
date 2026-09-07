@@ -127,6 +127,14 @@ DAYAN_API void dayan_cache_flush(const void *address, size_t size);
  * Logical resources 0..31 are Local and 32..63 are Shared.  Wait returns a
  * dayan_resource_role for election waits, or a negative error.  A normal
  * wait has disjoint masks.  An election wait overlaps them in one bit.
+ * Election registration snapshots the current lifecycle: waiters arriving
+ * during BUSY or READY join that same generation as consumers.  The phase
+ * changes only when the final consumer returns the Resource to FREE.
+ * Before registering again, retire this caller's previous use.  Other masks
+ * on the election wait do not defer its phase snapshot until those masks pass.
+ * The phase is one bit: never leave an election pending while that Resource
+ * completes two lifecycles.  Bound outstanding uses and keep participants in
+ * the same per-Resource order; buffer indexes are not hardware phase values.
  */
 DAYAN_API int dayan_resource_wait(dayan_resource_mask_t wait_free,
                                   dayan_resource_mask_t wait_ready,
@@ -137,6 +145,9 @@ DAYAN_API int dayan_resource_wait_ready(dayan_resource_t resource);
 /*
  * Publish output after earlier work on the selected unit completes.  At the
  * same completion point, every Resource in consume_ready loses one consumer.
+ * The final consumption returns it to FREE and starts its next lifecycle.
+ * WAIT_READY does not claim a consumer credit; software must match the count
+ * and keep remote-copy sources alive until the copy has completed.
  */
 DAYAN_API int dayan_resource_produce_lsu(
     dayan_resource_t output, uint32_t consumer_count,

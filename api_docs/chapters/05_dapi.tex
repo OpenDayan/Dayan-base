@@ -136,6 +136,12 @@ Context2 映射，因此算子不为资源分配对象内存，也不维护软�
 \code{DAYAN_RESOURCE_ROLE_NORMAL}。访问 Context2 未声明的编号、多个重叠 bit 或非法 qos
 返回负值。
 
+选举在登记时快照当前生命周期：BUSY 或 READY 期间登记的参与者仍属于当前代。
+内部 1-bit phase 仅在最后一次消费使 READY 回到 FREE 时翻转，软件不能直接指定它。
+各阶段必须按相同的逐资源顺序推进，并限制未完成的代数，避免尚未发射的选举跨越
+两次生命周期而发生回绕。WAIT\_READY 不预扣消费名额；软件须匹配 consumer count，
+并在本地计算和远端复制均完成后才能复用源缓冲。
+
 \begin{dayantable}{Named Resource 完成 dapi}{tab:api-dapi-shared-resource}{X[47,l] X[53,l]}
   API & 行为 \\
   \code{dayan_resource_produce_lsu} / \code{dayan_resource_produce_mat} / \code{dayan_resource_produce_vec} / \code{dayan_resource_produce_macro} & 对应单元此前工作完成时消费输入 mask，并把已预留的 output 以 1--255 个 consumer 发布为 READY。 \\

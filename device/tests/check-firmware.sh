@@ -246,15 +246,16 @@ cpu_size=$(symbol_address __cpu_local_size)
     [ $((cpu_size % 64)) -eq 0 ] ||
     fail "CPU Local must have isolated per-Hart cache lines"
 local_segment=$($readelf --segments --wide "$elf" | \
-    awk -v start="$cpu_start" '
-        BEGIN {sub(/^0x0*/, "", start)}
-        $1 == "LOAD" {
-            address = $3
-            sub(/^0x0*/, "", address)
-            if (address == start)
-                print
-        }')
-grep -Eq '[[:space:]]RW[[:space:]]' <<<"$local_segment" ||
+    awk '$1 == "LOAD" && $7 ~ /W/ {print; exit}')
+[ -n "$local_segment" ] ||
+    fail "CPU Local and backing pools must be in a writable ELF segment"
+local_segment_start=$(awk '{print $3}' <<<"$local_segment")
+local_segment_size=$(awk '{print $6}' <<<"$local_segment")
+local_start=$((16#${local_segment_start#0x}))
+local_end=$((local_start + 16#${local_segment_size#0x}))
+cpu_start_value=$((16#${cpu_start#0x}))
+[ "$cpu_start_value" -ge "$local_start" ] &&
+    [ "$cpu_start_value" -lt "$local_end" ] ||
     fail "CPU Local and backing pools must be in a writable ELF segment"
 [ $((stack_end - stack_start)) -eq $((harts * stack_size)) ] &&
     [ $((rpc_end - rpc_start)) -eq $((harts * 2 * rpc_stack_size)) ] &&

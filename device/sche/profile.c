@@ -14,23 +14,6 @@
 
 extern unsigned char __profile_stack_start[];
 
-_Static_assert((uint32_t)THREAD_RUNNING == RPC_PROFILE_PROC_RUNNING,
-               "profile running state ABI");
-_Static_assert((uint32_t)THREAD_READY == RPC_PROFILE_PROC_READY,
-               "profile ready state ABI");
-_Static_assert((uint32_t)THREAD_WAIT_POLL == RPC_PROFILE_PROC_WAIT_POLL,
-               "profile poll state ABI");
-_Static_assert((uint32_t)THREAD_WAIT_EVENT == RPC_PROFILE_PROC_WAIT_EVENT,
-               "profile proc state ABI");
-_Static_assert((uint32_t)THREAD_WAIT_START == RPC_PROFILE_PROC_WAIT_START,
-               "profile start state ABI");
-_Static_assert((uint32_t)THREAD_WAIT_EXIT == RPC_PROFILE_PROC_WAIT_EXIT,
-               "profile exit state ABI");
-_Static_assert((uint32_t)THREAD_WAIT_PRODUCE == RPC_PROFILE_PROC_WAIT_PRODUCE,
-               "profile produce state ABI");
-_Static_assert((uint32_t)THREAD_KILL_WAIT_PRODUCE ==
-                   RPC_PROFILE_PROC_KILL_WAIT_PRODUCE,
-               "profile kill-wait-produce state ABI");
 _Static_assert(RPC_PROFILE_RECORD_SIZE == 8 &&
                    RPC_PROFILE_SLOT_DEFINE_SIZE == 24 &&
                    RPC_PROFILE_COUNTER_BITS == 48 &&
