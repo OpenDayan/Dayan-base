@@ -365,28 +365,14 @@ int main(void)
                                   &observed64) == 0);
         assert(observed64 == UINT64_C(0x00cd0000033000));
 
-        /* Presence is a round trip, so it needs the probe value staged on
-         * the read side; the write side must end up restored. */
-        observed_reg = 0x5a5a5000;
-        assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
-                      (off_t)(NPU_MMU_TEST_BASE +
-                              DAYAN_MMU_FIX_MAP_SIZE_LO)) ==
-               (ssize_t)sizeof(observed_reg));
-        assert(npu_hal_mmu_present(hal, 0, &present) == 0);
-        assert(present == 1);
-        assert(pread(h2c, &observed_reg, sizeof(observed_reg),
-                     (off_t)(NPU_MMU_TEST_BASE +
-                             DAYAN_MMU_FIX_MAP_SIZE_LO)) ==
-               (ssize_t)sizeof(observed_reg));
-        assert(observed_reg == 0x5a5a5000);
-        /* A device that does not echo the probe is reported absent. */
+        /* A successful read of the MMU page is sufficient for presence. */
         observed_reg = 0;
         assert(pwrite(c2h, &observed_reg, sizeof(observed_reg),
                       (off_t)(NPU_MMU_TEST_BASE +
                               DAYAN_MMU_FIX_MAP_SIZE_LO)) ==
                (ssize_t)sizeof(observed_reg));
         assert(npu_hal_mmu_present(hal, 0, &present) == 0);
-        assert(present == 0);
+        assert(present == 1);
 
         /* Only 8 ASIDs exist, so a selective flush past that is a bug. */
         assert(npu_hal_mmu_flush(hal, 0, 1, DAYAN_MMU_ASID_COUNT, 10) ==

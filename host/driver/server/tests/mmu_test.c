@@ -351,7 +351,7 @@ int npu_hal_copy_from_address(npu_hal_t *hal, uint32_t cluster,
 
 /* Recorded register image, so init ordering can be checked. */
 static uint32_t mmu_registers[DAYAN_MMU_APB_SIZE / 4];
-static uint32_t n_fix_map_en_writes;
+static uint32_t fix_map_size_writes;
 static uint32_t ptw_base_written;
 
 int npu_hal_mmu_write_reg(npu_hal_t *hal, uint32_t cluster, uint32_t offset,
@@ -360,14 +360,13 @@ int npu_hal_mmu_write_reg(npu_hal_t *hal, uint32_t cluster, uint32_t offset,
     (void)hal;
     (void)cluster;
     assert(offset < DAYAN_MMU_APB_SIZE && !(offset & 3U));
-    if (offset == DAYAN_MMU_N_FIX_MAP_EN && value) {
+    if (offset == DAYAN_MMU_FIX_MAP_SIZE_LO && value) {
         /*
-         * Translation must not start before the walker base is programmed;
-         * otherwise the first access after FixMap goes off walks an empty
-         * table.
+         * FixMap must not be narrowed before the walker base is programmed;
+         * otherwise the first high address walks an empty table.
          */
         assert(ptw_base_written);
-        ++n_fix_map_en_writes;
+        ++fix_map_size_writes;
     }
     mmu_registers[offset >> 2] = value;
     return 0;
@@ -495,7 +494,7 @@ static void device_reset(npu_service_device_t *device)
     fake_alloc_live = 0;
     flush_count = 0;
     flush_fail = 0;
-    n_fix_map_en_writes = 0;
+    fix_map_size_writes = 0;
     ptw_base_written = 0;
 }
 
@@ -509,7 +508,7 @@ static void test_disabled_is_inert(void)
     device.options.enable_mmu = 0;
     assert(npu_service_mmu_init(&device) == 0);
     /* No hardware touched, no memory taken. */
-    assert(n_fix_map_en_writes == 0);
+    assert(fix_map_size_writes == 0);
     assert(fake_alloc_live == 0);
     /* Mapping calls succeed as no-ops so callers need not branch. */
     assert(npu_service_mmu_map(&device, 0, BUFFER_VA_BASE, DEVICE_MEMORY_BASE,
@@ -529,11 +528,14 @@ static void test_init_ordering(void)
 
     device_reset(&device);
     assert(npu_service_mmu_init(&device) == 0);
-    /* Translation was switched on exactly once, and the stub asserted that
-     * PTW_BASE preceded it. */
-    assert(n_fix_map_en_writes == 1);
-    assert(mmu_registers[DAYAN_MMU_N_FIX_MAP_EN >> 2] ==
-           DAYAN_MMU_N_FIX_MAP_EN_BIT);
+    /* FixMap was narrowed exactly once, after PTW_BASE became live. */
+    assert(fix_map_size_writes == 1);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_BASE_LO >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_BASE_HI >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_SIZE_LO >> 2] ==
+           DAYAN_MMU_LOW_2G_PAGES);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_SIZE_HI >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_N_FIX_MAP_EN >> 2] == 0);
     /* One shared ASID: Contexts are separated by VA range, not ASID. */
     assert(mmu_registers[DAYAN_MMU_GLOBAL_ASID >> 2] == 0);
     /* Redirects must point somewhere owned, and offset mode must be on so a
@@ -543,8 +545,12 @@ static void test_init_ordering(void)
     assert(mmu_registers[DAYAN_MMU_ERROR_SLV_OFF_MODE >> 2] ==
            DAYAN_MMU_ERROR_SLV_OFF_VA);
     npu_service_mmu_fini(&device);
-    /* Teardown returns to identity addressing and releases everything. */
+    /* Teardown restores the reset-time full-range identity FixMap. */
     assert(mmu_registers[DAYAN_MMU_N_FIX_MAP_EN >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_BASE_LO >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_BASE_HI >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_SIZE_LO >> 2] == 0);
+    assert(mmu_registers[DAYAN_MMU_FIX_MAP_SIZE_HI >> 2] == 0);
     assert(fake_alloc_live == 0);
 }
 

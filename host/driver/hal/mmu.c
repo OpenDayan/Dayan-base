@@ -32,8 +32,6 @@
 
 #include "platform_regs.h"
 
-/* A distinctive 4K-aligned probe value for the presence check. */
-#define NPU_HAL_MMU_PROBE_VALUE  UINT32_C(0x5a5a5000)
 #define NPU_HAL_MMU_POLL_US      100U
 
 static int mmu_offset_valid(uint32_t offset)
@@ -153,41 +151,24 @@ int npu_hal_mmu_read64(npu_hal_t *hal, uint32_t cluster, uint32_t offset_lo,
 }
 
 /*
- * Probe by round-tripping FIX_MAP_SIZE.  That register is chosen because it
- * cannot change behaviour while N_FIX_MAP_EN is 0: a nonzero size only
- * narrows the identity FixMap range, and the original value is restored
- * before returning, so a probe on a running device is harmless.
+ * Probe with a read only.  Writing FIX_MAP_SIZE changes address routing before
+ * PTW_BASE and the page tables are ready, which can make the following Host
+ * read time out on real hardware.  An absent MMU page is reported by the
+ * backend read itself.
  */
 int npu_hal_mmu_present(npu_hal_t *hal, uint32_t cluster, int *present)
 {
-    uint32_t saved = 0;
-    uint32_t observed = 0;
+    uint32_t value = 0;
     int status;
 
     if (!hal || !present)
         return -EINVAL;
     *present = 0;
     status = npu_hal_mmu_read_reg(hal, cluster, DAYAN_MMU_FIX_MAP_SIZE_LO,
-                                  &saved);
+                                  &value);
     if (status < 0)
         return status;
-    status = npu_hal_mmu_write_reg(hal, cluster, DAYAN_MMU_FIX_MAP_SIZE_LO,
-                                  NPU_HAL_MMU_PROBE_VALUE);
-    if (status < 0)
-        return status;
-    status = npu_hal_mmu_read_reg(hal, cluster, DAYAN_MMU_FIX_MAP_SIZE_LO,
-                                  &observed);
-    if (status < 0)
-        return status;
-    /* Restore before reporting, even if the probe read failed to match. */
-    {
-        int restore = npu_hal_mmu_write_reg(hal, cluster,
-                                           DAYAN_MMU_FIX_MAP_SIZE_LO, saved);
-
-        if (restore < 0)
-            return restore;
-    }
-    *present = observed == NPU_HAL_MMU_PROBE_VALUE;
+    *present = 1;
     return 0;
 }
 

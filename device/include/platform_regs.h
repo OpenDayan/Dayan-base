@@ -27,19 +27,16 @@
  * ClusterMMU APB4 register page.
  *
  * The integration manual (section 6.1 address map, section 6.6) places
- * mmuconfig at 0x005000-0x006000.  npu-qemu's MMU-extend branch maps the
- * same page at 0x008000 instead; the intra-page offsets below match the
- * manual exactly, only the page base differs.  The base is overridable so
- * one build can target either, and it defaults to the QEMU value because
- * QEMU is the only thing this tree is validated against today.
- *
- * Real hardware needs DAYAN_MMU_APB_BASE=0x005000.
+ * mmuconfig at 0x005000-0x006000.  Keep the base overridable for older
+ * simulators that mapped the page elsewhere, but default to the hardware
+ * address used by FPGA and the RTL cluster simulator.
  */
 #ifndef DAYAN_MMU_APB_BASE
-#define DAYAN_MMU_APB_BASE              0x008000U
+#define DAYAN_MMU_APB_BASE              0x005000U
 #endif
 #define DAYAN_MMU_APB_SIZE              0x001000U
 #define DAYAN_MMU_HW_APB_BASE           0x005000U
+#define DAYAN_MMU_LOW_2G_PAGES          0x00080000U
 
 /*
  * 56-bit physical addresses are split across a LO/HI register pair: LO

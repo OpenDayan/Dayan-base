@@ -404,8 +404,9 @@ static int npu_mmu_map_firmware_window(npu_service_device_t *device,
 /*
  * Bring one Cluster's MMU up.  The order is the safety argument and must not
  * be rearranged: the page table has to be complete and PTW_BASE live before
- * FixMap is switched off, or the first access after the switch walks an empty
- * table.  N_FIX_MAP_EN is therefore written last, by its own function.
+ * FixMap is narrowed, or the first access outside the low 2 GiB window walks
+ * an empty table.  The final activation keeps low control/ROM/CLINT addresses
+ * on FixMap while addresses at 0x80000000 and above use the page table.
  */
 static int npu_mmu_enable_cluster(npu_service_device_t *device,
                                   uint32_t cluster)
@@ -436,18 +437,40 @@ static int npu_mmu_enable_cluster(npu_service_device_t *device,
     return npu_mmu_guard_init(device, cluster);
 }
 
-/* The single point where translation actually starts. */
+/* Narrow FixMap to low 2 GiB; higher addresses then fall through to PTW. */
 static int npu_mmu_activate(npu_service_device_t *device, uint32_t cluster)
 {
+    int status;
+
+    status = npu_hal_mmu_write64(device->hal, cluster,
+                                 DAYAN_MMU_FIX_MAP_BASE_LO, 0);
+    if (status < 0)
+        return status;
+    status = npu_hal_mmu_write64(device->hal, cluster,
+                                 DAYAN_MMU_FIX_MAP_SIZE_LO,
+                                 DAYAN_MMU_LOW_2G_PAGES);
+    if (status < 0)
+        return status;
     return npu_hal_mmu_write_reg(device->hal, cluster,
-                                 DAYAN_MMU_N_FIX_MAP_EN,
-                                 DAYAN_MMU_N_FIX_MAP_EN_BIT);
+                                 DAYAN_MMU_N_FIX_MAP_EN, 0);
 }
 
 static int npu_mmu_deactivate(npu_service_device_t *device, uint32_t cluster)
 {
-    return npu_hal_mmu_write_reg(device->hal, cluster,
-                                 DAYAN_MMU_N_FIX_MAP_EN, 0);
+    int status;
+
+    /* Re-enable FixMap before widening it so page tables remain valid during
+     * the transition.  Size zero restores the reset-time full-range map. */
+    status = npu_hal_mmu_write_reg(device->hal, cluster,
+                                   DAYAN_MMU_N_FIX_MAP_EN, 0);
+    if (status < 0)
+        return status;
+    status = npu_hal_mmu_write64(device->hal, cluster,
+                                 DAYAN_MMU_FIX_MAP_BASE_LO, 0);
+    if (status < 0)
+        return status;
+    return npu_hal_mmu_write64(device->hal, cluster,
+                               DAYAN_MMU_FIX_MAP_SIZE_LO, 0);
 }
 
 int npu_service_mmu_init(npu_service_device_t *device)

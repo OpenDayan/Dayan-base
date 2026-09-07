@@ -246,7 +246,14 @@ cpu_size=$(symbol_address __cpu_local_size)
     [ $((cpu_size % 64)) -eq 0 ] ||
     fail "CPU Local must have isolated per-Hart cache lines"
 local_segment=$($readelf --segments --wide "$elf" | \
-    awk -v start="$cpu_start" '$1 == "LOAD" && $3 == start {print}')
+    awk -v start="$cpu_start" '
+        BEGIN {sub(/^0x0*/, "", start)}
+        $1 == "LOAD" {
+            address = $3
+            sub(/^0x0*/, "", address)
+            if (address == start)
+                print
+        }')
 grep -Eq '[[:space:]]RW[[:space:]]' <<<"$local_segment" ||
     fail "CPU Local and backing pools must be in a writable ELF segment"
 [ $((stack_end - stack_start)) -eq $((harts * stack_size)) ] &&
