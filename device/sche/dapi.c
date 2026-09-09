@@ -77,6 +77,14 @@ void dayan_yield(void)
     thread_yield();
 }
 
+uint64_t dayan_get_time(void)
+{
+    uint64_t cycle;
+
+    __asm__ volatile("rdcycle %0" : "=r"(cycle));
+    return cycle;
+}
+
 void dayan_thread_resources_init(dayan_thread_resources_t *resources)
 {
     if (!resources)

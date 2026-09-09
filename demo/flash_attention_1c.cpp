@@ -63,16 +63,6 @@ enum : uint64_t {
     kFp16UramBytes = 960 * 1024,
 };
 
-enum : uint64_t {
-    kFlashAttentionPerfMagic = 0x4641314350455246ULL,
-};
-
-struct FlashAttentionPerf {
-    uint64_t magic;
-    uint64_t kernel_cycles;
-    uint64_t pipeline_cycles;
-};
-
 #if defined(__DAYAN_DEVICE__)
 
 namespace flash_attention_1c_detail {
@@ -156,14 +146,6 @@ static_assert(Fp8Pipeline::kVecInstructionCount == 243,
               "KV=256 FP8 FlexVec flow instruction count changed");
 static_assert(Fp16Pipeline::kNormalizeInstructionCount == 50,
               "D=128 normalization instruction count changed");
-
-static inline uint64_t read_cycle()
-{
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
-    return cycle;
-}
 
 static_assert(Fp16Pipeline::kQOffset %
                           Fp16Pipeline::kInputReorderWindowBytes == 0 &&
@@ -735,10 +717,8 @@ static void run_attention(const typename Traits::Input *q,
                           const typename Traits::Input *kt,
                           const typename Traits::Input *vt,
                           float *output, float *probability,
-                          FlashAttentionPerf *perf, float *m, float *l)
+                          float *m, float *l)
 {
-    const uint64_t kernel_begin =
-        Traits::kFullAttention ? read_cycle() : 0;
     const uint64_t uram = (uint64_t)(uintptr_t)dayan_uram_base();
     PipelineState<Traits> state;
     uintptr_t pointer_bits = (uintptr_t)q | (uintptr_t)kt |
@@ -746,12 +726,12 @@ static void run_attention(const typename Traits::Input *q,
     int status;
 
     if constexpr (Traits::kFullAttention)
-        pointer_bits |= (uintptr_t)vt | (uintptr_t)output | (uintptr_t)perf;
+        pointer_bits |= (uintptr_t)vt | (uintptr_t)output;
     else
         pointer_bits |= (uintptr_t)probability;
 
     if (!q || !kt || !m || !l || !uram ||
-        (Traits::kFullAttention && (!vt || !output || !perf)) ||
+        (Traits::kFullAttention && (!vt || !output)) ||
         (!Traits::kFullAttention && !probability) ||
         dayan_uram_size() < Traits::kUramBytes || dayan_task_mode() != 1U ||
         dayan_task_dim(DAYAN_TASK_X) != 1U ||
@@ -855,19 +835,10 @@ static void run_attention(const typename Traits::Input *q,
         dayan_thread_exit(status);
     }
 
-    const uint64_t pipeline_begin =
-        Traits::kFullAttention ? read_cycle() : 0;
     state.start = 1;
     status = dayan_thread_join_all();
     if (status < 0)
         dayan_thread_exit(status);
-    if constexpr (Traits::kFullAttention) {
-        const uint64_t pipeline_end = read_cycle();
-
-        perf->magic = kFlashAttentionPerfMagic;
-        perf->pipeline_cycles = pipeline_end - pipeline_begin;
-        perf->kernel_cycles = read_cycle() - kernel_begin;
-    }
 }
 
 } // namespace flash_attention_1c_detail
@@ -876,13 +847,12 @@ static void run_attention(const typename Traits::Input *q,
 __kernel__ void flash_attention_fp16_1c(const uint16_t *q,
                                         const uint16_t *kt,
                                         const uint16_t *vt, float *output,
-                                        FlashAttentionPerf *perf,
                                         float *m, float *l)
 {
 #if defined(__DAYAN_DEVICE__)
     flash_attention_1c_detail::run_attention<
         flash_attention_1c_detail::Fp16Pipeline>(
-        q, kt, vt, output, nullptr, perf, m, l);
+        q, kt, vt, output, nullptr, m, l);
 #endif
 }
 
@@ -898,7 +868,7 @@ __kernel__ void flash_attention_fp8_1c(const uint8_t *q,
 #if defined(__DAYAN_DEVICE__)
     flash_attention_1c_detail::run_attention<
         flash_attention_1c_detail::Fp8Pipeline>(
-        q, kt, nullptr, nullptr, probability, nullptr, m, l);
+        q, kt, nullptr, nullptr, probability, m, l);
 #endif
 }
 
@@ -1393,7 +1363,6 @@ __host__ static int run_attention_demo()
     Input vt[kVtElements];
     float output[kOutputElements];
     float probability[kProbabilityElements] = {};
-    FlashAttentionPerf perf = {};
     float m[kStateElements];
     float l[kStateElements];
     float old_m[kStateElements];
@@ -1406,7 +1375,6 @@ __host__ static int run_attention_demo()
     npu_buffer_t *kt_buffer = nullptr;
     npu_buffer_t *vt_buffer = nullptr;
     npu_buffer_t *output_buffer = nullptr;
-    npu_buffer_t *perf_buffer = nullptr;
     npu_buffer_t *probability_buffer = nullptr;
     npu_buffer_t *m_buffer = nullptr;
     npu_buffer_t *l_buffer = nullptr;
@@ -1438,8 +1406,6 @@ __host__ static int run_attention_demo()
             status = create_buffer(context, sizeof(vt), &vt_buffer);
         if (status == 0)
             status = create_buffer(context, sizeof(output), &output_buffer);
-        if (status == 0)
-            status = create_buffer(context, sizeof(perf), &perf_buffer);
     } else if (status == 0) {
         status = create_buffer(context, sizeof(probability),
                                &probability_buffer);
@@ -1473,7 +1439,7 @@ __host__ static int run_attention_demo()
         attrs.timeout_ms = kTimeoutMs;
         if constexpr (FullAttention)
             status = flash_attention_fp16_1c(
-                q_buffer, kt_buffer, vt_buffer, output_buffer, perf_buffer,
+                q_buffer, kt_buffer, vt_buffer, output_buffer,
                 m_buffer, l_buffer, &attrs);
         else
             status = flash_attention_fp8_1c(
@@ -1481,30 +1447,6 @@ __host__ static int run_attention_demo()
                 m_buffer, l_buffer, &attrs);
     }
     if constexpr (FullAttention) {
-        if (status == 0)
-            status = copy_d2h(stream, &perf, perf_buffer, sizeof(perf));
-        if (status == 0 &&
-            (perf.magic != kFlashAttentionPerfMagic || !perf.kernel_cycles ||
-             !perf.pipeline_cycles ||
-             perf.pipeline_cycles > perf.kernel_cycles))
-            status = -1;
-        if (status == 0) {
-            constexpr double kMatPeakFlopsPerCycle = 4096.0;
-            const double mat_flops =
-                4.0 * (double)kKvTiles * (double)kQueryRows *
-                (double)kKvTileCols * (double)kHeadD;
-            const double pipeline_flops_per_cycle =
-                mat_flops / (double)perf.pipeline_cycles;
-
-            std::printf("[host] perf: kernel_cycles=%llu "
-                        "pipeline_cycles=%llu mat_flops_per_cycle=%.3f "
-                        "mat_peak_utilization=%.2f%%\n",
-                        (unsigned long long)perf.kernel_cycles,
-                        (unsigned long long)perf.pipeline_cycles,
-                        pipeline_flops_per_cycle,
-                        pipeline_flops_per_cycle * 100.0 /
-                            kMatPeakFlopsPerCycle);
-        }
         if (status == 0)
             status = copy_d2h(stream, output, output_buffer, sizeof(output));
     } else if (status == 0) {
@@ -1538,8 +1480,6 @@ __host__ static int run_attention_demo()
         preserve_error(npu_buffer_destroy(l_buffer), &status);
     if (m_buffer)
         preserve_error(npu_buffer_destroy(m_buffer), &status);
-    if (perf_buffer)
-        preserve_error(npu_buffer_destroy(perf_buffer), &status);
     if (output_buffer)
         preserve_error(npu_buffer_destroy(output_buffer), &status);
     if (vt_buffer)

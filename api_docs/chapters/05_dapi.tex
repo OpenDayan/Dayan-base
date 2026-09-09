@@ -6,7 +6,7 @@
 
 dapi 是算子的根 Proc 和 Device 子 Thread 可以直接调用的稳定接口。公开面由
 \code{device/include/api} 下的头文件定义，动态链接允许的函数集合由
-\code{device/dayan-api.symbols} 固定。本章逐项记录这 63 个可链接符号，并列出公开
+\code{device/dayan-api.symbols} 固定。本章逐项记录可链接符号，并列出公开
 类型、常量与编译属性；BL1 调度器、Proc 和资源实现细节不属于 dapi。
 
 \subsection{头文件与编译属性}
@@ -90,6 +90,14 @@ Host 启动算子前一次性分配，子 Thread 资源槽在根 Proc 建立时�
 
 逻辑任务 API 不暴露物理 Cluster 或 Core 编号。四 Core 模式下 Runtime 要求
 \code{task_dim.x == 4}，X ID 对应同一 Cluster 内四个参与者。
+
+\subsection{周期时间戳}
+
+\code{dayan_get_time} 的原型为 \code{uint64_t dayan_get_time(void)}，通过
+\code{rdcycle} 返回当前 Hart 的 64-bit
+周期计数，单位是 cycle，不做纳秒换算。它不等待执行单元完成，也不提供跨 Hart
+同步；跨核比较要求平台保证计数器同步。普通算子的耗时和吞吐统计使用 \code{dyperf}。
+只有专门的延迟、带宽基准或执行顺序测试需要在 Device 内读时间时，才调用此接口。
 
 \subsection{执行单元完成等待}
 

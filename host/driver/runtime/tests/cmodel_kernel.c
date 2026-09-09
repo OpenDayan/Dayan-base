@@ -32,21 +32,13 @@ struct child_work {
     uint64_t value;
 };
 
-static uint64_t read_mcycle(void)
-{
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
-    return cycle;
-}
-
 static void locked_child(void *argument)
 {
     struct lock_child_work *work = argument;
     struct lock_test_results *results = work->results;
     uint64_t bit = 1ULL << work->index;
 
-    results->child_begin[work->index] = read_mcycle();
+    results->child_begin[work->index] = dayan_get_time();
     results->started_mask |= bit;
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
     for (;;) {
@@ -56,7 +48,7 @@ static void locked_child(void *argument)
             break;
         dayan_yield();
     }
-    results->child_end[work->index] = read_mcycle();
+    results->child_end[work->index] = dayan_get_time();
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
     dayan_thread_exit((int64_t)(LOCK_TEST_RESULT + work->index));
 }
@@ -252,7 +244,7 @@ void locked_kernel(struct lock_test_results *results)
     uint32_t index;
 
     dayan_cache_invalidate(results, sizeof(*results));
-    results->root_begin = read_mcycle();
+    results->root_begin = dayan_get_time();
     for (index = 0; index < LOCK_TEST_CHILD_THREADS; ++index) {
         work[index].results = results;
         work[index].index = index;
@@ -268,14 +260,14 @@ void locked_kernel(struct lock_test_results *results)
             result != (int64_t)(LOCK_TEST_RESULT + index))
             dayan_thread_exit(-1);
     }
-    results->family_end = read_mcycle();
+    results->family_end = dayan_get_time();
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
     dayan_thread_exit((int64_t)LOCK_TEST_RESULT);
 }
 
 void normal_kernel(struct lock_test_results *results)
 {
-    results->normal_begin = read_mcycle();
+    results->normal_begin = dayan_get_time();
     dayan_cache_flush((unsigned char *)results + 64U, 64U);
     dayan_thread_exit((int64_t)NORMAL_TEST_RESULT);
 }

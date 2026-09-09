@@ -24,6 +24,14 @@ wait 接口把当前 \code{tp} 作为 Produce token 写入对应硬件队列，�
 表示该 token 已完成，不涵盖其它执行单元或调用后发射的工作。\code{dayan_yield} 也不
 提供跨核内存顺序。
 
+\subsection{周期时间戳}
+
+\code{dayan_get_time} 的原型为 \code{uint64_t dayan_get_time(void)}，内部通过
+\code{rdcycle} 返回当前 Hart 的 64-bit 周期计数，不做纳秒换算。它不等待执行单元完成，
+也不提供跨 Hart 同步；跨核比较要求平台保证计数器同步。普通算子的耗时和吞吐统计使用
+\code{dyperf}。专门的延迟、带宽基准或执行顺序测试确实需要 Device 时间戳时，统一调用
+此接口，不在算子中自行封装 CSR 读取。
+
 \subsection{D-cache 可见性}
 
 \begin{dayantable}{D-cache 接口}{tab:kernel-030-cache}{X[38,l] X[62,l]}

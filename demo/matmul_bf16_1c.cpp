@@ -23,19 +23,6 @@ struct MatmulBf16Config {
 };
 
 enum : uint64_t {
-    kMatmulBf16PerfMagic = 0x4d4d314350455246ULL,
-};
-
-struct MatmulBf16Perf {
-    uint64_t magic;
-    uint64_t m;
-    uint64_t n;
-    uint64_t k;
-    uint64_t kernel_cycles;
-    uint64_t pipeline_cycles;
-};
-
-enum : uint64_t {
     kMatmulBf16TileLong = 384,
     kMatmulBf16TileShort = 256,
     kMatmulBf16TileK = 256,
@@ -79,14 +66,6 @@ static constexpr uint64_t align_up(uint64_t value, uint64_t alignment)
 static inline int min_int(int left, int right)
 {
     return left < right ? left : right;
-}
-
-static inline uint64_t read_cycle()
-{
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
-    return cycle;
 }
 
 template <bool ProducerLoadsA, int SliceCount> struct UramLayout {
@@ -656,7 +635,7 @@ static void producer_thread(void *argument)
 template <bool ProducerLoadsA>
 static int run_pipeline(const MatmulBf16Config *config,
                         const uint16_t *a, const uint16_t *bt, float *c,
-                        uint64_t uram_base, uint64_t *pipeline_begin)
+                        uint64_t uram_base)
 {
     using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
 
@@ -720,7 +699,6 @@ static int run_pipeline(const MatmulBf16Config *config,
         return status;
     }
 
-    *pipeline_begin = read_cycle();
     state.start = 1;
     status = dayan_thread_join_all();
     if (status < 0 && state.status == 0)
@@ -753,13 +731,11 @@ static inline int config_valid(const MatmulBf16Config *config)
 
 __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
                                const uint16_t *a, const uint16_t *bt,
-                               float *c, MatmulBf16Perf *perf)
+                               float *c)
 {
     using namespace matmul_bf16_1c_detail;
 
-    const uint64_t kernel_begin = read_cycle();
-
-    if (!config_valid(config) || !a || !bt || !c || !perf ||
+    if (!config_valid(config) || !a || !bt || !c ||
         dayan_task_mode() != 1U ||
         dayan_task_dim(DAYAN_TASK_X) != 1U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
@@ -777,22 +753,11 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
 
     const uint64_t uram_base = (uint64_t)(uintptr_t)uram &
                                (Constants::kUramWindowStride - 1U);
-    uint64_t pipeline_begin = 0;
     const int status = producer_loads_a
-        ? run_pipeline<true>(config, a, bt, c, uram_base, &pipeline_begin)
-        : run_pipeline<false>(config, a, bt, c, uram_base, &pipeline_begin);
+        ? run_pipeline<true>(config, a, bt, c, uram_base)
+        : run_pipeline<false>(config, a, bt, c, uram_base);
     if (status < 0)
         dayan_thread_exit(status);
-
-    const uint64_t pipeline_end = read_cycle();
-    const uint64_t kernel_end = read_cycle();
-
-    perf->magic = kMatmulBf16PerfMagic;
-    perf->m = config->m;
-    perf->n = config->n;
-    perf->k = config->k;
-    perf->kernel_cycles = kernel_end - kernel_begin;
-    perf->pipeline_cycles = pipeline_end - pipeline_begin;
 }
 
 DAYAN_KERNEL_RESOURCE_DESC_EX(
@@ -1074,7 +1039,6 @@ __host__ int main(int argc, char **argv)
         m, n, k, k * sizeof(uint16_t), k * sizeof(uint16_t),
         n * sizeof(float),
     };
-    MatmulBf16Perf perf = {};
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
     npu_runtime_t *runtime = nullptr;
@@ -1084,7 +1048,6 @@ __host__ int main(int argc, char **argv)
     npu_buffer_t *a_buffer = nullptr;
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
-    npu_buffer_t *perf_buffer = nullptr;
     const char *socket_path;
     int status = 0;
 
@@ -1108,16 +1071,12 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = create_buffer(context, c_bytes, &c_buffer);
     if (status == 0)
-        status = create_buffer(context, sizeof(perf), &perf_buffer);
-    if (status == 0)
         status = upload(stream, config_buffer, &config, sizeof(config),
                         timeout_ms);
     if (status == 0)
         status = upload(stream, a_buffer, a.data(), a_bytes, timeout_ms);
     if (status == 0)
         status = upload(stream, bt_buffer, bt.data(), bt_bytes, timeout_ms);
-    if (status == 0)
-        status = upload(stream, perf_buffer, &perf, sizeof(perf), timeout_ms);
 
     if (status == 0) {
         const uint64_t tile_m = m < n ? kMatmulBf16TileShort
@@ -1142,26 +1101,7 @@ __host__ int main(int argc, char **argv)
                     (unsigned long long)kMatmulBf16TileK,
                     m < n ? "A" : "B");
         status = matmul_bf16_1c(config_buffer, a_buffer, bt_buffer,
-                                c_buffer, perf_buffer, &launch_attrs);
-    }
-    if (status == 0)
-        status = download(stream, &perf, perf_buffer, sizeof(perf),
-                          timeout_ms);
-    if (status == 0 &&
-        (perf.magic != kMatmulBf16PerfMagic || perf.m != m ||
-         perf.n != n || perf.k != k || !perf.kernel_cycles ||
-         !perf.pipeline_cycles || perf.pipeline_cycles > perf.kernel_cycles))
-        status = -1;
-    if (status == 0) {
-        const double flops = 2.0 * (double)m * (double)n * (double)k;
-
-        std::printf("[host] perf: kernel_cycles=%llu "
-                    "pipeline_cycles=%llu kernel_flops_per_cycle=%.3f "
-                    "pipeline_flops_per_cycle=%.3f\n",
-                    (unsigned long long)perf.kernel_cycles,
-                    (unsigned long long)perf.pipeline_cycles,
-                    flops / (double)perf.kernel_cycles,
-                    flops / (double)perf.pipeline_cycles);
+                                c_buffer, &launch_attrs);
     }
     if (status == 0)
         status = download(stream, c.data(), c_buffer, c_bytes, timeout_ms);
@@ -1170,8 +1110,6 @@ __host__ int main(int argc, char **argv)
     if (status < 0)
         std::printf("matmul_bf16_1c demo failed: %d\n", status);
 
-    if (perf_buffer)
-        preserve_error(npu_buffer_destroy(perf_buffer), &status);
     if (c_buffer)
         preserve_error(npu_buffer_destroy(c_buffer), &status);
     if (bt_buffer)

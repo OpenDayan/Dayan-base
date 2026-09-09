@@ -84,22 +84,6 @@ struct MatmulBf16Config {
     uint64_t c_stride;
 };
 
-#if MATMUL_BF16_4C_D2A_MODEL
-enum : uint64_t {
-    kMatmulBf16D2APerfMagic = 0x4d4d344344324146ULL,
-};
-
-struct MatmulBf16D2APerf {
-    uint64_t magic;
-    uint64_t m;
-    uint64_t n;
-    uint64_t k;
-    uint64_t kernel_cycles;
-    uint64_t pipeline_cycles;
-    uint64_t core_pipeline_cycles[4];
-};
-#endif
-
 #if defined(__DAYAN_DEVICE__)
 
 #include <dayan_intrinsics.h>
@@ -146,16 +130,6 @@ static inline int min_int(int left, int right)
 {
     return left < right ? left : right;
 }
-
-#if MATMUL_BF16_4C_D2A_MODEL
-static inline uint64_t read_cycle()
-{
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
-    return cycle;
-}
-#endif
 
 template <int SliceCount> struct UramLayout {
     static constexpr int slice_offset(int slice)
@@ -262,18 +236,9 @@ static_assert(Layout::total_bytes() <= MATMUL_BF16_4C_URAM_BYTES,
 
 struct ClusterShared {
     dayan_cluster_barrier_t barrier;
-#if MATMUL_BF16_4C_D2A_MODEL
-    dayan_cluster_barrier_t finish_barrier;
-#endif
     int32_t init_status;
     uint32_t reserved;
     uint64_t uram_base[Constants::kClusterCores];
-#if MATMUL_BF16_4C_D2A_MODEL
-    uint64_t kernel_begin[Constants::kClusterCores];
-    uint64_t kernel_end[Constants::kClusterCores];
-    uint64_t pipeline_begin[Constants::kClusterCores];
-    uint64_t pipeline_end[Constants::kClusterCores];
-#endif
 };
 
 static_assert(sizeof(ClusterShared) <= MATMUL_BF16_4C_ATOMIC_BYTES,
@@ -1001,23 +966,13 @@ static int initialize_cluster_shared(ClusterShared *cluster, uint32_t lane,
 
 __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
                                      const uint16_t *a,
-                                     const uint16_t *bt, float *c
-#if MATMUL_BF16_4C_D2A_MODEL
-                                     , MatmulBf16D2APerf *perf
-#endif
-                                     )
+                                     const uint16_t *bt, float *c)
 {
     using namespace matmul_bf16_4c_detail;
 
-#if MATMUL_BF16_4C_D2A_MODEL
-    const uint64_t kernel_begin = read_cycle();
-#endif
     const uint32_t lane = dayan_task_id(DAYAN_TASK_X);
 
     if (!config_valid(config) || !a || !bt || !c ||
-#if MATMUL_BF16_4C_D2A_MODEL
-        !perf ||
-#endif
         dayan_task_mode() != 4U ||
         dayan_task_dim(DAYAN_TASK_X) != 4U ||
         dayan_task_dim(DAYAN_TASK_Y) != 1U ||
@@ -1041,9 +996,6 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     int status = initialize_cluster_shared(cluster, lane, physical_uram);
     if (status < 0)
         dayan_thread_exit(status);
-#if MATMUL_BF16_4C_D2A_MODEL
-    cluster->kernel_begin[lane] = kernel_begin;
-#endif
 
     MatmulState state;
     state.m = (int)config->m;
@@ -1104,10 +1056,6 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
         {&state, 0U},
         {&state, 1U},
     };
-#if MATMUL_BF16_4C_D2A_MODEL
-    const uint64_t pipeline_begin = read_cycle();
-    cluster->pipeline_begin[lane] = pipeline_begin;
-#endif
     dayan_thread_resources_t resources;
     dayan_thread_resources_init(&resources);
     resources.local_resource_count =
@@ -1145,43 +1093,6 @@ __kernel__ void MATMUL_BF16_4C_KERNEL(const MatmulBf16Config *config,
     if (status < 0)
         dayan_thread_exit(status);
     dayan_wait_lsu();
-
-#if MATMUL_BF16_4C_D2A_MODEL
-    const uint64_t pipeline_end = read_cycle();
-    const uint64_t kernel_end = read_cycle();
-    cluster->pipeline_end[lane] = pipeline_end;
-    cluster->kernel_end[lane] = kernel_end;
-    status = dayan_cluster_barrier(Constants::kClusterCores,
-                                   &cluster->finish_barrier);
-    if (status < 0)
-        dayan_thread_exit(status);
-    if (lane == 0U) {
-        uint64_t first_kernel = cluster->kernel_begin[0];
-        uint64_t last_kernel = cluster->kernel_end[0];
-        uint64_t first_pipeline = cluster->pipeline_begin[0];
-        uint64_t last_pipeline = cluster->pipeline_end[0];
-
-        for (int core = 0; core < Constants::kClusterCores; ++core) {
-            if (cluster->kernel_begin[core] < first_kernel)
-                first_kernel = cluster->kernel_begin[core];
-            if (cluster->kernel_end[core] > last_kernel)
-                last_kernel = cluster->kernel_end[core];
-            if (cluster->pipeline_begin[core] < first_pipeline)
-                first_pipeline = cluster->pipeline_begin[core];
-            if (cluster->pipeline_end[core] > last_pipeline)
-                last_pipeline = cluster->pipeline_end[core];
-            perf->core_pipeline_cycles[core] =
-                cluster->pipeline_end[core] -
-                cluster->pipeline_begin[core];
-        }
-        perf->magic = kMatmulBf16D2APerfMagic;
-        perf->m = config->m;
-        perf->n = config->n;
-        perf->k = config->k;
-        perf->kernel_cycles = last_kernel - first_kernel;
-        perf->pipeline_cycles = last_pipeline - first_pipeline;
-    }
-#endif
 }
 
 #if MATMUL_BF16_4C_BROADCAST_MODEL
@@ -1335,6 +1246,7 @@ __host__ static int upload(npu_stream_t *stream, npu_buffer_t *buffer,
     return status < 0 ? status : wait_and_destroy(event, timeout_ms);
 }
 
+#if !MATMUL_BF16_4C_D2A_MODEL
 __host__ static int download(npu_stream_t *stream, void *destination,
                              npu_buffer_t *buffer, size_t size,
                              uint32_t timeout_ms)
@@ -1345,6 +1257,7 @@ __host__ static int download(npu_stream_t *stream, void *destination,
 
     return status < 0 ? status : wait_and_destroy(event, timeout_ms);
 }
+#endif
 
 __host__ static void preserve_error(int candidate, int *status)
 {
@@ -1517,9 +1430,6 @@ __host__ int main(int argc, char **argv)
         m, n, k, k * sizeof(uint16_t), k * sizeof(uint16_t),
         n * sizeof(float),
     };
-#if MATMUL_BF16_4C_D2A_MODEL
-    MatmulBf16D2APerf perf = {};
-#endif
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
     npu_runtime_t *runtime = nullptr;
@@ -1529,9 +1439,6 @@ __host__ int main(int argc, char **argv)
     npu_buffer_t *a_buffer = nullptr;
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
-#if MATMUL_BF16_4C_D2A_MODEL
-    npu_buffer_t *perf_buffer = nullptr;
-#endif
     const char *socket_path;
     int status = 0;
 
@@ -1554,10 +1461,6 @@ __host__ int main(int argc, char **argv)
         status = create_buffer(context, bt_bytes, &bt_buffer);
     if (status == 0)
         status = create_buffer(context, c_bytes, &c_buffer);
-#if MATMUL_BF16_4C_D2A_MODEL
-    if (status == 0)
-        status = create_buffer(context, sizeof(perf), &perf_buffer);
-#endif
     if (status == 0)
         status = upload(stream, config_buffer, &config, sizeof(config),
                         timeout_ms);
@@ -1565,10 +1468,6 @@ __host__ int main(int argc, char **argv)
         status = upload(stream, a_buffer, a.data(), a_bytes, timeout_ms);
     if (status == 0)
         status = upload(stream, bt_buffer, bt.data(), bt_bytes, timeout_ms);
-#if MATMUL_BF16_4C_D2A_MODEL
-    if (status == 0)
-        status = upload(stream, perf_buffer, &perf, sizeof(perf), timeout_ms);
-#endif
 
     if (status == 0) {
         const uint64_t cluster_tiles_m =
@@ -1598,40 +1497,10 @@ __host__ int main(int argc, char **argv)
                     (unsigned long long)cluster_tiles_n);
         status = MATMUL_BF16_4C_KERNEL(
             config_buffer, a_buffer, bt_buffer, c_buffer,
-#if MATMUL_BF16_4C_D2A_MODEL
-            perf_buffer,
-#endif
             &launch_attrs);
     }
 #if MATMUL_BF16_4C_D2A_MODEL
-    if (status == 0)
-        status = download(stream, &perf, perf_buffer, sizeof(perf),
-                          timeout_ms);
-    if (status == 0 &&
-        (perf.magic != kMatmulBf16D2APerfMagic || perf.m != m ||
-         perf.n != n || perf.k != k || !perf.kernel_cycles ||
-         !perf.pipeline_cycles || perf.pipeline_cycles > perf.kernel_cycles))
-        status = -1;
     if (status == 0) {
-        const double flops = 2.0 * (double)m * (double)n * (double)k;
-        const double peak = 4.0 * 4096.0;
-        const double pipeline_throughput =
-            flops / (double)perf.pipeline_cycles;
-
-        std::printf("[host] perf: kernel_cycles=%llu "
-                    "pipeline_cycles=%llu kernel_flops_per_cycle=%.3f "
-                    "pipeline_flops_per_cycle=%.3f "
-                    "pipeline_peak_utilization=%.2f%%\n",
-                    (unsigned long long)perf.kernel_cycles,
-                    (unsigned long long)perf.pipeline_cycles,
-                    flops / (double)perf.kernel_cycles,
-                    pipeline_throughput,
-                    pipeline_throughput * 100.0 / peak);
-        std::printf("[host] per-core pipeline cycles: %llu %llu %llu %llu\n",
-                    (unsigned long long)perf.core_pipeline_cycles[0],
-                    (unsigned long long)perf.core_pipeline_cycles[1],
-                    (unsigned long long)perf.core_pipeline_cycles[2],
-                    (unsigned long long)perf.core_pipeline_cycles[3]);
 #if MATMUL_BF16_4C_BROADCAST_MODEL
         std::printf("[host] PASS: direct broadcast timing model completed; "
                     "numerical validation intentionally skipped\n");
@@ -1650,10 +1519,6 @@ __host__ int main(int argc, char **argv)
         std::printf("%s demo failed: %d\n",
                     MATMUL_BF16_4C_KERNEL_DISPLAY, status);
 
-#if MATMUL_BF16_4C_D2A_MODEL
-    if (perf_buffer)
-        preserve_error(npu_buffer_destroy(perf_buffer), &status);
-#endif
     if (c_buffer)
         preserve_error(npu_buffer_destroy(c_buffer), &status);
     if (bt_buffer)

@@ -131,6 +131,7 @@ int operator_api_compile(dayan_resource_t resource,
     if (uram && !dayan_uram_size())
         status = -1;
     status |= dayan_cluster_barrier(4, barrier);
+    (void)dayan_get_time();
     dayan_yield();
     dayan_wait_dma();
     dayan_wait_lsu();

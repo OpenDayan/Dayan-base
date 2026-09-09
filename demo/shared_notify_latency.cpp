@@ -63,19 +63,11 @@ static_assert(sizeof(SharedNotifyResults::send_cycles) ==
                   kMaximumSamples * sizeof(uint64_t),
               "cycle sample layout changed unexpectedly");
 
-static inline uint64_t read_mcycle()
-{
-    uint64_t cycle;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycle) : : "memory");
-    return cycle;
-}
-
 static inline void delay_cycles(uint64_t cycles)
 {
-    const uint64_t begin = read_mcycle();
+    const uint64_t begin = dayan_get_time();
 
-    while (read_mcycle() - begin < cycles)
+    while (dayan_get_time() - begin < cycles)
         __asm__ volatile("" ::: "memory");
 }
 
@@ -111,7 +103,7 @@ static void run_receiver(uint64_t sample_count,
             DAYAN_RESOURCE_MASK(kAckResource),
             DAYAN_RESOURCE_MASK(kNotifyResource),
             iteration & 1U ? DAYAN_RESOURCE_MASK(kNotifyResource) : 0, 0));
-        const uint64_t receive_cycle = read_mcycle();
+        const uint64_t receive_cycle = dayan_get_time();
         require_status(dayan_resource_produce_lsu(
             kAckResource, 1U, DAYAN_RESOURCE_MASK(kNotifyResource)));
 
@@ -138,13 +130,13 @@ static void run_sender(uint64_t sample_count,
             DAYAN_RESOURCE_MASK(kArmedResource),
             iteration & 1U ? DAYAN_RESOURCE_MASK(kArmedResource) : 0, 0));
 
-        const uint64_t send_cycle = read_mcycle();
+        const uint64_t send_cycle = dayan_get_time();
         require_status(dayan_resource_produce_lsu(
             kNotifyResource, 1U, DAYAN_RESOURCE_MASK(kArmedResource)));
-        const uint64_t produce_return_cycle = read_mcycle();
+        const uint64_t produce_return_cycle = dayan_get_time();
 
         require_status(dayan_resource_wait_ready(kAckResource, iteration & 1U));
-        const uint64_t ack_cycle = read_mcycle();
+        const uint64_t ack_cycle = dayan_get_time();
         require_status(dayan_resource_consume_lsu(
             DAYAN_RESOURCE_MASK(kAckResource)));
 

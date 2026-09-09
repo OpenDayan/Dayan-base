@@ -41,6 +41,22 @@ make -C demo
 并保留 LSU/MAT TCSR 编号和 `set_lsu_matrix` 等 Dayan 辅助接口。dycc 会启用 TX
 扩展并把 Clang resource dir 加入 Device 编译，构建 demo 不需要 npu-kernels。
 
+## 性能采集
+
+普通算子只执行计算并校验结果，耗时和吞吐分析统一使用 `dyperf`。连接已启动的 Server
+后，可直接由 `dyperf` 启动算子并采集时间线：
+
+```sh
+make -C host/dyperf
+build/host/dyperf/dyperf -o matmul-trace.json -- \
+  build/demo/matmul_bf16_1c
+```
+
+专门的延迟、带宽基准确实需要 Device 时间戳时，调用 `<dayan_sys.h>` 中的
+`uint64_t dayan_get_time(void)`。它通过 `rdcycle` 返回当前 Hart 的周期计数，不做纳秒
+换算，也不等待执行单元完成；跨核相减要求平台的计数器同源且对齐。
+demo 不自行定义 `read_cycle` 或直接读取周期 CSR。
+
 ## 最小 FP32 Add
 
 两个示例都计算固定的 `A[64] + B[64] -> C[64]`，输入输出均为 FP32。
@@ -87,8 +103,6 @@ KT/VT 双缓冲，score/P 三缓冲。MAT worker 使用两个常驻配置组，�
 在同一个 VFork 尾部用 VEC 将 P 从 FP32 转成连续 FP16；PV 直接以 `mma`
 累加到 URAM 中的 FP32 O_acc。
 LSU 的通用配置只写一次，循环中没有重复刷新整组 TCSR。
-FP16 demo 还会回传从 worker 启动到全部 join 的流水周期，并以 QK/PV 的
-67,108,864 个矩阵 FLOPs 计算相对单 Core 4096 FLOPs/cycle 峰值的利用率。
 
 唯一的 Vec worker 每个 KV tile 发射一次 `DIM2=15` 的 VFork，生成 16 个
 FlexVec task。硬件将 task 分配到两个 Vec Group，每组最多同时运行 8 个 thread，
@@ -126,7 +140,7 @@ build/demo/flash_attention_1c --fp8
 `lsu_bandwidth` 隔离测试一个 Core 发射的连续 D2U，以及从本 Core URAM 到相邻 Core
 URAM 地址窗的 U2D。四个 Core 仅用于建立 Cluster URAM 映射；测量区间内只有 lane 0
 发射 DMA。每个尺寸都严格采用“发射一条 DMA、立即 `dayan_wait_lsu()`”的顺序，并用
-Device `mcycle` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期。测试结束
+`dayan_get_time()` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期。测试结束
 后另行回读 64 KiB 做数据校验，回读不计入带宽：
 
 ```sh
@@ -162,8 +176,8 @@ RUNNING 在上下文恢复前记录。跨 Hart 相减要求各 Hart 的 cycle co
 
 `shared_notify_latency` 隔离测量硬件 Shared Resource 的 core 0 -> core 1 通知路径。
 core 1 先通过逻辑 Shared Resource 0 发布 armed 握手，保证自己已经进入接收流程；
-core 0 随后在 `dayan_resource_produce_lsu()` 前记录 `mcycle`，core 1 在
-`dayan_resource_wait()` 返回后立即记录 `mcycle`。此外 core 1 会立刻
+core 0 随后在 `dayan_resource_produce_lsu()` 前调用 `dayan_get_time()`，core 1 在
+`dayan_resource_wait()` 返回后立即调用同一接口记录周期。此外 core 1 会立刻
 回 ACK，得到一个不依赖跨 Core 计数器对齐的 round-trip 对照。默认预热 16 次并采集
 64 个样本，可指定不超过 512 的样本数：
 
@@ -205,7 +219,7 @@ MAT consumer 在完成后用 `dayan_resource_consume_mat()` 释放输入。三�
 占用为 832 KiB。
 
 默认 Host case 为 `M=768, N=512, K=1536`。程序生成确定性 BF16 输入、执行 Device
-kernel、回传 Device `mcycle` 吞吐，并逐元素和 CPU 参考结果比较：
+kernel，并逐元素和 CPU 参考结果比较：
 
 ```sh
 build/demo/matmul_bf16_1c

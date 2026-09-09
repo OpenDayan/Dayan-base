@@ -47,14 +47,6 @@ static_assert(sizeof(ClusterShared) <= 1024,
 static_assert((kUramWindowStride & (kUramWindowStride - 1U)) == 0,
               "URAM window stride must be a power of two");
 
-static inline uint64_t read_mcycle()
-{
-    uint64_t cycles;
-
-    __asm__ volatile("csrr %0, mcycle" : "=r"(cycles) : : "memory");
-    return cycles;
-}
-
 template <long Group>
 static inline void configure_contiguous(uint64_t bytes)
 {
@@ -90,10 +82,10 @@ static void measure_d2u(const uint8_t *source, uint64_t local_uram,
         const uint64_t bytes = sizes[sample];
 
         configure_contiguous<0>(bytes);
-        uint64_t begin = read_mcycle();
+        uint64_t begin = dayan_get_time();
         issue_d2u(local_uram, source_base);
         dayan_wait_lsu();
-        uint64_t end = read_mcycle();
+        uint64_t end = dayan_get_time();
 
         results->samples[sample].bytes = bytes;
         results->samples[sample].cycles = end - begin;
@@ -115,10 +107,10 @@ static void measure_remote_u2d(uint64_t local_uram, uint64_t remote_uram,
         const uint64_t bytes = sizes[sample];
 
         configure_contiguous<0>(bytes);
-        uint64_t begin = read_mcycle();
+        uint64_t begin = dayan_get_time();
         issue_u2d(remote_uram, local_uram);
         dayan_wait_lsu();
-        uint64_t end = read_mcycle();
+        uint64_t end = dayan_get_time();
 
         results->samples[sample].bytes = bytes;
         results->samples[sample].cycles = end - begin;

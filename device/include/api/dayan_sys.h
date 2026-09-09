@@ -90,6 +90,9 @@ extern "C" {
 #endif
 
 DAYAN_API void dayan_yield(void);
+/* Current Hart cycle timestamp from rdcycle, not wall-clock time.
+ * Does not wait for execution units or synchronize Harts. Use dyperf for profiling. */
+DAYAN_API uint64_t dayan_get_time(void);
 DAYAN_API void dayan_thread_resources_init(dayan_thread_resources_t *resources);
 /* Name must be nonempty, NUL-terminated, and fit in DAYAN_THREAD_NAME_SIZE. */
 /* Creates a child Thread on the same Hart and returns its positive ID. */

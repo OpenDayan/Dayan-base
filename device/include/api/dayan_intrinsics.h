@@ -17,6 +17,7 @@
 #if defined(__riscv)
 #define __tx_vec_vv_fp32_max __dayan_builtin_tx_vec_vv_fp32_max
 #define __tx_vec_cvt_fp32_int32 __dayan_builtin_tx_vec_cvt_fp32_int32
+#define __tx_vec_cvt_s32_fp32 __dayan_builtin_tx_vec_cvt_s32_fp32
 #define __tx_vec_cvt_fp32_fp16 __dayan_builtin_tx_vec_cvt_fp32_fp16
 #define __tx_vec_cvt_fp32_bf16 __dayan_builtin_tx_vec_cvt_fp32_bf16
 #define __tx_vec_cvt_fp16_fp32 __dayan_builtin_tx_vec_cvt_fp16_fp32
@@ -24,6 +25,7 @@
 #include <rvt_intrinsics.h>
 #undef __tx_vec_vv_fp32_max
 #undef __tx_vec_cvt_fp32_int32
+#undef __tx_vec_cvt_s32_fp32
 #undef __tx_vec_cvt_fp32_fp16
 #undef __tx_vec_cvt_fp32_bf16
 #undef __tx_vec_cvt_fp16_fp32
@@ -257,6 +259,12 @@ template <long Vb, long Vrs1, long Rm>
 __attribute__((always_inline)) static inline void __tx_vec_cvt_fp32_int32()
 {
     BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 0>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_s32_fp32()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 1>();
 }
 
 template <long Vb, long Vrs1, long Rm>
