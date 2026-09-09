@@ -13,7 +13,7 @@ void platform_cache_invalidate(void *addr, size_t size);
 void platform_data_fence(void);
 void platform_instruction_fence(void);
 
-/* Standalone test hooks; boards may override the default AXI UARTLite output. */
+/* Standalone hooks publish ALIVE/RESULT/DONE and append output to a DRAM ring. */
 void platform_test_init(void *coherent_backing);
 long platform_print(const void *data, size_t size);
 void platform_test_complete(int64_t result);

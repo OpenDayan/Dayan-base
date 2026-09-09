@@ -54,7 +54,9 @@ starting the next record. Returning from a kernel means success;
 failed tests are reported and the remaining records still run. Traps and tensor
 interrupt reports fail the current test. A test that never exits still requires
 an external timeout. The suite prints its aggregate status, calls the weak
-`platform_test_complete(result)` hook and leaves the workers waiting.
+`platform_test_complete(result)` hook to publish RESULT/DONE and leaves the
+workers waiting. The default test-init hook publishes ALIVE before configuring
+the Atomic Cache backing.
 
 ## Build and boot
 
@@ -102,9 +104,11 @@ comes from cold reset, while the firmware initializes each Hart's local state.
 | --- | --- |
 | `0x80000000` through `__ram_used_end` | Image, CPU-local state, stacks, per-Hart heaps and test coherent backing |
 | `__test_heap_start` through `__test_heap_end` | Local RPC bump allocator, 64-byte granularity |
+| `[0x83ffef80, 0x83ffffc0)` | Device-test console header and 4096-byte circular buffer, excluded from the test heap |
+| `[0x83ffffc0, 0x84000000)` | Device-test status and simulator launch mailbox, excluded from the test heap |
 | `[0x84000000, 0xc4000000)` | Fixed 1 GiB test input/output area, never allocated or initialized by the runtime |
 
-The RPC heap uses the remaining configured firmware RAM below `0x84000000`.
+The test RPC heap uses the remaining configured firmware RAM below `0x83ffef80`.
 Overflow or exhaustion returns `-ENOMEM`; release acknowledges without reusing
 the backing range. Existing `malloc/free` still manage blocks inside each heap
 region, and request additional regions through this local RPC allocator.
@@ -117,10 +121,63 @@ is zeroed before execution; it is separate from the fixed input/output area.
 URAM and TCSR resources start at physical group zero and are reused after the
 preceding test finishes.
 
-The default weak `platform_print(data, size)` writes 32-bit AXI UARTLite TX FIFO
-accesses at `0x40600004`, polling TX-full at `0x40600008`. A board object linked
-before the archive can override `platform_print`, `platform_test_init` and
-`platform_test_complete`; these hooks must not call RPC-backed `printf`.
+The default weak `platform_print(data, size)` writes to a fixed DRAM circular
+buffer. It requires no UART model in QEMU or RTL. Local tests serialize output
+on Hart 0; the default hook assumes a single writer.
+
+| Address | Contents |
+| --- | --- |
+| `0x83ffef80` | Little-endian `uint64_t` cumulative byte count |
+| `0x83ffef88` | Little-endian `uint64_t` magic `0x44594c4f47303031` |
+| `[0x83ffef90, 0x83ffefc0)` | Reserved header bytes |
+| `[0x83ffefc0, 0x83ffffc0)` | 4096-byte circular character buffer |
+
+Initialization clears the header and data and sets the magic. Byte number `n`
+is stored at `0x83ffefc0 + (n % 4096)`; new output overwrites the oldest bytes.
+Each print flushes and fences the data before publishing and flushing the byte
+count. Given count `written`, retain `min(written, 4096)` bytes starting at
+`(written - min(written, 4096)) % 4096`, wrapping at the end of the buffer.
+The sim QEMU and RTL program runners export these bytes in chronological order
+as `device_console.log` in the corresponding artifact directory, including on
+failure when the initialized buffer is available. No metadata field is needed.
+
+A board object linked before the archive can override `platform_print`,
+`platform_test_init` and `platform_test_complete`; these hooks must not call
+RPC-backed `printf`.
+
+## Simulation completion protocol
+
+`dayan_test.h` defines the mailbox addresses below. The linker reserves their
+64-byte line for images containing `DAYAN_TEST` descriptors without adding a
+load segment at that address. The full 1 GiB test data reservation is unchanged.
+The normal Host/RPC boot path does not call the test hooks or publish this status.
+
+| Address | 64-bit word | Publisher and meaning |
+| --- | --- | --- |
+| `0x83ffffc0` | ALIVE | Hart 0 writes `0xcafe0001` when test platform initialization starts |
+| `0x83ffffc8` | RESULT | Hart 0 writes the signed aggregate return code, zero for success |
+| `0x83ffffd0` | DONE | Hart 0 writes `0xdead0001` after publishing RESULT |
+| `0x83ffffe0` | Launch flag | QEMU runner writes `1` after loading the binary and input data |
+| `0x83ffffe8` | Launch entry | QEMU runner writes the entry address, normally `0x80000000` |
+
+`platform_test_init` clears stale ALIVE, RESULT and DONE words before publishing
+ALIVE. It preserves the simulator's launch words. An Atomic Cache setup error
+publishes RESULT `-EIO` and DONE before halting. Otherwise, the launcher publishes
+RESULT/DONE once, after all descriptors, child threads and output have finished.
+Failed descriptors still allow the remaining descriptors to run.
+
+The default hooks order the stores with data fences and flush the mailbox cache
+line. Tests must finish their asynchronous work and flush cached DRAM output
+before returning; the hook does not scan or flush the whole 1 GiB data area.
+The smoke test flushes its three comparison regions before the second descriptor
+returns. Board overrides of these hooks must retain the same publication rules
+when used with this simulator protocol.
+
+Simulation metadata must select these ALIVE/DONE addresses and include
+`mailbox.result: { "addr": "0x83ffffc8", "value": 0 }`. QEMU and RTL wait for
+DONE and then check RESULT before comparing output. A nonzero RESULT fails the
+run even if both backends produced identical bytes. A hang that never publishes
+DONE is still handled by the simulator's timeout.
 
 ## Validation
 
@@ -137,7 +194,7 @@ illegal-instruction fault followed by another test. Override `RVTNG_CMODEL_DIR`
 or `RVTNG_QEMU` to select compatible simulator builds. Its temporary processes,
 mount and IPC resources are removed after each case.
 
-QEMU's `rvtng-v0` has no UART model. Only the cmodel test image links a
-semihosting implementation of `platform_print`; the production archive and the
-`baremetal-smoke` image retain AXI UARTLite output. Cmodel verifies functional
-behavior, not UART electrical behavior or RTL timing.
+The dedicated cmodel check image links a semihosting override of `platform_print`.
+The default archive hook, `baremetal-smoke` and normal `device_tests` use the
+DRAM circular buffer described above. Cmodel verifies functional behavior,
+not RTL timing.

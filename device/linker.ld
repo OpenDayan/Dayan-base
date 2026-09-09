@@ -14,6 +14,10 @@ __trap_stack_size = DEFINED(CONFIG_TRAP_STACK_SIZE) ? CONFIG_TRAP_STACK_SIZE : 0
 __heap_size = DEFINED(CONFIG_HEAP_SIZE) ? CONFIG_HEAP_SIZE : 0x100000;
 __test_data_start = 0x84000000;
 __test_data_end = 0xc4000000;
+__test_mailbox_start = __test_data_start - 64;
+__test_mailbox_end = __test_data_start;
+__test_log_start = __test_mailbox_start - 64 - 4096;
+__test_log_end = __test_mailbox_start;
 
 MEMORY
 {
@@ -156,7 +160,8 @@ SECTIONS
     } > RAM
     __ram_used_end = .;
     __test_heap_start = ALIGN(64);
-    __test_heap_end = MIN(ORIGIN(RAM) + LENGTH(RAM), __test_data_start);
+    __test_heap_end = MIN(ORIGIN(RAM) + LENGTH(RAM),
+                          SIZEOF(.npu_test) ? __test_log_start : __test_data_start);
 
     /* Coherent storage is Host-owned and must never enter the firmware ELF. */
     .coherent (NOLOAD) :
@@ -219,7 +224,7 @@ SECTIONS
            "image, per-hart stacks, and heaps exceed RAM")
     ASSERT(!SIZEOF(.npu_test) ||
            (ORIGIN(RAM) == 0x80000000 && __ram_used_end < __test_heap_end),
-           "bare-metal image must start at 0x80000000 and leave heap below test data")
+           "bare-metal image must start at 0x80000000 and leave heap below test log")
     ASSERT((SIZEOF(.npu_test) % 128) == 0,
            "test descriptor table must contain 128-byte records")
     ASSERT(!DEFINED(CONFIG_REQUIRE_TESTS) || SIZEOF(.npu_test),

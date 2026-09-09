@@ -63,6 +63,12 @@ static void second(void)
     check(*(volatile uint32_t *)(uintptr_t)(DAYAN_TEST_DATA_BASE +
                                           DAYAN_TEST_DATA_SIZE - 4U) ==
           0xfeedfaceU);
+    dayan_cache_flush((const void *)(uintptr_t)DAYAN_TEST_DATA_BASE,
+                      ELEMENTS * sizeof(uint32_t));
+    dayan_cache_flush(output, ELEMENTS * sizeof(*output));
+    dayan_cache_flush((const void *)(uintptr_t)(DAYAN_TEST_DATA_BASE +
+                                              DAYAN_TEST_DATA_SIZE - 4U),
+                      sizeof(uint32_t));
     free(allocation);
     printf("second: %u reference values and sequential completion verified\n",
            ELEMENTS);

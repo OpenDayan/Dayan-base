@@ -7,3 +7,4 @@ build/
 core
 core.*
 *.json
+!device_tests/*_test/meta.json
