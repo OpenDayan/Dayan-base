@@ -20,6 +20,7 @@ SCHEDULER_BENCH_TARGET := $(BUILD)/scheduler_yield_bench
 SHARED_NOTIFY_TARGET := $(BUILD)/shared_notify_latency
 MATMUL_1C_TARGET := $(BUILD)/matmul_bf16_1c
 MATMUL_4C_TARGET := $(BUILD)/matmul_bf16_4c
+MATMUL_LOWP_TARGETS := $(BUILD)/matmul_fp8_4c $(BUILD)/matmul_fp4_4c
 MATMUL_4C_BROADCAST_TARGET := $(BUILD)/matmul_bf16_broadcast_4c
 PRINT_TEMPS := $(BUILD)/print_demo-temps
 ADD_FP32_MACRO_TEMPS := $(BUILD)/add_fp32_macro-temps
@@ -42,6 +43,7 @@ TARGETS := $(PRINT_TARGET) $(ADD_FP32_MACRO_TARGET) $(ADD_FP32_VEC_TARGET) \
 	$(LSU_BANDWIDTH_TARGET) \
 	$(SCHEDULER_BENCH_TARGET) $(SHARED_NOTIFY_TARGET) \
 	$(MATMUL_1C_TARGET) $(MATMUL_4C_TARGET) \
+	$(MATMUL_LOWP_TARGETS) \
 	$(MATMUL_4C_BROADCAST_TARGET)
 .PHONY: all check run run-context run-interrupt run-matmul run-matmul-4c \
 	clean toolchain
@@ -153,6 +155,13 @@ $(MATMUL_4C_TARGET): matmul_bf16_4c.cpp $(DAYAN_API_HEADERS) \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(MATMUL_4C_TEMPS)/matmul_bf16_4c.cpp.dycc.device.o
+$(MATMUL_LOWP_TARGETS): $(BUILD)/%: %.cpp $(DAYAN_API_HEADERS) \
+		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(BUILD)/$*-temps -O2 -Wall -Wextra -Werror \
+		$< -o $@
+	bash $(DEVICE_ISA_CHECK) $(BUILD)/$*-temps/$*.cpp.dycc.device.o
+
 $(MATMUL_4C_BROADCAST_TARGET): matmul_bf16_broadcast_4c.cpp \
 		$(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
@@ -177,6 +186,8 @@ check: all
 	$(SHARED_NOTIFY_TARGET) --help >/dev/null
 	$(MATMUL_1C_TARGET) --help >/dev/null
 	$(MATMUL_4C_TARGET) --help >/dev/null
+	$(BUILD)/matmul_fp8_4c --help >/dev/null
+	$(BUILD)/matmul_fp4_4c --help >/dev/null
 	$(MATMUL_4C_BROADCAST_TARGET) --help >/dev/null
 
 run: all

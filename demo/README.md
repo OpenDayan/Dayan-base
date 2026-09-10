@@ -1,7 +1,7 @@
 # Dayan kernel demos
 
 该目录放置最小、可独立构建的 Dayan kernel 示例。目前包含 Device `printf`、
-FP32 Add、单 Core BF16 矩阵乘和四 Core 协作 BF16 矩阵乘。
+FP32 Add、单 Core BF16 矩阵乘和四 Core 协作 BF16/FP8/FP4 矩阵乘。
 
 ## 目录
 
@@ -15,6 +15,8 @@ demo/
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
 ├── matmul_bf16_4c.cpp           # 2x2 Cluster：4 个 slice、共享输入双缓冲、独立 Post
+├── matmul_fp8_4c.cpp            # 相同四核流水线，E4M3 输入，K tile=512
+├── matmul_fp4_4c.cpp            # 四核流水线，打包 E2M1，512×512×512 tile、4 个 slice
 ├── run_matmul_cmodel.sh
 ├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
@@ -35,7 +37,8 @@ make -C demo
 `build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、
 `build/demo/flash_attention_1c`、
-`build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c` 和
+`build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c`、
+`build/demo/matmul_fp8_4c`、`build/demo/matmul_fp4_4c` 和
 `build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
 `<rvt_intrinsics.h>`（`__builtin_riscv_tx_*`）提供；`dayan_intrinsics.h` 包含该头文件，
 并保留 LSU/MAT TCSR 编号和 `set_lsu_matrix` 等 Dayan 辅助接口。dycc 会启用 TX
@@ -325,6 +328,53 @@ M 维在两行 Core 之间连续等分，各行 Core 按 512 行推进；N 维�
 每对 Loader 通过 Shared Resource 选举 DRAM 加载者，对端从其 URAM 复制同一份输入。
 最后一个 K 分片完成后发布对应 C slice，Post 写回并异步消费，随后释放该缓冲。
 cmodel 日志默认位于 `build/cmodel/cmodel.log`。
+
+## 四 Core FP8 / FP4 matmul
+
+`matmul_fp8_4c` 和 `matmul_fp4_4c` 沿用 `matmul_bf16_4c` 的 2×2 Core
+划分、两个 Loader、根 Calc Proc、独立 Post、输入共享与 Resource Phase 流程。
+FP8 和 FP4 每核均保留 4 个 slice，FP4 的每核 tile 为 `512×512×512`。
+输入仍为 `A[M][K]` 和预转置的 `BT[N][K]`，输出为 FP32。
+
+| 算子 | 输入格式 | 每核 M×N×K tile | 默认 M×N×K |
+| --- | --- | --- | --- |
+| `matmul_fp8_4c` | E4M3，每元素 1 字节 | 512×384×512 | 1024×1536×3072 |
+| `matmul_fp4_4c` | E2M1，每字节 2 个元素 | 512×512×512 | 1024×1536×6144 |
+
+FP8 相对 BF16 的 K tile 扩大到 2 倍，M/N tile 和 slice 尺寸保持不变；
+A/B 的 URAM 行跨度为 512 字节，A 共享路径使用 1,472 KiB，B 共享路径使用
+1,408 KiB。FP4 的 M/N/K tile 尺寸均为 512，A/B 行跨度为 256 字节。
+共享 A 时每个 slice 为 `512×128×512`，共享 B 时为 `128×512×512`，
+即专有维度均为 128。每个 FP32 C 缓冲占 256 KiB，4 份共 1,024 KiB；
+共享输入双缓冲占 256 KiB，4 份专有输入各占 32 KiB，共 128 KiB。
+两条路径均使用 1,408 KiB，低于每核 1,536 KiB 的 URAM 容量。
+两种格式均直接执行 MAT MM/MMA，不使用分块 scale。
+
+FP4 沿 K 维打包：偶数索引在低半字节，奇数索引在高半字节，每行占
+`(K+1)/2` 字节。支持奇数 K，最后一个高半字节不参与计算；Host 校验时故意在
+该半字节放入非零值。FP8/FP4 的 K 尾块分别搬运 `real_k` 和 `(real_k+1)/2`
+字节，MAT 使用实际 K。N 仍须为 16 的整数倍，配置中的 stride 均以字节计。
+
+针对 FP8 的 A、BT、C 实际布局，用 `host/visual_swizzle/visual_swizzle.py` 在
+32 Bank 下搜索：A/BT 的 512B stride 使用 `M=7,B=2,S=3`，每拍 Bank 峰值
+由线性的 4x 降为 1x；C 的 384B stride 使用 identity `M=5,B=0,S=1`，峰值
+为 1x；C 的 1536B stride 使用 `M=7,B=2,S=3`，峰值由 4x 降为 1x。
+三种映射的连续四块覆盖均为 32/32。FP4 的 A/BT 使用 `M=7,B=1,S=3`，
+C 的 512B 行跨度使用 `M=7,B=2,S=3`，2048B 行跨度使用 `M=7,B=3,S=4`。
+LSU 与 MAT 使用一致映射，跨核复制仍直接搬运物理字节。
+这里的冲突指标来自布局模型，不是 RTL 性能测量。
+
+```sh
+make -C demo ../build/demo/matmul_fp8_4c ../build/demo/matmul_fp4_4c
+# 终端一：启动四核 cmodel
+NPU_CMODEL_HARTS=4 ./run_cmodel_server.sh
+# 终端二：运行默认尺寸并逐元素校验 CPU 参考结果
+build/demo/matmul_fp8_4c
+build/demo/matmul_fp4_4c
+```
+
+也可使用 `[M N K]` 参数指定尺寸；Host 根据对应格式生成确定性输入，解码后
+计算 FP32 参考结果，报告最大绝对/相对误差及 PASS/FAIL。
 
 ## 四 Core 直接广播性能模型
 

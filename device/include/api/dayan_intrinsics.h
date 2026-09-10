@@ -58,6 +58,7 @@ constexpr long DT_E4M3 = 0x04;
 constexpr long DT_E5M2 = 0x05;
 constexpr long DT_MXFP8_E4M3 = 0x06;
 constexpr long DT_MXFP8_E5M2 = 0x07;
+constexpr long DT_FP4_E2M1 = 0x08;
 constexpr long DT_S32 = 0x20;
 constexpr long DT_U32 = 0x21;
 constexpr long DT_S16 = 0x22;
