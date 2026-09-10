@@ -16,7 +16,7 @@ demo/
 ├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
 ├── matmul_bf16_4c.cpp           # 2x2 Cluster：4 个 slice、共享输入双缓冲、独立 Post
 ├── matmul_fp8_4c.cpp            # 相同四核流水线，E4M3 输入，K tile=512
-├── matmul_fp4_4c.cpp            # 四核流水线，打包 E2M1，512×512×512 tile、4 个 slice
+├── matmul_fp4_4c.cpp            # 四核流水线，打包 E2M1，512×512×640 tile、2 个 slice
 ├── run_matmul_cmodel.sh
 ├── run_matmul_4c_cmodel.sh
 ├── run_cmodel.sh
@@ -333,21 +333,21 @@ cmodel 日志默认位于 `build/cmodel/cmodel.log`。
 
 `matmul_fp8_4c` 和 `matmul_fp4_4c` 沿用 `matmul_bf16_4c` 的 2×2 Core
 划分、两个 Loader、根 Calc Proc、独立 Post、输入共享与 Resource Phase 流程。
-FP8 和 FP4 每核均保留 4 个 slice，FP4 的每核 tile 为 `512×512×512`。
+FP8 每核保留 4 个 slice，FP4 每核使用 2 个 slice，总 tile 为 `512×512×640`。
 输入仍为 `A[M][K]` 和预转置的 `BT[N][K]`，输出为 FP32。
 
 | 算子 | 输入格式 | 每核 M×N×K tile | 默认 M×N×K |
 | --- | --- | --- | --- |
 | `matmul_fp8_4c` | E4M3，每元素 1 字节 | 512×384×512 | 1024×1536×3072 |
-| `matmul_fp4_4c` | E2M1，每字节 2 个元素 | 512×512×512 | 1024×1536×6144 |
+| `matmul_fp4_4c` | E2M1，每字节 2 个元素 | 512×512×640 | 1024×2048×6144 |
 
 FP8 相对 BF16 的 K tile 扩大到 2 倍，M/N tile 和 slice 尺寸保持不变；
 A/B 的 URAM 行跨度为 512 字节，A 共享路径使用 1,472 KiB，B 共享路径使用
-1,408 KiB。FP4 的 M/N/K tile 尺寸均为 512，A/B 行跨度为 256 字节。
-共享 A 时每个 slice 为 `512×128×512`，共享 B 时为 `128×512×512`，
-即专有维度均为 128。每个 FP32 C 缓冲占 256 KiB，4 份共 1,024 KiB；
-共享输入双缓冲占 256 KiB，4 份专有输入各占 32 KiB，共 128 KiB。
-两条路径均使用 1,408 KiB，低于每核 1,536 KiB 的 URAM 容量。
+1,408 KiB。FP4 的 M/N tile 保持 512，K tile 为 640，A/B 行跨度为 320 字节。
+共享 A 时每个 slice 为 `512×256×640`，共享 B 时为 `256×512×640`，
+即专有维度均为 256。每个 FP32 C 缓冲占 512 KiB，2 份共 1,024 KiB；
+共享输入双缓冲占 320 KiB，2 份专有输入各占 80 KiB，共 160 KiB。
+两条路径均使用 1,504 KiB，剩余 32 KiB；申请 6 个 Local、8 个 Shared Resource。
 两种格式均直接执行 MAT MM/MMA，不使用分块 scale。
 
 FP4 沿 K 维打包：偶数索引在低半字节，奇数索引在高半字节，每行占
@@ -359,8 +359,14 @@ FP4 沿 K 维打包：偶数索引在低半字节，奇数索引在高半字节�
 32 Bank 下搜索：A/BT 的 512B stride 使用 `M=7,B=2,S=3`，每拍 Bank 峰值
 由线性的 4x 降为 1x；C 的 384B stride 使用 identity `M=5,B=0,S=1`，峰值
 为 1x；C 的 1536B stride 使用 `M=7,B=2,S=3`，峰值由 4x 降为 1x。
-三种映射的连续四块覆盖均为 32/32。FP4 的 A/BT 使用 `M=7,B=1,S=3`，
-C 的 512B 行跨度使用 `M=7,B=2,S=3`，2048B 行跨度使用 `M=7,B=3,S=4`。
+三种映射的连续四块覆盖均为 32/32。
+
+FP4 的 320B 输入行在线性布局下每拍 Bank 峰值已经为 1x，使用 identity
+`M=5,B=0,S=1`。VisualSwizzle 的无约束最优值 `(9,1,1)` 会跨行重排，
+不适用于当前尾行只复制 `real_rows×320B` 物理字节的跨核路径，因此不采用。
+C 的 1024B 行跨度使用 `M=7,B=3,S=3`，2048B 行跨度使用 `M=7,B=3,S=4`，
+两者每拍 Bank 峰值均由 8x 降为 1x，连续四块覆盖均为 32/32。
+旧 K=512 的输入 swizzle `(7,1,3)` 和四切片 C 的 `(7,2,3)` 保留在源码注释中。
 LSU 与 MAT 使用一致映射，跨核复制仍直接搬运物理字节。
 这里的冲突指标来自布局模型，不是 RTL 性能测量。
 

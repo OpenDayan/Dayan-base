@@ -5,7 +5,7 @@
 // Pack consecutive K values low nibble first; each row uses ceil(K/2) bytes.
 // For odd K the final high nibble is padding and is not included by MAT.
 // The 2x2 Core grid shares A horizontally and BT vertically.
-// Each Core has a 512x512 tile and four slices along the private dimension.
+// Each Core has a 512x512 tile and two slices along the private dimension.
 // One input is double-buffered; private inputs and C each have one buffer per slice.
 // Two Loader Threads, the root Calc Proc, and one Post Thread run per Core.
 struct MatmulFp4Config {
@@ -15,7 +15,7 @@ struct MatmulFp4Config {
 
 struct MatmulFp4Shape {
     enum : int {
-        kTileM = 512, kTileN = 512, kTileK = 512, kSlices = 4,
+        kTileM = 512, kTileN = 512, kTileK = 640, kSlices = 2,
         kInputRowBytes = kTileK / 2,
         kWorkers = 3, kAtomicBytes = 64, kUramBytes = 1536 * 1024,
     };
@@ -38,16 +38,22 @@ enum : int {
     LocalResources = 2 * Slices + 2, SharedResources = 2 * (Slices + 2),
 };
 enum : uint64_t {
-    // A/B stride 256B: addr[7] ^= addr[10].
-    // C stride 512B: addr[8:7] ^= addr[11:10].
-    // C stride 2048B: addr[9:7] ^= addr[13:11].
-    InputSwizzle = MAT_BATCH_SWIZZLE(7, 1, 3),
-    NarrowCSwizzle = MAT_BATCH_SWIZZLE(7, 2, 3),
+    // FP4 A/B row stride is K/2 bytes. Previous K=512: 256B -> (7,1,3).
+    // Original K=1024: 512B -> (7,2,3).
+    // K=640: 320B -> identity (5,0,1), already 1x peak in VisualSwizzle.
+    // Its unconstrained best (9,1,1) moves data between rows, incompatible
+    // with the peer's raw copy of exactly real_rows * InputRowBytes at tails.
+    InputSwizzle = MAT_BATCH_SWIZZLE(5, 0, 1),
+    // C depends on slice_n, not K. With TN=512 and A shared:
+    // previous 4 slices -> stride 512B -> (7,2,3);
+    // current 2 slices -> stride 1024B -> (7,3,3), addr[9:7] ^= addr[12:10].
+    NarrowCSwizzle = MAT_BATCH_SWIZZLE(7, 3, 3),
+    // B shared: C stride stays 2048B -> (7,3,4), addr[9:7] ^= addr[13:11].
     WideCSwizzle = MAT_BATCH_SWIZZLE(7, 3, 4),
     WindowBase = 0x00800000, WindowStride = 2 * 1024 * 1024,
 };
 static_assert(TM % Slices == 0 && TN % (Slices * 16) == 0);
-static_assert(Slices == 4 && InputRowBytes == 256);
+static_assert(Slices == 2 && InputRowBytes == 320);
 static_assert((2 * TM + TN) * InputRowBytes + TM * TN * 4 <=
               MatmulFp4Shape::kUramBytes);
 static_assert((TM + 2 * TN) * InputRowBytes + TM * TN * 4 <=
@@ -364,7 +370,7 @@ extern "C" __host__ char *getenv(const char *name);
 __host__ static void usage(const char *program)
 {
     std::printf("usage: %s [M N K]\n", program);
-    std::printf("  defaults: M=1024 N=1536 K=6144\n");
+    std::printf("  defaults: M=1024 N=2048 K=6144\n");
     std::printf("  N must be a multiple of 16; odd K is supported.\n");
     std::printf("  E2M1 inputs pack two values per byte, low nibble first.\n");
     std::printf("  B is generated/stored as BT[N][K], and C is FP32.\n");
@@ -571,7 +577,7 @@ __host__ static int validate_output(const std::vector<float> &actual,
 __host__ int main(int argc, char **argv)
 {
     uint64_t m = 1024;
-    uint64_t n = 1536;
+    uint64_t n = 2048;
     uint64_t k = 6144;
     size_t a_elements = 0;
     size_t bt_elements = 0;
