@@ -44,7 +44,7 @@ if "${link[@]}" >"$build/rejected.log" 2>&1; then
     echo 'linker-check: FAIL: accepted a truncated test descriptor' >&2
     exit 1
 fi
-grep -Fq 'test descriptor table must contain 128-byte records' "$build/rejected.log"
+grep -Fq 'test descriptor table must contain 320-byte records' "$build/rejected.log"
 
 "$clang" "${flags[@]}" -c "$script_dir/linker_global.c" -o "$build/global.o"
 if "${link[@]}" -Wl,--defsym=CONFIG_REQUIRE_TESTS=1 >"$build/rejected.log" 2>&1; then

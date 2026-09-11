@@ -118,7 +118,7 @@ struct rpc_proc_exit_request {
     uint64_t cookie;
 };
 
-#define RPC_PROC_MAX_ARGS             8U
+#define RPC_PROC_MAX_ARGS             32U
 #define RPC_PROC_SLOTS_PER_HART       16U
 #define RPC_PROC_NAME_SIZE            16U
 #define RPC_PROC_MIN_STACK_SIZE       1024U
@@ -355,23 +355,23 @@ _Static_assert(offsetof(struct rpc_proc_create_request, entry) == 8,
                "Host proc entry offset");
 _Static_assert(offsetof(struct rpc_proc_create_request, args) == 56,
                "Host proc argument offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, status) == 128,
+_Static_assert(offsetof(struct rpc_proc_create_request, status) == 320,
                "Host proc status offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, task_id) == 152,
+_Static_assert(offsetof(struct rpc_proc_create_request, task_id) == 344,
                "Host proc task ID offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, task_dim) == 164,
+_Static_assert(offsetof(struct rpc_proc_create_request, task_dim) == 356,
                "Host proc task dimension offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, task_mode) == 120,
+_Static_assert(offsetof(struct rpc_proc_create_request, task_mode) == 312,
                "Host proc task mode offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 124,
+_Static_assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 316,
                "Host proc child resource offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, uram_base) == 184,
+_Static_assert(offsetof(struct rpc_proc_create_request, uram_base) == 376,
                "Host proc URAM base offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, tensor_context) == 200,
+_Static_assert(offsetof(struct rpc_proc_create_request, tensor_context) == 392,
                "Host proc tensor Context offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, name) == 208,
+_Static_assert(offsetof(struct rpc_proc_create_request, name) == 400,
                "Host proc name offset");
-_Static_assert(sizeof(struct rpc_proc_create_request) == 224,
+_Static_assert(sizeof(struct rpc_proc_create_request) == 416,
                "Host proc create ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_proc_info, result) == 56,
                "Host proc info result offset");

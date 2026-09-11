@@ -34,6 +34,10 @@ enum slot_state {
     SLOT_KILLED, /* Token pending; cleared once in thread_kill_resume. */
 };
 
+_Static_assert(PROC_MAX_ARGS == RPC_PROC_MAX_ARGS, "Proc argument ABI");
+_Static_assert(PROC_FRAME_SIZE + (PROC_MAX_ARGS - PROC_REGISTER_ARGS) *
+                   sizeof(uintptr_t) <= RPC_PROC_MIN_STACK_SIZE,
+               "Proc arguments fit the minimum stack");
 _Static_assert(THREAD_RUNNING == 0, "assembly stores zero for RUNNING");
 _Static_assert(offsetof(struct thread, state) == THREAD_STATE_OFFSET,
                "assembly thread state offset");
@@ -159,10 +163,19 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
 {
     struct thread_runtime *runtime = &cpu_self()->threads;
     uintptr_t top = ((uintptr_t)stack + stack_size) & ~(uintptr_t)0xf;
+    size_t register_argc = argc < PROC_REGISTER_ARGS ? argc : PROC_REGISTER_ARGS;
+    size_t stack_argc = argc - register_argc;
+    top -= (stack_argc * sizeof(uintptr_t) + 15U) & ~(uintptr_t)0xf;
     struct proc_frame *frame = (struct proc_frame *)(top - sizeof(*frame));
+    uintptr_t *stack_args = (uintptr_t *)top;
 
-    memset(thread, 0, sizeof(*thread));
-    memcpy(thread->name, name, strlen(name));
+    /* Initialize live fields once; do not byte-clear them before overwriting. */
+    thread->node = (struct thread_list_node){0, 0};
+    thread->tensor_context = 0;
+    thread->resource_context = 0;
+    thread->token_ext = 0;
+    thread->profile_defined = 0;
+    strncpy(thread->name, name, sizeof(thread->name));
     if (!++runtime->generation[slot])
         ++runtime->generation[slot];
     thread->type = type;
@@ -172,7 +185,11 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
     thread->parent = THREAD_SLOT_NONE;
     frame->entry = (uintptr_t)entry;
     frame->ra = (uintptr_t)thread_exit;
-    memcpy(frame->args, args, argc * sizeof(*args));
+    for (size_t i = 0; i < register_argc; ++i)
+        frame->args[i] = args[i];
+    /* Stack arguments go directly to their final ABI locations. */
+    for (size_t i = 0; i < stack_argc; ++i)
+        stack_args[i] = args[PROC_REGISTER_ARGS + i];
     frame->shared = (uintptr_t)shared_base;
     frame->reserved = 0;
     thread->sp = (uintptr_t)frame;
@@ -195,7 +212,7 @@ static void task_proc_release(uint8_t root)
 {
     struct thread_runtime *runtime = &cpu_self()->threads;
 
-    for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
+    for (uint8_t slot = root; slot <= TASK_SLOT_LAST; ++slot) {
         if (runtime->slot_owner[TASK_INDEX(slot)] != root)
             continue;
         runtime->slot_owner[TASK_INDEX(slot)] = THREAD_SLOT_NONE;
@@ -208,6 +225,7 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
     struct thread_runtime *runtime = &cpu_self()->threads;
     struct task_proc *task;
     uint8_t root = THREAD_SLOT_NONE;
+    uint8_t last = THREAD_SLOT_NONE;
     unsigned remaining = 1U + request->max_child_threads;
 
     for (uint8_t slot = TASK_SLOT_FIRST;
@@ -217,7 +235,8 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
         if (root == THREAD_SLOT_NONE)
             root = slot;
         runtime->slot_owner[TASK_INDEX(slot)] = root;
-        runtime->slot_state[slot] = slot == root ? SLOT_ROOT : SLOT_RESERVED;
+        runtime->slot_state[slot] = SLOT_RESERVED;
+        last = slot;
         --remaining;
     }
     if (remaining) {
@@ -227,10 +246,12 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
     }
 
     task = (struct task_proc *)thread_slot_get(root);
-    memcpy(task->descriptor.task_id, request->task_id,
-           sizeof(task->descriptor.task_id));
-    memcpy(task->descriptor.task_dim, request->task_dim,
-           sizeof(task->descriptor.task_dim));
+    runtime->slot_state[root] = SLOT_ROOT;
+    task->descriptor.last_slot = last;
+    for (size_t axis = 0; axis < 3; ++axis) {
+        task->descriptor.task_id[axis] = request->task_id[axis];
+        task->descriptor.task_dim[axis] = request->task_dim[axis];
+    }
     task->descriptor.task_mode = (uint8_t)request->task_mode;
     task->descriptor.child_stack_size_m1 = (uint16_t)(request->stack_size - 1U);
     task->descriptor.child_printf_size = (uint16_t)request->printf_buffer_size;
@@ -292,6 +313,7 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
     uintptr_t arg = (uintptr_t)argument;
     uint8_t root, child_slot = THREAD_SLOT_NONE;
     uint8_t used_lsu = 0, used_mat = 0, used_vec = 0, used_macro = 0;
+    int needs_tcsr;
 
     if (!task)
         return -EPERM;
@@ -313,15 +335,21 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
     root = thread_slot_id(&task->thread);
     root_context = dayan_context_unpack(task->thread.tensor_context);
     root_resources = dayan_resource_context_unpack(task->thread.resource_context);
-    for (uint8_t slot = TASK_SLOT_FIRST; slot <= TASK_SLOT_LAST; ++slot) {
+    needs_tcsr = resources->lsu_tcsr_count | resources->mat_tcsr_count |
+                 resources->vec_tcsr_count | resources->macro_tcsr_count;
+    /* Reservations are made in ascending order; no child lies below root. */
+    for (uint8_t slot = root + 1; slot <= task->descriptor.last_slot; ++slot) {
         struct dayan_context_fields context;
 
         if (runtime->slot_owner[TASK_INDEX(slot)] != root)
             continue;
         if (runtime->slot_state[slot] == SLOT_RESERVED &&
-            child_slot == THREAD_SLOT_NONE)
+            child_slot == THREAD_SLOT_NONE) {
             child_slot = slot;
-        if (runtime->slot_state[slot] != SLOT_CHILD)
+            if (!needs_tcsr)
+                break;
+        }
+        if (!needs_tcsr || runtime->slot_state[slot] != SLOT_CHILD)
             continue;
         context = dayan_context_unpack(thread_slot_get(slot)->tensor_context);
         used_lsu |= child_tcsr_mask(root_context.lsu, context.lsu);
@@ -353,8 +381,9 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
                   entry, runtime->stacks[TASK_INDEX(child_slot)],
                   task_child_stack_size(task), task_shared_base(task), 1, &arg);
     child->parent = thread_slot_id(current);
-    child->tensor_context = dayan_context_pack(&child_context);
-    child->resource_context = dayan_resource_context_pack(&child_resources);
+    /* Host validated root; reservation bounded every child range by root. */
+    child->tensor_context = dayan_context_pack_validated(&child_context);
+    child->resource_context = dayan_resource_context_pack_validated(&child_resources);
     runtime->slot_state[child_slot] = SLOT_CHILD;
     thread_schedule(child);
     return thread_id(child);

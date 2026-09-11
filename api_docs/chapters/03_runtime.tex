@@ -50,9 +50,9 @@ Runtime 不访问寄存器或中断设备。公开入口由
   API & 含义 \\
   \code{NPU_RUNTIME_OPTIONS_VERSION} / \code{NPU_CONTEXT_DESC_VERSION} & Runtime 配置和握手版本为 5，Context 描述符版本为 1。 \\
   \code{NPU_BUFFER_DESC_VERSION} / \code{NPU_STREAM_DESC_VERSION} & Buffer 和 Stream 描述符版本均为 1。 \\
-  \code{NPU_LAUNCH_DESC_VERSION} / \code{NPU_PROFILE_OPTIONS_VERSION} & 启动描述符版本为 3，性能采样配置版本为 1。 \\
+  \code{NPU_LAUNCH_DESC_VERSION} / \code{NPU_PROFILE_OPTIONS_VERSION} & 启动描述符版本为 4，性能采样配置版本为 1。 \\
   \code{NPU_TIMEOUT_INFINITE} & Runtime 等待接口使用的无限超时值。 \\
-  \code{NPU_KERNEL_MAX_ARGS} & 一个 kernel launch 最多 8 个参数。 \\
+  \code{NPU_KERNEL_MAX_ARGS} & 一个 kernel launch 最多 32 个参数。 \\
   \code{NPU_PROC_NAME_SIZE} & Task/Proc 名称固定 16 B。 \\
   \code{NPU_DEFAULT_SERVER_SOCKET} & 默认 Server 监听地址为 \code{/tmp/dayan-server.sock}。 \\
   \code{NPU_PROFILE_DEFAULT_BUFFER_SIZE} & 全设备共用的默认性能采样缓冲区为 16 MiB。 \\
@@ -208,7 +208,7 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
   API & 含义 \\
   \code{NPU_PACKAGE_MAGIC} / \code{NPU_PACKAGE_VERSION} / \code{NPU_PACKAGE_HEADER_SIZE} & 当前程序包格式的魔数、版本 5 和 128 字节头部。 \\
   \code{NPU_PACKAGE_KERNEL_VERSION} / \code{NPU_PACKAGE_MAX_KERNELS} & 算子记录版本为 5；一个程序包最多包含 4096 个算子。 \\
-  \code{NPU_PACKAGE_MAX_ARGS} & 一个算子最多有 8 个参数。 \\
+  \code{NPU_PACKAGE_MAX_ARGS} & 一个算子最多有 32 个参数。 \\
   \code{NPU_PACKAGE_HART_MAX_PROCS} / \code{NPU_PACKAGE_MAX_CHILD_THREADS} & 每个 Hart 有 16 个用户 Proc 资源槽，根 Proc 最多声明 15 个子 Thread。 \\
   \code{NPU_PACKAGE_PROC_MIN_STACK_SIZE} / \code{NPU_PACKAGE_PROC_STACK_SIZE} & Proc 栈最小为 1 KiB，当前固定大小和上限均为 64 KiB。 \\
   \code{NPU_PACKAGE_PROC_PRINTF_SIZE} / \code{NPU_PACKAGE_URAM_GRANULE} & 默认输出缓冲区为 4 KiB，URAM 分配粒度为 32 KiB。 \\

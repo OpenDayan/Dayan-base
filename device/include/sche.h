@@ -23,6 +23,7 @@ struct task_descriptor {
     uint16_t child_stack_size_m1;
     uint16_t child_printf_size;
     uint8_t task_mode;
+    uint8_t last_slot; /* Family slots lie between root and this slot. */
 };
 
 struct task_proc {

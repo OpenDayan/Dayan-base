@@ -20,7 +20,7 @@
 #define DAYAN_TEST_LAUNCH_ENTRY_ADDR (DAYAN_TEST_MAILBOX_BASE + 40U)
 #define DAYAN_TEST_ALIVE_VALUE 0xcafe0001ULL
 #define DAYAN_TEST_DONE_VALUE 0xdead0001ULL
-#define DAYAN_TEST_MAX_ARGS 8U
+#define DAYAN_TEST_MAX_ARGS 32U
 
 /* One local root Proc, run on Hart 0 in link order. Child Threads are allowed. */
 typedef struct dayan_test_desc {

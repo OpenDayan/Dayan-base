@@ -51,11 +51,10 @@ static inline int dayan_context_fields_valid(
            dayan_tcsr_range_valid(fields->macro);
 }
 
-static inline uint64_t dayan_context_pack(
+/* Internal paths whose ranges have already been checked/suballocated. */
+static inline uint64_t dayan_context_pack_validated(
     const struct dayan_context_fields *fields)
 {
-    if (!dayan_context_fields_valid(fields))
-        return UINT64_MAX;
     return (uint64_t)fields->uram_lo |
            ((uint64_t)fields->uram_hi << 8) |
            ((uint64_t)fields->lsu.count << 16) |
@@ -66,6 +65,13 @@ static inline uint64_t dayan_context_pack(
            ((uint64_t)fields->vec.base << 40) |
            ((uint64_t)fields->macro.count << 46) |
            ((uint64_t)fields->macro.base << 50);
+}
+
+static inline uint64_t dayan_context_pack(
+    const struct dayan_context_fields *fields)
+{
+    return dayan_context_fields_valid(fields) ?
+        dayan_context_pack_validated(fields) : UINT64_MAX;
 }
 
 static inline struct dayan_context_fields dayan_context_unpack(uint64_t value)
@@ -100,15 +106,20 @@ static inline int dayan_resource_context_fields_valid(
            dayan_resource_range_valid(fields->shared);
 }
 
-static inline uint32_t dayan_resource_context_pack(
+static inline uint32_t dayan_resource_context_pack_validated(
     const struct dayan_resource_context_fields *fields)
 {
-    if (!dayan_resource_context_fields_valid(fields))
-        return UINT32_MAX;
     return (uint32_t)fields->local.base |
            ((uint32_t)fields->local.count << 5) |
            ((uint32_t)fields->shared.base << 11) |
            ((uint32_t)fields->shared.count << 16);
+}
+
+static inline uint32_t dayan_resource_context_pack(
+    const struct dayan_resource_context_fields *fields)
+{
+    return dayan_resource_context_fields_valid(fields) ?
+        dayan_resource_context_pack_validated(fields) : UINT32_MAX;
 }
 
 static inline struct dayan_resource_context_fields

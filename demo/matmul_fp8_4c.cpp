@@ -6,10 +6,6 @@
 // Keep the original layout: one operand has four slices, the other two
 // physical buffers. Each slice has its own C tile and one local Resource.
 // Two Loader Threads, the root Calc Proc, and one Post Thread run per Core.
-struct MatmulFp8Config {
-    uint64_t m, n, k;
-    uint64_t a_stride, bt_stride, c_stride;
-};
 
 struct MatmulFp8Shape {
     enum : int {
@@ -47,6 +43,10 @@ enum : uint64_t {
 static_assert(TM % Slices == 0 && TN % (Slices * 16) == 0);
 static_assert(InputRowBytes == 512);
 static_assert(SharedResources <= 32);
+static_assert(2ULL * TM * InputRowBytes + TN * InputRowBytes +
+              4ULL * TM * TN <= MatmulFp8Shape::kUramBytes);
+static_assert(TM * InputRowBytes + 2ULL * TN * InputRowBytes +
+              4ULL * TM * TN <= MatmulFp8Shape::kUramBytes);
 
 struct Cluster {
     dayan_cluster_barrier_t barrier;
@@ -59,15 +59,11 @@ struct Buffer {
     dayan_resource_t resource;
 };
 struct State {
-    const MatmulFp8Config *cfg;
+    uint64_t m, n, k, a_stride, bt_stride, c_stride;
     uint64_t input[2], output, uram, generations;
+    uint64_t b_base, c_base;
     int lane, nt, kt, slice_m, slice_n;
     bool buffer_a;
-    Buffer a[Slices], b[Slices], c[Slices];
-};
-struct LoadArgs {
-    State *state;
-    bool b;
 };
 struct Node {
     uint64_t row, col;
@@ -79,6 +75,24 @@ static int extent(int64_t remaining, int size)
     return remaining <= 0 ? 0 : (remaining < size ? (int)remaining : size);
 }
 
+static Buffer a_buffer(const State &s, int index)
+{
+    return {s.uram + (uint64_t)index * s.slice_m * InputRowBytes,
+            DAYAN_LOCAL_RESOURCE(index)};
+}
+
+static Buffer b_buffer(const State &s, int index)
+{
+    return {s.b_base + (uint64_t)index * s.slice_n * InputRowBytes,
+            DAYAN_LOCAL_RESOURCE((s.buffer_a ? 2 : Slices) + index)};
+}
+
+static Buffer c_buffer(const State &s, int index)
+{
+    return {s.c_base + (uint64_t)index * s.slice_m * s.slice_n * 4,
+            DAYAN_LOCAL_RESOURCE(Slices + 2 + index)};
+}
+
 // All stages use the same (output tile, K tile, slice) order. phase selects
 // the physical double buffer; Resource lifecycle phases are tracked separately.
 static Node node(const State &s, uint64_t generation, int slice, int lane)
@@ -86,12 +100,12 @@ static Node node(const State &s, uint64_t generation, int slice, int lane)
     const uint64_t out = generation / s.kt;
     const int step = (int)(generation % s.kt);
     const int phase = (int)(generation & 1);
-    const uint64_t begin = s.cfg->m * (lane >> 1) / 2;
-    const uint64_t end = s.cfg->m * ((lane >> 1) + 1) / 2;
+    const uint64_t begin = s.m * (lane >> 1) / 2;
+    const uint64_t end = s.m * ((lane >> 1) + 1) / 2;
     const uint64_t row = begin + out / s.nt * TM;
     const uint64_t col = (out % s.nt * 2 + (lane & 1)) * TN;
     const int rows = extent((int64_t)end - (int64_t)row, TM);
-    const int cols = extent((int64_t)s.cfg->n - (int64_t)col, TN);
+    const int cols = extent((int64_t)s.n - (int64_t)col, TN);
     const int row_offset = s.buffer_a ? 0 : slice * s.slice_m;
     const int col_offset = s.buffer_a ? slice * s.slice_n : 0;
     const int users = s.buffer_a ? (cols + s.slice_n - 1) / s.slice_n
@@ -99,7 +113,7 @@ static Node node(const State &s, uint64_t generation, int slice, int lane)
     return {row + row_offset, col + col_offset,
             extent(rows - row_offset, s.slice_m),
             extent(cols - col_offset, s.slice_n),
-            extent((int64_t)s.cfg->k - (int64_t)step * TK, TK), step, phase,
+            extent((int64_t)s.k - (int64_t)step * TK, TK), step, phase,
             s.buffer_a ? phase : slice, s.buffer_a ? slice : phase, users};
 }
 
@@ -109,11 +123,10 @@ static void check(int status)
         dayan_thread_exit(status);
 }
 
+template<bool b>
 static void loader(void *argument)
 {
-    const LoadArgs &args = *(LoadArgs *)argument;
-    const State &s = *args.state;
-    const bool b = args.b;
+    const State &s = *(State *)argument;
     const bool buffered = b ? !s.buffer_a : s.buffer_a;
     const int peer = s.lane ^ (b ? 2 : 1);
     const int pair = b ? s.lane & 1 : s.lane >> 1;
@@ -129,7 +142,7 @@ static void loader(void *argument)
             const bool peer_active = other.rows && other.cols;
             if (!active && !peer_active)
                 continue;
-            const Buffer &dst = b ? s.b[n.b_index] : s.a[n.a_index];
+            const Buffer dst = b ? b_buffer(s, n.b_index) : a_buffer(s, n.a_index);
             const int index = buffered ? 2 * Slices + pair * 2 + n.phase
                                        : pair * Slices + slice;
             const auto ready = DAYAN_SHARED_RESOURCE(index);
@@ -137,7 +150,7 @@ static void loader(void *argument)
             const int rows = b ? n.cols : n.rows;
             const int bytes = n.inner;
             const uint32_t users = buffered ? n.users : 1;
-            const uint64_t stride = b ? s.cfg->bt_stride : s.cfg->a_stride;
+            const uint64_t stride = b ? s.bt_stride : s.a_stride;
             uint64_t src = s.input[b] + (b ? n.col : n.row) * stride +
                            (uint64_t)n.step * InputRowBytes;
 
@@ -200,7 +213,8 @@ static void calc(void *argument)
             const Node n = node(s, gen, slice, s.lane);
             if (!n.rows || !n.cols)
                 continue;
-            const Buffer &a = s.a[n.a_index], &b = s.b[n.b_index], &c = s.c[slice];
+            const Buffer a = a_buffer(s, n.a_index), b = b_buffer(s, n.b_index);
+            const Buffer c = c_buffer(s, slice);
             const auto inputs = DAYAN_RESOURCE_MASK(a.resource) |
                                 DAYAN_RESOURCE_MASK(b.resource);
             check(dayan_resource_wait(
@@ -233,7 +247,7 @@ static void post(void *argument)
     uint64_t phases = 0;
     long checksum = 0;
     set_lsu_matrix<0>(checksum, s.slice_m, s.slice_n * 4,
-                      s.slice_n * 4, s.cfg->c_stride);
+                      s.slice_n * 4, s.c_stride);
     __tx_lsu_tcsr_write<LSU_URAMREADSWIZZLEMBS>(
         s.buffer_a ? NarrowCSwizzle : WideCSwizzle);
     for (uint64_t gen = s.kt - 1; gen < s.generations; gen += s.kt) {
@@ -241,14 +255,14 @@ static void post(void *argument)
             const Node n = node(s, gen, slice, s.lane);
             if (!n.rows || !n.cols)
                 continue;
-            const Buffer &c = s.c[slice];
+            const Buffer c = c_buffer(s, slice);
             const auto mask = DAYAN_RESOURCE_MASK(c.resource);
             check(dayan_resource_wait(0, mask, phases, 0));
             // No activation yet: store C directly. A future compute stage needs
             // its own Output Buffer; C can be released once that compute completes.
             __tx_lsu_tcsr_write<LSU_DIM0>(n.cols * 4 / 64 - 1);
             __tx_lsu_tcsr_write<LSU_DIM1>(n.rows - 1);
-            const uint64_t dst = s.output + n.row * s.cfg->c_stride + n.col * 4;
+            const uint64_t dst = s.output + n.row * s.c_stride + n.col * 4;
             __tx_lsu_dma_u2d<0>((long)dst, (long)c.uram);
             check(dayan_resource_consume_lsu(mask));
             phases ^= mask;
@@ -257,82 +271,51 @@ static void post(void *argument)
     dayan_wait_lsu();
 }
 
-static bool config_valid(const MatmulFp8Config *c)
-{
-    constexpr uint64_t limit = 0x7ffff000ULL;
-    if (!c || !c->m || !c->n || !c->k || c->m > limit ||
-        c->n > limit || c->k > limit || c->n % 16)
-        return false;
-    const uint64_t rows[] = {c->m, c->n, c->m};
-    const uint64_t widths[] = {c->k, c->k, c->n * 4};
-    const uint64_t strides[] = {c->a_stride, c->bt_stride, c->c_stride};
-    for (int i = 0; i < 3; ++i)
-        if (strides[i] < widths[i] || strides[i] > INT64_MAX / rows[i])
-            return false;
-    return !(c->c_stride & 63);
-}
-
 } // namespace matmul_fp8_4c_detail
 #endif
 
-__kernel__ void matmul_fp8_4c(const MatmulFp8Config *config,
-                              const uint8_t *a, const uint8_t *bt, float *c)
+__kernel__ void matmul_fp8_4c(uint64_t m, uint64_t n, uint64_t k,
+                              uint64_t a_stride, uint64_t bt_stride,
+                              uint64_t c_stride, const uint8_t *a,
+                              const uint8_t *bt, float *c)
 {
     using namespace matmul_fp8_4c_detail;
-    const int lane = dayan_task_id(DAYAN_TASK_X);
-    if (!config_valid(config) || !a || !bt || !c || !shared ||
-        ((uintptr_t)c & 63) ||
-        dayan_task_mode() != 4 || lane >= 4 ||
-        dayan_task_dim(DAYAN_TASK_X) != 4 ||
-        dayan_task_dim(DAYAN_TASK_Y) != 1 || dayan_task_dim(DAYAN_TASK_Z) != 1)
-        dayan_thread_exit(-22);
-    State s = {};
-    s.cfg = config;
+    // The demo Host validates shape/size and launches exactly four lanes.
+    State s;
+    s.m = m;
+    s.n = n;
+    s.k = k;
+    s.a_stride = a_stride;
+    s.bt_stride = bt_stride;
+    s.c_stride = c_stride;
     s.input[0] = (uintptr_t)a;
     s.input[1] = (uintptr_t)bt;
     s.output = (uintptr_t)c;
-    s.lane = lane;
-    s.nt = (int)((config->n + 2 * TN - 1) / (2 * TN));
-    s.kt = (int)((config->k + TK - 1) / TK);
-    const uint64_t outputs = (config->m + 2 * TM - 1) / (2 * TM) * s.nt;
-    if (outputs > UINT64_MAX / s.kt)
-        dayan_thread_exit(-22);
+    s.nt = (int)((n + 2 * TN - 1) / (2 * TN));
+    s.kt = (int)((k + TK - 1) / TK);
+    const uint64_t outputs = (m + 2 * TM - 1) / (2 * TM) * s.nt;
+    // Host caps each matrix at 64 MiB, which also bounds this product.
     s.generations = outputs * s.kt;
-    s.buffer_a = config->m < config->n;
+    s.buffer_a = m < n;
     s.slice_m = s.buffer_a ? TM : TM / Slices;
     s.slice_n = s.buffer_a ? TN / Slices : TN;
-    const int counts[] = {s.buffer_a ? 2 : Slices, s.buffer_a ? Slices : 2, Slices};
-    const uint64_t bytes[] = {(uint64_t)s.slice_m * InputRowBytes,
-                              (uint64_t)s.slice_n * InputRowBytes,
-                              (uint64_t)s.slice_m * s.slice_n * 4};
-    const uint64_t required = counts[0] * bytes[0] + counts[1] * bytes[1] +
-                              counts[2] * bytes[2];
+    const int lane = dayan_task_id(DAYAN_TASK_X);
+    s.lane = lane;
     const uint64_t physical = (uintptr_t)dayan_uram_base();
     const uint64_t window = WindowBase + lane * WindowStride;
-    if (required > MatmulFp8Shape::kUramBytes || dayan_uram_size() < required ||
-        physical < window || physical - window > WindowStride - required)
-        dayan_thread_exit(-12);
     s.uram = physical - window;
-    uint64_t address = s.uram;
-    int resource = 0;
-    Buffer *buffers[] = {s.a, s.b, s.c};
-    for (int operand = 0; operand < 3; ++operand) {
-        for (int i = 0; i < counts[operand]; ++i) {
-            buffers[operand][i] = {address, DAYAN_LOCAL_RESOURCE(resource++)};
-            address += bytes[operand];
-        }
-    }
+    s.b_base = s.uram + (s.buffer_a ? 2ULL * TM : TM) * InputRowBytes;
+    s.c_base = s.b_base + (s.buffer_a ? TN : 2ULL * TN) * InputRowBytes;
+    static constexpr dayan_thread_resources_t resources = {
+        1, 0, 0, 0, LocalResources, SharedResources, 0,
+    };
+    // Post only waits on local C, so it can be queued before peer setup.
+    check(dayan_create_thread("post", post, &s, &resources));
     Cluster &cluster = *(Cluster *)shared;
     cluster.uram[lane] = physical;
     check(dayan_cluster_barrier(4, &cluster.barrier));
-    LoadArgs loads[] = {{&s, false}, {&s, true}};
-    dayan_thread_resources_t resources = {};
-    resources.lsu_tcsr_count = 1;
-    resources.local_resource_count = LocalResources;
-    resources.shared_resource_count = SharedResources;
-    check(dayan_create_thread("load-a", loader, &loads[0], &resources));
-    check(dayan_create_thread("load-b", loader, &loads[1], &resources));
-    check(dayan_create_thread("post", post, &s, &resources));
+    check(dayan_create_thread("load-a", loader<false>, &s, &resources));
+    check(dayan_create_thread("load-b", loader<true>, &s, &resources));
     calc(&s);
     check(dayan_thread_join_all());
     check(dayan_cluster_barrier(4, &cluster.barrier));
@@ -608,16 +591,11 @@ __host__ int main(int argc, char **argv)
     initialize_inputs(&a, &bt, (size_t)m, (size_t)n, (size_t)k);
     reference_matmul(a, bt, &reference, (size_t)m, (size_t)n, (size_t)k);
 
-    MatmulFp8Config config = {
-        m, n, k, k * sizeof(uint8_t), k * sizeof(uint8_t),
-        n * sizeof(float),
-    };
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
     npu_runtime_t *runtime = nullptr;
     npu_context_t *context = nullptr;
     npu_stream_t *stream = nullptr;
-    npu_buffer_t *config_buffer = nullptr;
     npu_buffer_t *a_buffer = nullptr;
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
@@ -636,16 +614,11 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = npu_stream_create(context, nullptr, &stream);
     if (status == 0)
-        status = create_buffer(context, sizeof(config), &config_buffer);
-    if (status == 0)
         status = create_buffer(context, a_bytes, &a_buffer);
     if (status == 0)
         status = create_buffer(context, bt_bytes, &bt_buffer);
     if (status == 0)
         status = create_buffer(context, c_bytes, &c_buffer);
-    if (status == 0)
-        status = upload(stream, config_buffer, &config, sizeof(config),
-                        timeout_ms);
     if (status == 0)
         status = upload(stream, a_buffer, a.data(), a_bytes, timeout_ms);
     if (status == 0)
@@ -676,8 +649,8 @@ __host__ int main(int argc, char **argv)
                     (unsigned)MatmulFp8Shape::kSlices,
                     (unsigned long long)cluster_tiles_m,
                     (unsigned long long)cluster_tiles_n, m < n ? "A" : "B");
-        status = matmul_fp8_4c(config_buffer, a_buffer, bt_buffer,
-                                c_buffer, &launch_attrs);
+        status = matmul_fp8_4c(m, n, k, k, k, n * sizeof(float), a_buffer,
+                               bt_buffer, c_buffer, &launch_attrs);
     }
     if (status == 0)
         status = download(stream, c.data(), c_buffer, c_bytes, timeout_ms);
@@ -692,8 +665,6 @@ __host__ int main(int argc, char **argv)
         preserve_error(npu_buffer_destroy(bt_buffer), &status);
     if (a_buffer)
         preserve_error(npu_buffer_destroy(a_buffer), &status);
-    if (config_buffer)
-        preserve_error(npu_buffer_destroy(config_buffer), &status);
     if (stream)
         preserve_error(npu_stream_destroy(stream), &status);
     if (context)

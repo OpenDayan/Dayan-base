@@ -34,10 +34,11 @@ DAYAN_TEST(example, {
 });
 ```
 
-Descriptors are constant 128-byte records. `resources` uses the existing
+Descriptors are constant 320-byte records. `resources` uses the existing
 `dayan_kernel_resource_desc_t`: declare the root family's child Threads, URAM,
 TCSR groups, named resources and coherent `shared` bytes there. Unspecified
-resources are zero. Up to eight machine-word arguments are loaded into a0-a7.
+resources are zero. Up to 32 machine-word arguments are supported: the first eight use a0-a7;
+remaining arguments are placed directly on the 16-byte-aligned entry stack.
 Names must contain 1-15 bytes followed by NUL. C++17 can use ordinary aggregate
 initializers; dynamic initialization and writable globals remain unsupported.
 

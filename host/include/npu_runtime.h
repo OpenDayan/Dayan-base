@@ -13,9 +13,9 @@ extern "C" {
 #define NPU_CONTEXT_DESC_VERSION    1U
 #define NPU_BUFFER_DESC_VERSION     1U
 #define NPU_STREAM_DESC_VERSION     1U
-#define NPU_LAUNCH_DESC_VERSION     3U
+#define NPU_LAUNCH_DESC_VERSION     4U
 #define NPU_TIMEOUT_INFINITE        UINT32_MAX
-#define NPU_KERNEL_MAX_ARGS         8U
+#define NPU_KERNEL_MAX_ARGS         32U
 #define NPU_PROC_NAME_SIZE          16U
 #define NPU_DEFAULT_SERVER_SOCKET   "/tmp/dayan-server.sock"
 #define NPU_RUNTIME_OUTPUT_CLEAR    (1U << 0)
@@ -358,7 +358,7 @@ int npu_profile_destroy(npu_profile_t *profile);
 #ifdef __cplusplus
 static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
-static_assert(sizeof(npu_launch_desc_t) == 312, "NPU launch descriptor ABI");
+static_assert(sizeof(npu_launch_desc_t) == 1080, "NPU launch descriptor ABI");
 static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
               "NPU launch task name offset");
 static_assert(offsetof(npu_launch_desc_t, args) == 56,
@@ -376,7 +376,7 @@ static_assert(sizeof(npu_profile_batch_info_t) == 16,
 #else
 _Static_assert(sizeof(NPUTaskDim3) == 12, "NPU task dimension ABI");
 _Static_assert(sizeof(NPULaunchConfig) == 16, "NPU launch config ABI");
-_Static_assert(sizeof(npu_launch_desc_t) == 312,
+_Static_assert(sizeof(npu_launch_desc_t) == 1080,
                "NPU launch descriptor ABI");
 _Static_assert(offsetof(npu_launch_desc_t, task_name) == 40,
                "NPU launch task name offset");

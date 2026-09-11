@@ -87,6 +87,14 @@ compile_c "$build/printf_test.o" "$script_dir/printf_test.c" \
     -I"$script_dir/printf_include"
 compile_c "$build/profile_record_test.o" "$script_dir/profile_record_test.c"
 compile_c "$build/profile.o" "$device_root/sche/profile.c"
+compile_c "$build/bootstrap_test.o" "$script_dir/bootstrap_test.c"
+compile_c "$build/sche.o" "$device_root/sche/sche.c" \
+    -Xclang -target-feature -Xclang +txbase \
+    -Xclang -target-feature -Xclang +txlsu \
+    -Xclang -target-feature -Xclang +txmat \
+    -Xclang -target-feature -Xclang +txvec \
+    -Xclang -target-feature -Xclang +txmacro
+"$clang" "${target_flags[@]}" -c "$script_dir/qemu/bootstrap.S" -o "$build/bootstrap.o"
 compile_c "$build/local_test.o" "$script_dir/local_test.c"
 compile_c "$build/test_boot.o" "$device_root/boot/test.c"
 compile_c "$build/test_rpc.o" "$device_root/rpc/test.c"
@@ -117,7 +125,10 @@ link_test local_test "$build/local_test.o" "$build/test_boot.o" \
     "$build/test_rpc.o" "$build/string.o" \
     -Wl,--defsym=__test_heap_end=0x84000000
 
-tests=(list_test rbtree_test mem_test math_test rpc_test printf_test profile_record_test local_test)
+link_test bootstrap_test "$build/bootstrap_test.o" "$build/bootstrap.o" \
+    "$build/sche.o" "$build/context.o" "$build/profile.o" "$build/string.o"
+
+tests=(bootstrap_test list_test rbtree_test mem_test math_test rpc_test printf_test profile_record_test local_test)
 for test_name in "${tests[@]}"; do
     log="$build/$test_name.log"
     echo "qemu-tests: RUN $test_name"

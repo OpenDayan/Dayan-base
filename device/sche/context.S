@@ -256,6 +256,7 @@ switch_context_restore:
  * First entry uses a proc_frame instead of a switch_frame. thread_start chooses
  * a PC within these fixed-width loads to skip unused arguments. Install the
  * proc's shared-memory gp, clear fcsr, and use thread_exit as the kernel's ra.
+ * Arguments after a7 are already above proc_frame, at the final entry sp.
  */
 proc_bootstrap:
     ld      a7, PROC_FRAME_A7(sp)
@@ -268,7 +269,7 @@ proc_bootstrap:
     ld      a0, PROC_FRAME_A0(sp)
 .Lproc_bootstrap_args_end:
     .if (.Lproc_bootstrap_args_end - proc_bootstrap) != \
-        (PROC_MAX_ARGS * PROC_BOOTSTRAP_ARG_INSN_SIZE)
+        (PROC_REGISTER_ARGS * PROC_BOOTSTRAP_ARG_INSN_SIZE)
     .error "proc bootstrap argument loads must remain fixed-width"
     .endif
     ld      gp, PROC_FRAME_SHARED(sp)

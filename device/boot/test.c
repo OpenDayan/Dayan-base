@@ -15,8 +15,8 @@ extern const dayan_test_desc_t __npu_test_start[], __npu_test_end[];
 extern unsigned char __test_heap_start[], __test_heap_end[];
 extern unsigned char __test_backing_start[];
 
-_Static_assert(sizeof(dayan_test_desc_t) == 128,
-               "local test descriptors must be densely packed 128-byte records");
+_Static_assert(sizeof(dayan_test_desc_t) == 320,
+               "local test descriptors must be densely packed 320-byte records");
 
 int test_present(void)
 {

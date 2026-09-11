@@ -54,10 +54,12 @@
 #define PROC_FRAME_RESERVED    88
 #define PROC_FRAME_SIZE        96
 
-#define PROC_MAX_ARGS                       8
+#define PROC_MAX_ARGS                      32
+#define PROC_REGISTER_ARGS                  8
 #define PROC_BOOTSTRAP_ARG_INSN_SIZE        4
 #define PROC_BOOTSTRAP_PC_OFFSET(argc) \
-    ((PROC_MAX_ARGS - (argc)) * PROC_BOOTSTRAP_ARG_INSN_SIZE)
+    ((PROC_REGISTER_ARGS - ((argc) < PROC_REGISTER_ARGS ? (argc) : \
+                             PROC_REGISTER_ARGS)) * PROC_BOOTSTRAP_ARG_INSN_SIZE)
 
 #ifndef __ASSEMBLER__
 
@@ -86,9 +88,10 @@ struct switch_frame {
 struct proc_frame {
     uintptr_t entry;
     uintptr_t ra;
-    uintptr_t args[PROC_MAX_ARGS];
+    uintptr_t args[PROC_REGISTER_ARGS];
     uintptr_t shared;
     uintptr_t reserved;
+    /* Arguments 8..argc-1 follow this frame, at the kernel's entry sp. */
 };
 
 _Static_assert(offsetof(struct switch_frame, ra) == SWITCH_FRAME_RA,

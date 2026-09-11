@@ -69,7 +69,7 @@ host/dycc/dycc --save-temps=build/dycc-demo \
   的 `npu_kernel_launch_attrs_t`、descriptor 和 launch API；dycc 不再为输入源码
   隐式强制包含它。
 - `__kernel__`：只在 Device 保留定义；Host 原位置生成同名 wrapper。kernel 必须返回
-  `void`、具有外部链接、不是模板或可变参数函数，并且最多接收 8 个机器字参数。
+  `void`、具有外部链接、不是模板或可变参数函数，并且最多接收 32 个机器字参数（前 8 个使用 a0–a7，其余使用栈）。
 - 每个 `__kernel__` 必须有且只有一个同名资源描述符：
   `DAYAN_KERNEL_DESC(kernel, child_threads, atomic_bytes, uram_bytes,
   lsu_tcsr, mat_tcsr, vec_tcsr, macro_tcsr);`。
@@ -94,7 +94,7 @@ host/dycc/dycc --save-temps=build/dycc-demo \
 kernel 参数支持整数、枚举、指针、引用、`float` 和 `double`。Host wrapper 把 Device
 指针或引用参数改写为 `npu_buffer_t *`，再根据 const 属性生成 Buffer read/write
 metadata；它不会接收或传递 Host raw pointer。其它参数按 RV64 `lp64` ABI 打包为至多
-8 个机器字，浮点参数传递位模式。聚合体参数当前会被拒绝，调用者应改用 Device
+32 个机器字，前 8 个走 a0–a7，其余直接放在入口栈上；浮点参数传递位模式。聚合体参数当前会被拒绝，调用者应改用 Device
 Buffer。
 
 Host wrapper 的追加参数为：

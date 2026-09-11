@@ -186,8 +186,8 @@ opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
-create-proc ABI 使用 224-byte `rpc_proc_create_request`，包含 entry、栈、shared、
-printf buffer、0–8 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
+create-proc ABI 使用 416-byte `rpc_proc_create_request`，包含 entry、栈、shared、
+printf buffer、0–32 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
 最大子 Thread 数、URAM base/size、64-bit Tensor Context，以及固定 16-byte Proc 名称。Runtime launch 必须提供
 非空 Task 名称；名称最多 15 bytes，最后一 byte 留给 NUL。BL1 创建 root 时一次性专属
 预留全部子 slot，并复制启动数据。创建事务全程阻塞，Host 读取创建回复后即可回收描述符；

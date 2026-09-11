@@ -53,14 +53,14 @@ static void test_descriptors(void)
     test.resources.uram_size = CONFIG_URAM_SIZE;
     test.resources.atomic_cache_size = CONFIG_COHERENT_SIZE;
     test.resources.resource_counts = DAYAN_RESOURCE_COUNT_PACK(32, 32);
-    test.argc = 8;
-    test.args[7] = 1234;
+    test.argc = 32;
+    test.args[31] = 1234;
     assert(test_build_request(&test, &request) == 0);
-    assert(request.argc == 8 && request.args[7] == 1234);
+    assert(request.argc == 32 && request.args[31] == 1234);
     assert(request.shared_size == CONFIG_COHERENT_SIZE);
     assert(request.task_mode == 1 && request.task_dim[2] == 1);
     assert(request.max_child_threads == 15);
-    test.argc = 9;
+    test.argc = 33;
     assert(test_build_request(&test, &request) == -EINVAL);
     test.argc = 0;
     test.resources.lsu_tcsr_count = 9;

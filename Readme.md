@@ -296,8 +296,8 @@ create-proc 只使用静态 slot 和栈，不扩堆、不等待其它线程。�
 响应/释放描述符，Device 侧由 `rpc_heap_acquire/release()` 统一封装。
 
 Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Device DRAM 中的固定
-224-byte `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
-0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
+416-byte `rpc_proc_create_request`，包含 entry、栈/输出缓冲容量、shared allocation、
+0–32 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
 base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及创建状态。Host 校验
 启动参数，BL1 只检查本固件的栈/输出容量及空闲 slot。Device invalidate 描述符，
 把启动数据复制到静态 slot 和启动帧，完整 flush 创建结果并提交 root token。

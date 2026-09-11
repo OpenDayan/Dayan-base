@@ -129,3 +129,11 @@ if "$DYCC_BIN" --split-only --emit-host "$work_dir/flags.host.cpp" \
     exit 1
 fi
 rg -q 'known flags' "$work_dir/flags.log"
+
+"$DYCC_BIN" -c "$test_dir/argument_limit.cpp" -o "$work_dir/args32.o"
+if "$DYCC_BIN" -DTEST_33_ARGS -c "$test_dir/argument_limit.cpp" \
+    -o "$work_dir/args33.o" >"$work_dir/args33.log" 2>&1; then
+    echo "kernel with 33 arguments was accepted" >&2
+    exit 1
+fi
+rg -q 'at most 32 machine-word arguments' "$work_dir/args33.log"

@@ -225,8 +225,8 @@ SECTIONS
     ASSERT(!SIZEOF(.npu_test) ||
            (ORIGIN(RAM) == 0x80000000 && __ram_used_end < __test_heap_end),
            "bare-metal image must start at 0x80000000 and leave heap below test log")
-    ASSERT((SIZEOF(.npu_test) % 128) == 0,
-           "test descriptor table must contain 128-byte records")
+    ASSERT((SIZEOF(.npu_test) % 320) == 0,
+           "test descriptor table must contain 320-byte records")
     ASSERT(!DEFINED(CONFIG_REQUIRE_TESTS) || SIZEOF(.npu_test),
            "device test must register at least one DAYAN_TEST descriptor")
     ASSERT(SIZEOF(.coherent) == 0,

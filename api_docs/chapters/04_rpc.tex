@@ -75,7 +75,7 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
 
 \begin{dayantable}{Proc ABI 常量}{tab:api-rpc-proc-constant}{X[44,l] X[56,l]}
   常量 & 含义 \\
-  \code{RPC_PROC_MAX_ARGS} & 一个 Proc 最多 8 个 64-bit 参数。 \\
+  \code{RPC_PROC_MAX_ARGS} & 一个 Proc 最多 32 个 64-bit 参数。 \\
   \code{RPC_PROC_SLOTS_PER_HART} & 每个 Hart 有 16 个用户 Proc 资源槽。 \\
   \code{RPC_PROC_MAX_CHILD_THREADS} & 一个根 Proc 最多预留 15 个子 Thread 资源槽。 \\
   \code{RPC_PROC_NAME_SIZE} & Proc 名称固定占 16 B，必须含结尾 NUL。 \\
@@ -102,7 +102,7 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
 
 \begin{dayantable}{Proc 传输类型}{tab:api-rpc-proc-wire}{X[42,l] X[58,l]}
   类型 & ABI / 用途 \\
-  \code{rpc_proc_create_request} & 224 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、8 个参数、任务网格和模式、子 Thread 槽上限、URAM、Context1/Context2、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
+  \code{rpc_proc_create_request} & 416 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、32 个参数、任务网格和模式、子 Thread 槽上限、URAM、Context1/Context2、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
   \code{rpc_proc_exit_request} & 32 字节；包含根 Proc 的 Hart 和 Proc ID、返回值、调用方标识及标志。 \\
   \code{rpc_proc_info} & 96 字节；包含一个 Proc 的父子关系、状态、资源槽、任务坐标、结果、PC 和名称。 \\
   \code{rpc_proc_ps_snapshot} & 1864 字节；由快照头和最多 19 条 \code{rpc_proc_info} 组成。 \\

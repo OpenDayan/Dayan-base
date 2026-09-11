@@ -24,7 +24,7 @@ symbol()
 elf=${SMOKE_ELF:-"$device_root/../build/device_tests/smoke_test/smoke_test.elf"}
 [[ -z $("$nm" --undefined-only "$elf") ]]
 [[ $(symbol "$elf" _start) == 0x80000000 ]]
-[[ $(( $(symbol "$elf" __npu_test_end) - $(symbol "$elf" __npu_test_start) )) == 256 ]]
+[[ $(( $(symbol "$elf" __npu_test_end) - $(symbol "$elf" __npu_test_start) )) == 640 ]]
 [[ $(( $(symbol "$elf" __test_data_start) )) == $((0x84000000)) ]]
 [[ $(( $(symbol "$elf" __test_data_end) )) == $((0xc4000000)) ]]
 [[ $(( $(symbol "$elf" __test_mailbox_start) )) == $((0x83ffffc0)) ]]
@@ -36,7 +36,7 @@ elf=${SMOKE_ELF:-"$device_root/../build/device_tests/smoke_test/smoke_test.elf"}
 [[ $(symbol "$build/npu-os.elf" __npu_test_start) == \
    $(symbol "$build/npu-os.elf" __npu_test_end) ]]
 "$readelf" -SW "$build/tests/baremetal_api.o" | \
-    grep -Eq '\.npu_test[[:space:]]+PROGBITS.*000080.* A '
+    grep -Eq '\.npu_test[[:space:]]+PROGBITS.*000140.* A '
 if "$readelf" -SW "$build/tests/baremetal_api.o" | grep -Fq '.init_array'; then
     echo 'library-check: C++ descriptor requires a constructor' >&2
     exit 1

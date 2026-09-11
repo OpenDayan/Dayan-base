@@ -1043,8 +1043,8 @@ private:
             diagnose(decl, "__kernel__ functions must return void");
             return false;
         }
-        if (decl->getNumParams() > 8) {
-            diagnose(decl, "__kernel__ functions support at most 8 machine-word arguments");
+        if (decl->getNumParams() > 32) {
+            diagnose(decl, "__kernel__ functions support at most 32 machine-word arguments");
             return false;
         }
         if (decl->getFormalLinkage() == clang::Linkage::Internal) {
