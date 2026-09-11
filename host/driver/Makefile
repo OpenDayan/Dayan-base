@@ -23,7 +23,7 @@ HAL_DATA_SOURCES := hal/dataplane.c \
 HAL_CONTROL_SOURCES := $(filter-out hal/dataplane.c,$(HAL_ROOT_SOURCES)) \
 	$(filter-out %/dataplane.c %/io.c,$(HAL_BACKEND_SOURCES))
 SERVICE_SOURCES := server/device.c server/elf.c server/rpc.c \
-	server/kernel.c server/package.c server/profile.c server/mmu.c
+	server/kernel.c server/package.c server/profile.c server/mmu.c server/parallel.c
 SERVER_SOURCES := server/scheduler.c server/server.c
 RUNTIME_SOURCES := $(wildcard runtime/*.c)
 
@@ -111,7 +111,11 @@ $(BUILD)/tests/mmu_test: server/tests/mmu_test.c $(BUILD)/server/mmu.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
-$(BUILD)/tests/kernel_cache_test: server/tests/kernel_cache_test.c $(BUILD)/server/kernel.o
+$(BUILD)/tests/kernel_cache_test: server/tests/kernel_cache_test.c $(BUILD)/server/kernel.o $(BUILD)/server/parallel.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
+$(BUILD)/tests/profile_parallel_test: server/tests/profile_parallel_test.c $(BUILD)/server/profile.o $(BUILD)/server/parallel.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
@@ -154,13 +158,14 @@ layer-check: $(RUNTIME_STATIC)
 check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
 	$(BUILD)/tests/pcu_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
-	$(BUILD)/tests/mmu_test $(BUILD)/tests/kernel_cache_test $(BUILD)/tests/public_headers.o
+	$(BUILD)/tests/mmu_test $(BUILD)/tests/kernel_cache_test $(BUILD)/tests/profile_parallel_test $(BUILD)/tests/public_headers.o
 	$(BUILD)/tests/hal_test
 	$(BUILD)/tests/pcu_test
 	$(BUILD)/tests/package_test
 	$(BUILD)/tests/socket_test
 	$(BUILD)/tests/mmu_test
 	$(BUILD)/tests/kernel_cache_test
+	$(BUILD)/tests/profile_parallel_test
 
 $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 	@mkdir -p $(dir $@)

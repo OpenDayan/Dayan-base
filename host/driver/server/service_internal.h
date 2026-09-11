@@ -35,7 +35,6 @@ struct npu_kernel_module {
     uint32_t cluster;
     uint64_t base;
     uint64_t size;
-    npu_hal_allocation_t *allocation;
     struct npu_kernel_export *exports;
     size_t export_count;
     struct npu_kernel_object *objects;
@@ -71,6 +70,8 @@ struct npu_service_cluster {
     uint64_t firmware_entry;
     npu_hal_allocation_t *atomic_cache_backing;
     uint64_t atomic_cache_backing_address;
+    npu_hal_allocation_t *kernel_text_arena;
+    uint64_t kernel_text_next;
 };
 
 /*
@@ -304,6 +305,8 @@ int npu_service_rpc_call(npu_service_device_t *device, npu_hal_core_t core,
                          uint16_t opcode, uint64_t argument,
                          uint32_t timeout_ms,
                          int *argument_may_be_live_out);
+int npu_service_parallel(size_t count, int (*run)(void *, size_t), void *argument);
+int npu_service_kernel_text_init(npu_service_device_t *device, uint32_t cluster);
 int npu_service_launch_complete(npu_service_device_t *device,
                                 npu_hal_core_t core, uint32_t proc_id,
                                 int64_t result, uint64_t cookie);

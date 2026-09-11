@@ -54,8 +54,8 @@ static const char *rpc_opcode_name(uint16_t opcode)
         return "profile-flush";
     case RPC_PROC_CREATE:
         return "proc-create";
-    case RPC_ICACHE_FLUSH:
-        return "icache-flush";
+    case RPC_FENCEI:
+        return "fencei";
     case RPC_PROC_PS:
         return "proc-ps";
     case RPC_PROC_KILL_ALL:
@@ -66,8 +66,8 @@ static const char *rpc_opcode_name(uint16_t opcode)
         return "dcache-flush";
     case RPC_PROC_CREATE_RESPONSE:
         return "proc-create-response";
-    case RPC_ICACHE_FLUSH_RESPONSE:
-        return "icache-flush-response";
+    case RPC_FENCEI_RESPONSE:
+        return "fencei-response";
     case RPC_PROC_PS_RESPONSE:
         return "proc-ps-response";
     case RPC_PROC_KILL_ALL_RESPONSE:

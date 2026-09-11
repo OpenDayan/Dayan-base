@@ -72,8 +72,8 @@ if $readelf --relocations "${relocation_objects[@]}" | \
 fi
 icache_fence_calls=$($readelf --relocations --wide "$build/rpc/proc.o" | \
     grep -c 'platform_instruction_fence' || true)
-[ "$icache_fence_calls" -eq 2 ] ||
-    fail "icache fence must cover PROC_CREATE and the explicit flush RPC"
+[ "$icache_fence_calls" -eq 1 ] ||
+    fail "icache fence must occur only in the explicit fencei RPC"
 if $nm "$elf" | grep -Fq '__global_pointer$'; then
     fail 'firmware must not define __global_pointer$'
 fi

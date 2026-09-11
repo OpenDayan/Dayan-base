@@ -72,10 +72,10 @@ Service 用每 Hart 的 launch agent 串行提交 CREATE，并由独立 RPC work
 同一 mutex/condition 交接 \code{submit_done}，退出通知不会访问创建描述符。
 Device 创建 proc 只使用静态 slot 和栈，不扩堆、不切出。
 
-Host 发布算子模块的顺序是：先向每个已启动 hart 发送带模块范围的
-\code{RPC_DCACHE_FLUSH}，全部完成后搬运新的 text/rodata，再把模块 entry 交给 launch
-路径。每次 CREATE 在目标 Hart 执行 \code{fence.i} 后才允许 kernel 运行；模块复用时
-不再失效 D-cache 或上传代码，也不需要单独的 I-cache RPC。
+Host 在启动 BL1 前为每个 Cluster 预留 16 MiB kernel arena，单调分配模块所有加载
+节段，已写入地址直到 Service 关闭前不再复用。上传不发送 D-cache RPC；上传完成后
+并行向该 Cluster 所有已启动 Hart 发送 \code{RPC_FENCEI}，全部回复后才把 entry 交给
+launch 路径。CREATE 不再重复执行 \code{fence.i}；驻留模块复用无需上传或 fence。
 
 \subsection{cache ownership}
 

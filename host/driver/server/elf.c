@@ -548,6 +548,12 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
         }
     }
     firmware_log(cluster, "BL1 memory segments reserved");
+    stage = "reserving kernel text arena";
+    status = npu_service_kernel_text_init(device, cluster);
+    if (status < 0) {
+        rollback_reservations(device, previous_head);
+        goto out;
+    }
     stage = "configuring Atomic Cache backing";
     firmware_log(cluster,
                  "configuring Atomic Cache backing (alignment=%llu bytes)",

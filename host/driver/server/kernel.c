@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define NPU_KERNEL_TEXT_ARENA_SIZE UINT64_C(0x01000000)
+
 struct elf_view {
     const unsigned char *data;
     size_t size;
@@ -993,75 +995,72 @@ static int apply_relocations(const struct relocation_context *context,
     return 0;
 }
 
-static int flush_dcache(npu_service_device_t *runtime, uint32_t cluster,
-                        uint64_t address, uint64_t length,
-                        int *range_may_be_live)
-{
+struct fencei_call {
+    npu_service_device_t *runtime;
+    uint32_t cluster;
     uint32_t core_mask;
-    uint32_t timeout;
-    uint32_t core_index;
+    uint64_t cookie;
+};
+
+/* Reserve before BL1 starts, while the pool cannot have held Device heap or
+ * RPC data. Every module subsequently consumes a fresh portion of this arena. */
+int npu_service_kernel_text_init(npu_service_device_t *runtime, uint32_t cluster)
+{
+    struct npu_service_cluster *state = &runtime->clusters[cluster];
+    npu_hal_memory_request_t request;
+    int status = 0;
+
+    pthread_mutex_lock(&runtime->kernel_mutex);
+    if (!state->kernel_text_arena) {
+        npu_hal_memory_request_init(&request);
+        request.memory_class = NPU_HAL_MEMORY_NORMAL;
+        request.scope = NPU_HAL_MEMORY_CLUSTER;
+        request.usage = NPU_HAL_MEMORY_KERNEL;
+        request.owner = UINT32_MAX;
+        request.location.cluster = cluster;
+        request.location.core = NPU_HAL_ANY_CORE;
+        request.size = NPU_KERNEL_TEXT_ARENA_SIZE;
+        request.alignment = RPC_DESCRIPTOR_GRANULE;
+        status = npu_hal_memory_alloc(runtime->hal, &request,
+                                      &state->kernel_text_arena);
+        if (status == -ENOMEM) {
+            request.scope = NPU_HAL_MEMORY_DEVICE;
+            request.location.cluster = NPU_HAL_ANY_CLUSTER;
+            status = npu_hal_memory_alloc(runtime->hal, &request,
+                                          &state->kernel_text_arena);
+        }
+    }
+    pthread_mutex_unlock(&runtime->kernel_mutex);
+    return status;
+}
+
+static int fencei_core(void *argument, size_t core_index)
+{
+    struct fencei_call *call = argument;
+
+    if (!(call->core_mask & (UINT32_C(1) << core_index)))
+        return 0;
+    return npu_service_rpc_call(call->runtime,
+                                (npu_hal_core_t){call->cluster, core_index},
+                                RPC_FENCEI, call->cookie,
+                                call->runtime->options.default_timeout_ms, 0);
+}
+
+/* All Harts have independent RPC mailboxes. Submit fence.i to them together,
+ * then join so code publication is complete before PROC_CREATE is queued. */
+static int fencei_cluster(npu_service_device_t *runtime, uint32_t cluster,
+                          uint64_t cookie)
+{
+    struct fencei_call call = { .runtime = runtime, .cluster = cluster,
+                               .cookie = cookie };
 
     pthread_mutex_lock(&runtime->mutex);
-    core_mask = runtime->clusters[cluster].booted_cores;
-    timeout = runtime->options.default_timeout_ms;
+    call.core_mask = runtime->clusters[cluster].booted_cores;
     pthread_mutex_unlock(&runtime->mutex);
-    if (!core_mask)
+    if (!call.core_mask)
         return -ENODEV;
-
-    for (core_index = 0;
-         core_index < runtime->hal_info.cores_per_cluster; ++core_index) {
-        npu_hal_core_t core = { cluster, core_index };
-        struct rpc_dcache_flush_request request = {
-            .hart_id = core_index,
-            .address = address,
-            .length = length,
-            .status = -EIO,
-        };
-        npu_hal_allocation_t *allocation = 0;
-        uint64_t request_address;
-        int descriptor_may_be_live = 0;
-        int status;
-
-        if (!(core_mask & (UINT32_C(1) << core_index)))
-            continue;
-        status = npu_service_alloc_rpc_descriptor(
-            runtime, core, sizeof(request), &allocation);
-        if (status < 0)
-            return status;
-        status = npu_service_mmu_device_address(runtime, allocation, core,
-                                                &request_address);
-        if (status < 0 || request_address > RPC_COMMAND_ARG_MASK) {
-            status = status < 0 ? status : -EOVERFLOW;
-            goto out;
-        }
-        status = npu_hal_memory_write(runtime->hal, allocation, core, 0,
-                                      &request, sizeof(request));
-        if (status < 0)
-            goto out;
-        status = npu_service_rpc_call(runtime, core, RPC_DCACHE_FLUSH,
-                                      request_address, timeout,
-                                      &descriptor_may_be_live);
-        if (status < 0)
-            goto out;
-        status = npu_hal_memory_read(runtime->hal, allocation, core, &request, 0,
-                                     sizeof(request));
-        if (status < 0)
-            goto out;
-        status = request.status < INT_MIN || request.status > 0 ? -EPROTO :
-                  (int)request.status;
-out:
-        if (descriptor_may_be_live) {
-            *range_may_be_live = 1;
-        } else {
-            int free_status = npu_hal_memory_free(runtime->hal, allocation);
-
-            if (status == 0 && free_status < 0)
-                status = free_status;
-        }
-        if (status < 0)
-            return status;
-    }
-    return 0;
+    return npu_service_parallel(runtime->hal_info.cores_per_cluster,
+                                 fencei_core, &call);
 }
 
 static int load_kernel_module(npu_service_device_t *runtime,
@@ -1069,6 +1068,7 @@ static int load_kernel_module(npu_service_device_t *runtime,
                               size_t object_size,
                               struct npu_kernel_module **module_out)
 {
+    struct npu_service_cluster *cluster = &runtime->clusters[target.cluster];
     struct npu_kernel_module *module = 0;
     struct npu_kernel_export *exports = 0;
     struct load_section *sections = 0;
@@ -1082,12 +1082,12 @@ static int load_kernel_module(npu_service_device_t *runtime,
     uint64_t image_size;
     uint64_t alignment;
     uint64_t base = 0;
+    uint64_t allocation_offset = 0;
     npu_hal_allocation_t *allocation = 0;
     size_t symbol_count;
     size_t export_count = 0;
     size_t symbol_section_index = 0;
     size_t index;
-    int range_may_be_live = 0;
     int status;
 
     status = elf_view_init(&elf, object, object_size, ET_REL);
@@ -1127,15 +1127,25 @@ static int load_kernel_module(npu_service_device_t *runtime,
     pthread_mutex_unlock(&runtime->mutex);
     if (status < 0)
         goto fail;
-    status = npu_service_alloc_visible(
-        runtime, target, NPU_HAL_MEMORY_NORMAL, NPU_HAL_MEMORY_KERNEL,
-        UINT32_MAX, image_size, alignment, &allocation);
+    allocation = cluster->kernel_text_arena;
+    if (!allocation) {
+        status = -ENODEV;
+        goto fail;
+    }
+    status = npu_service_mmu_device_address(runtime, allocation, target, &base);
     if (status < 0)
         goto fail;
-    status = npu_service_mmu_device_address(runtime, allocation, target,
-                                            &base);
+    status = align_up_u64(base + cluster->kernel_text_next, alignment,
+                          &allocation_offset);
     if (status < 0)
         goto fail;
+    allocation_offset -= base;
+    if (allocation_offset > NPU_KERNEL_TEXT_ARENA_SIZE ||
+        image_size > NPU_KERNEL_TEXT_ARENA_SIZE - allocation_offset) {
+        status = -ENOMEM;
+        goto fail;
+    }
+    base += allocation_offset;
     for (index = 1; index < elf.header.e_shnum; ++index) {
         if (sections[index].loaded)
             sections[index].address = base + sections[index].offset;
@@ -1177,16 +1187,16 @@ static int load_kernel_module(npu_service_device_t *runtime,
     status = apply_relocations(&relocations, symbol_section_index);
     if (status < 0)
         goto fail;
-    /* Retire old dirty lines before Host writes a possibly reused range. */
-    status = flush_dcache(runtime, target.cluster, base, image_size,
-                           &range_may_be_live);
-    if (status < 0)
-        goto fail;
-    status = npu_hal_memory_write(runtime->hal, allocation, target, 0, image,
+    /* Even a failed upload or fence consumes its range; it is never reused. */
+    cluster->kernel_text_next = allocation_offset + image_size;
+    status = npu_hal_memory_write(runtime->hal, allocation, target,
+                                  allocation_offset, image,
                                   (size_t)image_size);
     if (status < 0)
         goto fail;
-    /* PROC_CREATE executes fence.i locally before the new entry can run. */
+    status = fencei_cluster(runtime, target.cluster, base);
+    if (status < 0)
+        goto fail;
     module = calloc(1, sizeof(*module));
     if (!module) {
         status = -ENOMEM;
@@ -1196,7 +1206,6 @@ static int load_kernel_module(npu_service_device_t *runtime,
     module->cluster = target.cluster;
     module->base = base;
     module->size = image_size;
-    module->allocation = allocation;
     module->exports = exports;
     module->export_count = export_count;
     status = module_add_object(module, object);
@@ -1207,9 +1216,7 @@ static int load_kernel_module(npu_service_device_t *runtime,
     *module_out = module;
     status = 0;
 fail:
-    /* A timed-out invalidate may still touch this range: retain it until close. */
-    if (status < 0 && allocation && !range_may_be_live)
-        (void)npu_hal_memory_free(runtime->hal, allocation);
+    /* The 16 MiB arena is retained until service teardown; never free it here. */
     free(image);
     free(symbol_values);
     free(symbol_valid);
@@ -1322,9 +1329,6 @@ int npu_service_kernel_forget(npu_service_device_t *runtime,
             link = &module->next;
             continue;
         }
-        status = npu_hal_memory_free(runtime->hal, module->allocation);
-        if (status < 0)
-            goto out;
         *link = module->next;
         free_kernel_objects(module->objects);
         free_kernel_exports(module->exports, module->export_count);
@@ -1332,7 +1336,6 @@ int npu_service_kernel_forget(npu_service_device_t *runtime,
     }
     if (!found)
         status = -ENOENT;
-out:
     pthread_mutex_unlock(&runtime->kernel_mutex);
     return status;
 }
@@ -1347,13 +1350,20 @@ void npu_service_kernel_state_destroy(npu_service_device_t *runtime)
     while (module) {
         struct npu_kernel_module *next = module->next;
 
-        (void)npu_hal_memory_free(runtime->hal, module->allocation);
         free_kernel_objects(module->objects);
         free_kernel_exports(module->exports, module->export_count);
         free(module);
         module = next;
     }
     runtime->kernel_modules = 0;
+    for (uint32_t cluster = 0; cluster < runtime->hal_info.cluster_count;
+         ++cluster) {
+        if (runtime->clusters[cluster].kernel_text_arena)
+            (void)npu_hal_memory_free(runtime->hal,
+                                      runtime->clusters[cluster].kernel_text_arena);
+        runtime->clusters[cluster].kernel_text_arena = 0;
+        runtime->clusters[cluster].kernel_text_next = 0;
+    }
     free_api_symbols(runtime->api_symbols, runtime->api_symbol_count);
     runtime->api_symbols = 0;
     runtime->api_symbol_count = 0;

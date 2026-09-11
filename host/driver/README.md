@@ -182,7 +182,7 @@ opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关
 - Server 默认只打印 trap 和 tensor interrupt 的寄存器报告，不在故障处理路径读取设备
   内存。需要完整 dump 时显式设置 `DAYAN_TRAP_DUMP_DIR`；dump 只读取故障 Core 可见的
   Device、Cluster 和本 Core region，避免访问其它 Core 的私有 URAM。
-- Host→Device：`RPC_PROC_CREATE`、`RPC_DCACHE_FLUSH`、`RPC_ICACHE_FLUSH`、`RPC_PROC_PS`、
+- Host→Device：`RPC_PROC_CREATE`、`RPC_DCACHE_FLUSH`、`RPC_FENCEI`、`RPC_PROC_PS`、
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
@@ -216,11 +216,15 @@ shared allocation。该 barrier 使用 `AMOADD.D` ticket，可跨多轮复用；
 参与者数量或非 `kFourCore` launch 会被拒绝。
 
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
-未定义符号。覆盖模块前，会对该 Cluster 所有已启动 Core 分别执行带地址和长度的
-`RPC_DCACHE_FLUSH`；全部完成后写入新的 text/rodata，再发布入口。
-模块首尾独占 64-byte cache line，loader 互斥锁覆盖分配、失效、上传和发布。
-目标 Core 在每次 `RPC_PROC_CREATE` 中执行 `fence.i`，不再单独发送 I-cache RPC。
-若 D-cache RPC 超时，描述符及目标模块范围均保留到 HAL 关闭，避免延迟失效破坏复用内存。
+未定义符号。每个 Cluster 在 BL1 启动前预留 16 MiB kernel arena，按 ELF 对齐要求
+单调分配所有加载节段，包含 `.bss`。已写入地址在卸载或失败后仍不复用，arena 用尽返回
+`-ENOMEM`，Service 关闭时统一释放；新模块上传不发送 D-cache RPC。
+上传后并行向全部已启动 Hart 发送 `RPC_FENCEI`，全部回复后才发布入口。该操作复用
+`0x0101/0x8101`，`RPC_ICACHE_FLUSH` 为兼容别名，argument 是不解引用的模块地址 cookie。
+模块复用无需上传或 fence，`RPC_PROC_CREATE` 不再重复执行 `fence.i`。loader 互斥锁覆盖
+分配、上传与发布。直接通过 Service 启动自行上传的入口时，调用者需先完成各目标 Hart 的 fence。
+Profile START、STOP 及失败回滚复用跨核并发 helper；同一 Hart 的 RPC 继续排队串行，
+所有已提交配置结束后才汇总结果或释放共享 buffer。
 
 Device 发起的标量 RPC 将 packet、request 和 response 分别放入独占的 64-byte 对齐
 slot，Host 只写 response/status，Device 确认后 invalidate 并复制回调用者。Host-owned

@@ -29,7 +29,7 @@
   \code{[ ]} & 按固定宽度解码 packet、print request、proc create 描述符和 trap record。 \\
   \code{[ ]} & 每 hart、每方向至多一笔未确认 mailbox transaction。 \\
   \code{[ ]} & 遵守 mailbox-before-doorbell、data/status-before-clear 和 cache ownership 顺序。 \\
-  \code{[ ]} & text 更新后、entry 发布前，对每个可能执行它的 hart 完成 ICACHE FLUSH RPC。 \\
+  \code{[ ]} & text 更新后、entry 发布前，并行向各个可能执行它的 hart 发送 FENCEI RPC，并等待全部完成。 \\
   \code{[ ]} & 等待 Host--Device response 时，后台 worker 仍处理 Device--Host 服务。 \\
   \code{[ ]} & 堆 region 的地址、大小、类型和 hart owner 在申请与归还时一致。 \\
   \code{[ ]} & proc create 描述符保持到 EXITED/FAILED；shared allocation 保持到所有使用者结束。 \\

@@ -300,7 +300,7 @@ Host 创建算子使用 opcode `0x0100`。其参数指向 Host 放在普通 Devi
 0–8 个 ABI 参数、`task_id[3]`、`task_dim[3]`、`task_mode`、最大子 Thread 数、URAM
 base/size、64-bit Tensor Context、固定 16-byte Proc 名称以及创建状态。Host 校验
 启动参数，BL1 只检查本固件的栈/输出容量及空闲 slot。Device invalidate 描述符，
-把启动数据复制到静态 slot 和启动帧，完整 flush 创建结果，执行 `fence.i` 并提交 root token。
+把启动数据复制到静态 slot 和启动帧，完整 flush 创建结果并提交 root token。
 接收线程同步回复 `0x8100`、清除 `msip` 后才切换，因此新 kernel 不会抢在回复前执行。
 Host 读取回复后即可释放创建描述符；运行结果只通过 `RPC_PROC_EXIT` 上报。root 创建时会摘下
 `1 + max_child_threads` 个静态 slot；
@@ -319,12 +319,15 @@ cookie。kill-all 保留 RPC/profile proc，摘除 event/system-wait 节点；�
 kill 回复中的 `released_slots` 只统计当时已经释放的 slot；尚有 token 的 family
 在接收事务结束、dispatcher 取回全部旧 token 后释放。
 
-Host 覆盖动态模块前，先通过 `RPC_DCACHE_FLUSH` (`0x0105`) 让所有已启动 Hart
-失效目标模块的 D-cache 范围；全部返回 `0x8105` 后才写入新的 text/rodata。模块首尾按
-64-byte 对齐，避免误失效邻接分配。模块加载器受互斥锁保护，上传后才发布 entry；
-每次 `RPC_PROC_CREATE` 在目标 Hart 执行 `fence.i`，无需额外 I-cache RPC。
-上传前的 D-cache 失效不能挪到创建时，否则旧脏行可能在 Host 写入后回写并破坏代码。
-失效请求超时时，描述符和目标模块范围都保留到 HAL 关闭，防止延迟失效命中复用后的内存。
+Host 在启动 BL1 前为每个 Cluster 预留 16 MiB kernel arena，存放模块所有加载节段，
+包括 `.bss` 零初始化。模块按 ELF 对齐要求单调分配，卸载及上传失败都不复用已写入的范围；
+arena 在 Service 关闭时统一释放，用尽返回 `-ENOMEM`。因此新模块上传无需 D-cache RPC。
+上传完成后向该 Cluster 所有已启动 Hart 并行发送 `RPC_FENCEI` (`0x0101`)，全部回复
+`0x8101` 后才发布 entry；loader 互斥锁覆盖分配、上传及发布。`argument` 是不解引用的
+模块地址 cookie。旧名称 `RPC_ICACHE_FLUSH` 保留为同一 opcode 的别名。
+驻留模块复用无需上传或 fence；`RPC_PROC_CREATE` 不再重复执行 `fence.i`。
+Profile START、STOP 和失败回滚也通过同一个并发 helper 跨核配置；同一 Hart 仍按 RPC
+队列串行执行，所有已提交配置结束后才汇总结果或释放共享 buffer。
 
 双向标量 RPC descriptor 都隔离 cache line。Device 发起的 packet、request、response
 各占一个独立的 64-byte 对齐 slot；Host 只写 response/status，Device 在收到确认后

@@ -90,6 +90,46 @@ out:
     return status;
 }
 
+struct profile_parallel_args {
+    npu_service_device_t *device;
+    struct npu_service_profile_core *cores;
+    uint64_t generation;
+    uint32_t command;
+    int drain;
+};
+
+static int profile_parallel_call(void *argument, size_t index)
+{
+    struct profile_parallel_args *args = argument;
+    struct npu_service_profile_core *core = &args->cores[index];
+    uint32_t count;
+    int enabled;
+    int status;
+    int copy_status = 0;
+
+    if (!core->capacity ||
+        (args->command == RPC_PROFILE_STOP && !core->configured))
+        return 0;
+    if (args->command == RPC_PROFILE_START) {
+        pthread_mutex_lock(&args->device->mutex);
+        core->configured = 1;
+        pthread_mutex_unlock(&args->device->mutex);
+    }
+    status = profile_config_call(args->device, core, args->command,
+                                  args->generation, &count, &enabled);
+    if (!status && args->drain && count) {
+        int keep;
+
+        copy_status = npu_service_profile_copy(args->device, core->target,
+            args->generation, core->address, core->capacity, count, &keep);
+    }
+    pthread_mutex_lock(&args->device->mutex);
+    if (enabled == 0 || (!status && args->command == RPC_PROFILE_STOP))
+        core->configured = 0;
+    pthread_mutex_unlock(&args->device->mutex);
+    return status < 0 ? status : copy_status;
+}
+
 static int profile_core_matches(const npu_service_device_t *device,
                                 const struct npu_service_profile_core *core,
                                 npu_hal_core_t target, uint64_t generation,
@@ -297,6 +337,7 @@ int npu_service_profile_start(npu_service_device_t *device,
     size_t index;
     int cleanup_remaining = 0;
     int status;
+    struct profile_parallel_args args;
 
     if (!device || !buffer_size)
         return -EINVAL;
@@ -323,48 +364,25 @@ int npu_service_profile_start(npu_service_device_t *device,
     device->profile_active = 1;
     pthread_mutex_unlock(&device->mutex);
 
-    for (index = 0; index < core_slots; ++index) {
-        int enabled;
-
-        if (!cores[index].capacity)
-            continue;
-        pthread_mutex_lock(&device->mutex);
-        cores[index].configured = 1;
-        pthread_mutex_unlock(&device->mutex);
-        status = profile_config_call(device, &cores[index],
-                                     RPC_PROFILE_START, generation, 0,
-                                     &enabled);
-        if (status < 0) {
-            pthread_mutex_lock(&device->mutex);
-            if (enabled == 0)
-                cores[index].configured = 0;
-            device->profile_active = 0;
-            pthread_mutex_unlock(&device->mutex);
-            goto fail_installed;
-        }
-    }
+    args = (struct profile_parallel_args){device, cores, generation,
+                                         RPC_PROFILE_START, 0};
+    status = npu_service_parallel(core_slots, profile_parallel_call, &args);
+    if (status < 0)
+        goto fail_installed;
     pthread_mutex_lock(&device->mutex);
     device->profile_transition = 0;
     pthread_mutex_unlock(&device->mutex);
     return 0;
 
 fail_installed:
-    for (index = 0; index < core_slots; ++index) {
-        if (cores[index].configured) {
-            int enabled;
-            int cleanup_status = profile_config_call(
-                device, &cores[index], RPC_PROFILE_STOP, generation, 0,
-                &enabled);
-
-            pthread_mutex_lock(&device->mutex);
-            if (cleanup_status == 0 || enabled == 0)
-                cores[index].configured = 0;
-            else
-                cleanup_remaining = 1;
-            pthread_mutex_unlock(&device->mutex);
-        }
-    }
     pthread_mutex_lock(&device->mutex);
+    device->profile_active = 0;
+    pthread_mutex_unlock(&device->mutex);
+    args.command = RPC_PROFILE_STOP;
+    (void)npu_service_parallel(core_slots, profile_parallel_call, &args);
+    pthread_mutex_lock(&device->mutex);
+    for (index = 0; index < core_slots; ++index)
+        cleanup_remaining |= !!cores[index].configured;
     while (device->profile_readers)
         (void)pthread_cond_wait(&device->condition, &device->mutex);
     if (!cleanup_remaining)
@@ -394,6 +412,7 @@ int npu_service_profile_stop(npu_service_device_t *device)
     size_t index;
     int first_status = 0;
     int remaining = 0;
+    struct profile_parallel_args args;
 
     if (!device)
         return -EINVAL;
@@ -410,43 +429,12 @@ int npu_service_profile_stop(npu_service_device_t *device)
     generation = device->profile_generation;
     pthread_mutex_unlock(&device->mutex);
 
-    for (index = 0; index < core_slots; ++index) {
-        uint32_t count = 0;
-        int config_status;
-        int copy_status = 0;
-        int enabled;
-
-        if (!cores[index].configured)
-            continue;
-        config_status = profile_config_call(device, &cores[index],
-                                            RPC_PROFILE_STOP, generation,
-                                            &count, &enabled);
-        if (config_status == 0 && count) {
-            int keep;
-
-            copy_status = npu_service_profile_copy(
-                device, cores[index].target, generation,
-                cores[index].address, cores[index].capacity, count, &keep);
-        }
-        if (config_status < 0) {
-            if (!first_status)
-                first_status = config_status;
-            if (enabled == 0) {
-                pthread_mutex_lock(&device->mutex);
-                cores[index].configured = 0;
-                pthread_mutex_unlock(&device->mutex);
-            } else {
-                remaining = 1;
-            }
-        } else {
-            pthread_mutex_lock(&device->mutex);
-            cores[index].configured = 0;
-            pthread_mutex_unlock(&device->mutex);
-            if (copy_status < 0 && !first_status)
-                first_status = copy_status;
-        }
-    }
+    args = (struct profile_parallel_args){device, cores, generation,
+                                         RPC_PROFILE_STOP, 1};
+    first_status = npu_service_parallel(core_slots, profile_parallel_call, &args);
     pthread_mutex_lock(&device->mutex);
+    for (index = 0; index < core_slots; ++index)
+        remaining |= !!cores[index].configured;
     while (device->profile_readers)
         (void)pthread_cond_wait(&device->condition, &device->mutex);
     if (!remaining)

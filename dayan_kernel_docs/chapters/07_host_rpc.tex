@@ -20,13 +20,13 @@ Dayan OS 主动请求的 opcode 1--8 必须由 Host 实现。Host 使用反方�
   7 & \code{RPC_PROC_EXIT} & Device $\rightarrow$ Host & 上报 Host root proc 的退出值。 \\
   8 & \code{RPC_PROFILE_FLUSH} & Device $\rightarrow$ Host & 上报一个 Hart 的满 profile FIFO。 \\
   \code{0x0100} & \code{RPC_PROC_CREATE} & Host $\rightarrow$ Device & 在目标 hart 创建 kernel proc。 \\
-  \code{0x0101} & \code{RPC_ICACHE_FLUSH} & Host $\rightarrow$ Device & 在目标 hart 执行一次 \code{fence.i}。 \\
+  \code{0x0101} & \code{RPC_FENCEI} & Host $\rightarrow$ Device & 在目标 hart 执行一次 \code{fence.i}。 \\
   \code{0x0102} & \code{RPC_PROC_PS} & Host $\rightarrow$ Device & 同步目标 hart 的 proc 快照。 \\
   \code{0x0103} & \code{RPC_PROC_KILL_ALL} & Host $\rightarrow$ Device & 终止目标 hart 的所有非系统 proc。 \\
   \code{0x0104} & \code{RPC_PROFILE_CONFIG} & Host $\rightarrow$ Device & 开启或停止目标 hart profile。 \\
   \code{0x0105} & \code{RPC_DCACHE_FLUSH} & Host $\rightarrow$ Device & 失效目标 hart 的一段 D-cache。 \\
   \code{0x8100} & \code{RPC_PROC_CREATE_RESPONSE} & Device $\rightarrow$ Host & 确认 create 请求已处理。 \\
-  \code{0x8101} & \code{RPC_ICACHE_FLUSH_RESPONSE} & Device $\rightarrow$ Host & 确认本 hart 的 I-cache 刷新完成。 \\
+  \code{0x8101} & \code{RPC_FENCEI_RESPONSE} & Device $\rightarrow$ Host & 确认本 hart 的 I-cache 刷新完成。 \\
   \code{0x8102} & \code{RPC_PROC_PS_RESPONSE} & Device $\rightarrow$ Host & proc 快照完成。 \\
   \code{0x8103} & \code{RPC_PROC_KILL_ALL_RESPONSE} & Device $\rightarrow$ Host & kill-all 请求完成。 \\
   \code{0x8104} & \code{RPC_PROFILE_CONFIG_RESPONSE} & Device $\rightarrow$ Host & profile 配置完成。 \\
@@ -113,7 +113,7 @@ Host 把 224-byte \code{rpc_proc_create_request} 放在独占 cache line 的普�
 
 Host Service 校验启动参数，Dayan OS 只检查固件的静态容量，从本 Hart 的 slot 池取得
 root 和子 slot，并把所有启动参数复制到私有对象。Device 将状态改为 \code{RUNNING}，
-完整 flush 描述符，执行 \code{fence.i} 后提交 root token。接收线程同步回复 opcode
+完整 flush 描述符后提交 root token。接收线程同步回复 opcode
 \code{0x8100} 与原描述符地址、清除 MSIP 后才切换，新 kernel 不会阻塞创建回复。
 该响应只表示创建完成，Host 读回后即可释放描述符。退出结果通过 \code{RPC_PROC_EXIT}
 单独发送，Device 不保留创建描述符指针。
@@ -171,15 +171,14 @@ command、hart、FIFO 地址/容量和 64-bit generation；STOP response 还返�
 
 \subsection{发布新代码}
 
-普通 Device RAM 不与 Host 自动保持 D-cache 一致。Host 覆盖模块前，必须通过
-40-byte \code{rpc_dcache_flush_request} 向全部已启动 Hart 发布模块地址和长度，并等待
-\code{RPC_DCACHE_FLUSH_RESPONSE}；Device 对描述符本身先 invalidate，再逐行失效目标范围。
+Host 在 BL1 启动前为每个 Cluster 预留 16 MiB kernel arena，按 ELF 对齐要求单调
+分配模块所有加载节段，包含 \code{.bss} 零初始化。卸载或上传失败不复用已写入地址；
+arena 用尽返回 \code{-ENOMEM}，Service 关闭时统一释放。新模块因此无需 D-cache RPC。
 
-模块首尾按 64-byte 对齐，失效范围不会包含邻接对象；Host 的 loader 互斥锁覆盖失效、
-写入和 entry 发布。每次 \code{RPC_PROC_CREATE} 都在目标 Hart 执行 \code{fence.i}，
-因此模块加载器无需单独发送 I-cache RPC，顺序为 D-cache invalidate、Host write、
-CREATE 中的 \code{fence.i}、kernel 执行。独立 \code{RPC_ICACHE_FLUSH} 仍保留作显式
-同步接口。失效 RPC 超时后，其描述符和目标模块范围都保留到 HAL 关闭。
+Host 上传后向该 Cluster 所有已启动 Hart 并行发送 \code{RPC_FENCEI}，全部完成后
+发布入口。argument 是不解引用的模块地址 cookie，旧 \code{RPC_ICACHE_FLUSH} 名称
+保留为相同 opcode 的别名。loader 互斥锁覆盖分配、上传和发布；模块复用无需上传或 fence。
+Profile START、STOP 及失败回滚使用同一个跨核并发 helper，同一 Hart 的 RPC 仍串行。
 
 \code{RPC_PROC_CREATE} 本身不再执行 \code{fence.i}。create 描述符的请求字段由 Host
 保持不变，因此 Device invalidate 后直接通过 \code{request->field} 校验和初始化；只有

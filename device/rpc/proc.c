@@ -48,7 +48,6 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     /* Return every descriptor cache line to Host before replying. */
     platform_cache_flush(request, sizeof(*request));
     if (task) {
-        platform_instruction_fence();
         /* The blocking receiver will reply and ack before its next switch. */
         thread_schedule(&task->thread);
     }
@@ -144,9 +143,9 @@ int rpc_receive(uint16_t opcode, uint64_t arg, uint64_t *response_command)
 {
     if (opcode == RPC_PROC_CREATE)
         return rpc_proc_create(arg, response_command);
-    if (opcode == RPC_ICACHE_FLUSH) {
+    if (opcode == RPC_FENCEI) {
         platform_instruction_fence();
-        *response_command = rpc_command_pack(RPC_ICACHE_FLUSH_RESPONSE, arg);
+        *response_command = rpc_command_pack(RPC_FENCEI_RESPONSE, arg);
         return 1;
     }
     if (opcode == RPC_DCACHE_FLUSH)

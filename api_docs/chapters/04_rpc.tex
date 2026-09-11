@@ -38,7 +38,7 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
 \begin{dayantable}{Host 到 Device 的管理操作码}{tab:api-rpc-h2d-opcode}{X[42,l] X[58,l]}
   请求 / 响应 & 请求 \\
   \code{RPC_PROC_CREATE} / \code{RPC_PROC_CREATE_RESPONSE} & 在指定 Hart 创建一个由 Host 管理的根 Proc。 \\
-  \code{RPC_ICACHE_FLUSH} / \code{RPC_ICACHE_FLUSH_RESPONSE} & 使已加载代码的指令缓存更新可见。 \\
+  \code{RPC_FENCEI} / \code{RPC_FENCEI_RESPONSE} & 执行一次 \code{fence.i}；原 \code{RPC_ICACHE_FLUSH} 名称保留为别名。 \\
   \code{RPC_DCACHE_FLUSH} / \code{RPC_DCACHE_FLUSH_RESPONSE} & 失效指定普通内存范围的本 Hart 数据缓存。 \\
   \code{RPC_PROC_PS} / \code{RPC_PROC_PS_RESPONSE} & 获取该 Hart 的管理/诊断快照，不参与普通 launch 完成。 \\
   \code{RPC_PROC_KILL_ALL} / \code{RPC_PROC_KILL_ALL_RESPONSE} & 终止该 Hart 上全部非系统 Proc。 \\

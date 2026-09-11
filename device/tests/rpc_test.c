@@ -14,6 +14,7 @@ static _Alignas(RPC_DESCRIPTOR_GRANULE) struct rpc_proc_create_request request;
 static struct rpc_proc_create_request host_request;
 static struct task_proc task;
 static unsigned create_step;
+static unsigned fence_count;
 static int no_slots;
 
 uintptr_t platform_hart_id(void)
@@ -48,12 +49,12 @@ void platform_cache_flush(const void *address, size_t size)
 
 void platform_instruction_fence(void)
 {
-    assert(create_step++ == 3);
+    ++fence_count;
 }
 
 void thread_schedule(struct thread *thread)
 {
-    assert(create_step++ == 4);
+    assert(create_step++ == 3);
     assert(thread == &task.thread);
     assert(host_request.proc_id == thread_id(&task.thread));
     assert(host_request.state == RPC_PROC_RUNNING && !host_request.status);
@@ -97,13 +98,17 @@ static void test_create(void)
         assert(response == rpc_command_pack(RPC_PROC_CREATE_RESPONSE,
                                             (uintptr_t)&request));
         if (attempt == 0) {
-            assert(create_step == 5);
+            assert(create_step == 4);
         } else {
             assert(create_step == 3);
             assert(!host_request.proc_id && host_request.state == RPC_PROC_FAILED);
             assert(host_request.status == (no_slots ? -ENOMEM : -EINVAL));
         }
     }
+    assert(fence_count == 0);
+    assert(rpc_receive(RPC_FENCEI, 0x123456, &response) == 1);
+    assert(fence_count == 1);
+    assert(response == rpc_command_pack(RPC_FENCEI_RESPONSE, 0x123456));
 }
 
 int main(void)
@@ -148,6 +153,8 @@ int main(void)
     assert(RPC_PROC_CREATE == 0x0100);
     assert(RPC_PROC_CREATE_RESPONSE == (RPC_PROC_CREATE | 0x8000));
     assert(RPC_ICACHE_FLUSH == 0x0101);
+    assert(RPC_FENCEI == RPC_ICACHE_FLUSH);
+    assert(RPC_FENCEI_RESPONSE == RPC_ICACHE_FLUSH_RESPONSE);
     assert(RPC_ICACHE_FLUSH_RESPONSE == (RPC_ICACHE_FLUSH | 0x8000));
     assert(RPC_PROC_PS == 0x0102);
     assert(RPC_PROC_PS_RESPONSE == (RPC_PROC_PS | 0x8000));
