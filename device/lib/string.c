@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <stdint.h>
 
 #include "string.h"
 
@@ -6,6 +7,27 @@ void *memcpy(void *restrict dst, const void *restrict src, size_t size)
 {
     unsigned char *out = dst;
     const unsigned char *in = src;
+
+    /*
+     * Once both pointers have the same alignment, a short byte prefix brings
+     * them to a machine-word boundary.  The may_alias typedef keeps this
+     * valid for arbitrary byte storage while allowing the compiler to emit
+     * native word loads/stores.
+     */
+    if ((((uintptr_t)out ^ (uintptr_t)in) & (sizeof(uintptr_t) - 1U)) == 0) {
+        typedef uintptr_t memcpy_word_t __attribute__((__may_alias__));
+
+        while (size && ((uintptr_t)out & (sizeof(uintptr_t) - 1U))) {
+            *out++ = *in++;
+            --size;
+        }
+        while (size >= sizeof(uintptr_t)) {
+            *(memcpy_word_t *)out = *(const memcpy_word_t *)in;
+            out += sizeof(uintptr_t);
+            in += sizeof(uintptr_t);
+            size -= sizeof(uintptr_t);
+        }
+    }
 
     while (size--)
         *out++ = *in++;

@@ -88,6 +88,33 @@ static void basic_test(void)
     mem_free(resized);
 }
 
+static void memcpy_test(void)
+{
+    static _Alignas(64) unsigned char source[192];
+    static _Alignas(64) unsigned char destination[192];
+    size_t source_offset;
+    size_t destination_offset;
+    size_t size;
+
+    for (size_t i = 0; i < sizeof(source); ++i)
+        source[i] = (unsigned char)(i * 13U + 7U);
+    for (source_offset = 0; source_offset < 8; ++source_offset) {
+        for (destination_offset = 0; destination_offset < 8;
+             ++destination_offset) {
+            for (size = 0; size <= 128; ++size) {
+                memset(destination, 0xa5, sizeof(destination));
+                memcpy(destination + destination_offset,
+                       source + source_offset, size);
+                for (size_t i = 0; i < size; ++i)
+                    assert(destination[destination_offset + i] ==
+                           source[source_offset + i]);
+                assert(destination[destination_offset + size] == 0xa5 ||
+                       destination_offset + size == sizeof(destination));
+            }
+        }
+    }
+}
+
 static void growth_test(size_t initial_capacity)
 {
     void *slots[SLOT_COUNT] = { 0 };
@@ -156,6 +183,7 @@ int main(void)
     initial_capacity = mem_capacity();
     assert(initial_capacity == mem_available());
     invalid_growth_test(initial_capacity);
+    memcpy_test();
     basic_test();
     assert(mem_available() == initial_capacity);
     growth_test(initial_capacity);
