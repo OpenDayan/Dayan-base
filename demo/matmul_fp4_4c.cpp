@@ -374,6 +374,8 @@ __host__ static void usage(const char *program)
     std::printf("  N must be a multiple of 16; odd K is supported.\n");
     std::printf("  E2M1 inputs pack two values per byte, low nibble first.\n");
     std::printf("  B is generated/stored as BT[N][K], and C is FP32.\n");
+    std::printf("  C rows have 64 bytes of padding; BT starts 4 KiB into a\n"
+                "  16 KiB-aligned allocation, while A is 16 KiB-aligned.\n");
 }
 
 __host__ static int parse_dimension(const char *text, uint64_t *value)
@@ -427,11 +429,12 @@ __host__ static int wait_and_destroy(npu_event_t *event, uint32_t timeout_ms)
 }
 
 __host__ static int create_buffer(npu_context_t *context, uint64_t size,
-                                  npu_buffer_t **buffer)
+                                  npu_buffer_t **buffer, uint64_t alignment = 64)
 {
     npu_buffer_desc_t desc;
 
     npu_buffer_desc_init(&desc, size);
+    desc.alignment = alignment;
     return npu_buffer_create(context, &desc, buffer);
 }
 
@@ -531,25 +534,26 @@ __host__ static void reference_matmul(const std::vector<uint8_t> &a,
 
 __host__ static int validate_output(const std::vector<float> &actual,
                                     const std::vector<float> &reference,
-                                    size_t n)
+                                    size_t n, size_t row_elements)
 {
     float max_absolute = 0.0f;
     float max_relative = 0.0f;
     size_t worst = 0;
     size_t failures = 0;
 
-    for (size_t index = 0; index < actual.size(); ++index) {
-        const float absolute = std::fabs(actual[index] - reference[index]);
+    for (size_t index = 0; index < reference.size(); ++index) {
+        const float value = actual[index / n * row_elements + index % n];
+        const float absolute = std::fabs(value - reference[index]);
         const float relative = absolute /
             (std::fabs(reference[index]) > 1.0e-6f ?
                  std::fabs(reference[index]) : 1.0f);
 
-        if (!std::isfinite(actual[index]) ||
+        if (!std::isfinite(value) ||
             absolute > 1.0e-4f + 1.0e-4f * std::fabs(reference[index])) {
             if (failures < 8) {
                 std::printf("mismatch C[%zu,%zu]: got=%g expected=%g "
                             "abs=%g\n",
-                            index / n, index % n, actual[index],
+                            index / n, index % n, value,
                             reference[index], absolute);
             }
             ++failures;
@@ -566,11 +570,20 @@ __host__ static int validate_output(const std::vector<float> &actual,
                 max_absolute, max_relative, worst / n, worst % n);
     if (failures) {
         std::printf("[host] FAIL: %zu of %zu outputs differ\n", failures,
-                    actual.size());
+                    reference.size());
         return -1;
     }
+    for (size_t row = 0; row < reference.size() / n; ++row) {
+        for (size_t column = n; column < row_elements; ++column) {
+            if (!std::isnan(actual[row * row_elements + column])) {
+                std::printf("[host] FAIL: C row %zu padding was overwritten\n", row);
+                return -1;
+            }
+        }
+    }
     std::printf("[host] PASS: all %zu outputs match the FP4 reference\n",
-                actual.size());
+                reference.size());
+    std::printf("[host] PASS: C row padding is intact\n");
     return 0;
 }
 
@@ -581,11 +594,14 @@ __host__ int main(int argc, char **argv)
     uint64_t k = 6144;
     size_t a_elements = 0;
     size_t bt_elements = 0;
-    size_t c_elements = 0;
+    size_t c_storage_elements = 0;
     size_t a_bytes = 0;
     size_t bt_bytes = 0;
     size_t c_bytes = 0;
     const uint32_t timeout_ms = 3600000;
+    constexpr uint64_t channel_period = 16 * 1024;
+    constexpr uint64_t bt_offset = 4 * 1024;
+    constexpr uint64_t c_padding_bytes = 64;
 
     if (argc == 2 && std::strcmp(argv[1], "--help") == 0) {
         usage(argv[0]);
@@ -608,12 +624,14 @@ __host__ int main(int argc, char **argv)
                     "32-bit dimensions\n");
         return 2;
     }
+    const uint64_t c_row_elements = n + c_padding_bytes / sizeof(float);
     if (!checked_elements(m, (k + 1) / 2, sizeof(uint8_t), &a_elements, &a_bytes) ||
         !checked_elements(n, (k + 1) / 2, sizeof(uint8_t), &bt_elements,
                           &bt_bytes) ||
-        !checked_elements(m, n, sizeof(float), &c_elements, &c_bytes) ||
+        !checked_elements(m, c_row_elements, sizeof(float),
+                          &c_storage_elements, &c_bytes) ||
         a_bytes > 64U * 1024U * 1024U ||
-        bt_bytes > 64U * 1024U * 1024U ||
+        bt_bytes > 64U * 1024U * 1024U - bt_offset ||
         c_bytes > 64U * 1024U * 1024U) {
         std::printf("shape is too large for this demo\n");
         return 2;
@@ -621,14 +639,16 @@ __host__ int main(int argc, char **argv)
 
     std::vector<uint8_t> a(a_elements);
     std::vector<uint8_t> bt(bt_elements);
-    std::vector<float> c(c_elements, 0.0f);
-    std::vector<float> reference(c_elements, 0.0f);
+    // Pre-fill both output elements and padding, so missed stores and writes
+    // outside the logical row are detected after downloading the padded layout.
+    std::vector<float> c(c_storage_elements, std::numeric_limits<float>::quiet_NaN());
+    std::vector<float> reference((size_t)m * (size_t)n, 0.0f);
     initialize_inputs(&a, &bt, (size_t)m, (size_t)n, (size_t)k);
     reference_matmul(a, bt, &reference, (size_t)m, (size_t)n, (size_t)k);
 
     MatmulFp4Config config = {
         m, n, k, (k + 1) / 2, (k + 1) / 2,
-        n * sizeof(float),
+        c_row_elements * sizeof(float),
     };
     npu_runtime_options_t runtime_options;
     npu_kernel_launch_attrs_t launch_attrs;
@@ -637,6 +657,7 @@ __host__ int main(int argc, char **argv)
     npu_stream_t *stream = nullptr;
     npu_buffer_t *config_buffer = nullptr;
     npu_buffer_t *a_buffer = nullptr;
+    npu_buffer_t *bt_storage = nullptr;
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
     const char *socket_path;
@@ -656,9 +677,15 @@ __host__ int main(int argc, char **argv)
     if (status == 0)
         status = create_buffer(context, sizeof(config), &config_buffer);
     if (status == 0)
-        status = create_buffer(context, a_bytes, &a_buffer);
+        status = create_buffer(context, a_bytes, &a_buffer, channel_period);
     if (status == 0)
-        status = create_buffer(context, bt_bytes, &bt_buffer);
+        status = create_buffer(context, bt_bytes + bt_offset,
+                               &bt_storage, channel_period);
+    // DRAM channels use physical bits [13:12]. Align both backing allocations
+    // to 16 KiB, then offset BT by 4 KiB: its channel is one ahead of A's.
+    // A view applies the same offset to Host transfers and kernel arguments.
+    if (status == 0)
+        status = npu_buffer_create_view(bt_storage, bt_offset, bt_bytes, &bt_buffer);
     if (status == 0)
         status = create_buffer(context, c_bytes, &c_buffer);
     if (status == 0)
@@ -668,6 +695,8 @@ __host__ int main(int argc, char **argv)
         status = upload(stream, a_buffer, a.data(), a_bytes, timeout_ms);
     if (status == 0)
         status = upload(stream, bt_buffer, bt.data(), bt_bytes, timeout_ms);
+    if (status == 0)
+        status = upload(stream, c_buffer, c.data(), c_bytes, timeout_ms);
 
     if (status == 0) {
         const uint64_t cluster_tiles_m =
@@ -694,13 +723,18 @@ __host__ int main(int argc, char **argv)
                     (unsigned)MatmulFp4Shape::kSlices,
                     (unsigned long long)cluster_tiles_m,
                     (unsigned long long)cluster_tiles_n, m < n ? "A" : "B");
+        std::printf("[host] DRAM layout: A/BT stride=%llu B, C stride=%llu B "
+                    "(64 B padding), A alignment=16 KiB, BT offset=4 KiB "
+                    "from a 16 KiB-aligned allocation\n",
+                    (unsigned long long)config.a_stride,
+                    (unsigned long long)config.c_stride);
         status = matmul_fp4_4c(config_buffer, a_buffer, bt_buffer,
                                 c_buffer, &launch_attrs);
     }
     if (status == 0)
         status = download(stream, c.data(), c_buffer, c_bytes, timeout_ms);
     if (status == 0)
-        status = validate_output(c, reference, (size_t)n);
+        status = validate_output(c, reference, (size_t)n, (size_t)c_row_elements);
     if (status < 0)
         std::printf("matmul_fp4_4c demo failed: %d\n", status);
 
@@ -708,6 +742,8 @@ __host__ int main(int argc, char **argv)
         preserve_error(npu_buffer_destroy(c_buffer), &status);
     if (bt_buffer)
         preserve_error(npu_buffer_destroy(bt_buffer), &status);
+    if (bt_storage)
+        preserve_error(npu_buffer_destroy(bt_storage), &status);
     if (a_buffer)
         preserve_error(npu_buffer_destroy(a_buffer), &status);
     if (config_buffer)

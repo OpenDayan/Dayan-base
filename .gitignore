@@ -8,3 +8,4 @@ core
 core.*
 *.json
 !device_tests/*_test/meta.json
+__pycache__/

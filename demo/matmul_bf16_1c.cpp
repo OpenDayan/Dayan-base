@@ -1,31 +1,21 @@
 #include <dayan_kernel.h>
 #include <stdint.h>
 
-#ifndef MATMUL_BF16_1C_SLICES
-#define MATMUL_BF16_1C_SLICES 3
-#endif
-
-#ifndef MATMUL_BF16_1C_URAM_BYTES
-#define MATMUL_BF16_1C_URAM_BYTES (1024U * 1024U)
-#endif
-
-/*
- * B is supplied in transposed storage: A[M][K] * BT[N][K] -> C[M][N].
- * Strides are measured in bytes.
- */
+// A[M][K] BF16 * BT[N][K] BF16 -> C[M][N] FP32; strides are bytes.
+// Each single-Core Task owns complete output tiles and loads both operands.
+// One operand has four slices, the other two physical buffers. Each slice
+// has its own C tile. Two Loader Threads, the root Calc Proc, and one Post
+// Thread coordinate through Local Resources only; Tasks never exchange data.
 struct MatmulBf16Config {
-    uint64_t m;
-    uint64_t n;
-    uint64_t k;
-    uint64_t a_stride;
-    uint64_t bt_stride;
-    uint64_t c_stride;
+    uint64_t m, n, k;
+    uint64_t a_stride, bt_stride, c_stride;
 };
 
-enum : uint64_t {
-    kMatmulBf16TileLong = 384,
-    kMatmulBf16TileShort = 256,
-    kMatmulBf16TileK = 256,
+struct MatmulBf16Shape {
+    enum : int {
+        kTileM = 512, kTileN = 384, kTileK = 256, kSlices = 4,
+        kWorkers = 3, kUramBytes = 1536 * 1024,
+    };
 };
 
 #if defined(__DAYAN_DEVICE__)
@@ -35,735 +25,279 @@ enum : uint64_t {
 
 namespace matmul_bf16_1c_detail {
 
-struct Constants {
-    enum : int {
-        kLsuLocal = 0,
-        kLsuShared = 0,
-        kLsuCStore = 1,
-        kTileK = kMatmulBf16TileK,
-        kUramAlignment = 32,
-        kUramWindowStride = 2 * 1024 * 1024,
-    };
+// One Local Resource per sliced input, buffered input, and C slice.
+enum : int {
+    TM = MatmulBf16Shape::kTileM, TN = MatmulBf16Shape::kTileN,
+    TK = MatmulBf16Shape::kTileK, Slices = MatmulBf16Shape::kSlices,
+    LocalResources = 2 * Slices + 2,
 };
-
 enum : uint64_t {
-    kStride512Swizzle = MAT_BATCH_SWIZZLE(7, 2, 3),
-    kStride1024Swizzle = MAT_BATCH_SWIZZLE(7, 3, 3),
+    // VisualSwizzle, 32 banks, 8 x 32B per beat: A/BT's 512B stride
+    // and C's 1536B stride improve from 4x to 1x with M7/B2/S3.
+    // C's 384B stride is already 1x with identity. All cover 32/32 banks
+    // over four horizontal blocks; LSU and MAT use the same mapping.
+    InputSwizzle = MAT_BATCH_SWIZZLE(7, 2, 3),
+    WindowStride = 2 * 1024 * 1024,
 };
+static_assert(TM % Slices == 0 && TN % (Slices * 16) == 0);
+static_assert(LocalResources <= 32);
+static_assert(2 * TM * TK * 2 + TN * TK * 2 + TM * TN * 4 <=
+              MatmulBf16Shape::kUramBytes);
+static_assert(TM * TK * 2 + 2 * TN * TK * 2 + TM * TN * 4 <=
+              MatmulBf16Shape::kUramBytes);
 
-static_assert(MATMUL_BF16_1C_SLICES == 1 ||
-                  MATMUL_BF16_1C_SLICES == 3,
-              "MATMUL_BF16_1C_SLICES must be 1 or 3");
-static_assert((Constants::kUramWindowStride &
-               (Constants::kUramWindowStride - 1)) == 0,
-              "URAM window stride must be a power of two");
-
-static constexpr uint64_t align_up(uint64_t value, uint64_t alignment)
-{
-    return (value + alignment - 1U) & ~(alignment - 1U);
-}
-
-static inline int min_int(int left, int right)
-{
-    return left < right ? left : right;
-}
-
-template <bool ProducerLoadsA, int SliceCount> struct UramLayout {
-    enum : int {
-        kTileM = ProducerLoadsA ? kMatmulBf16TileShort
-                                : kMatmulBf16TileLong,
-        kTileN = ProducerLoadsA ? kMatmulBf16TileLong
-                                : kMatmulBf16TileShort,
-    };
-
-    static constexpr int slice_offset(int slice)
-    {
-        return (ProducerLoadsA ? kTileN : kTileM) *
-               slice / SliceCount;
-    }
-
-    static constexpr int slice_size(int slice)
-    {
-        return slice_offset(slice + 1) - slice_offset(slice);
-    }
-
-    static constexpr int max_rows(int slice)
-    {
-        return ProducerLoadsA ? kTileM : slice_size(slice);
-    }
-
-    static constexpr int max_cols(int slice)
-    {
-        return ProducerLoadsA ? slice_size(slice) : kTileN;
-    }
-
-    static constexpr uint64_t local_bytes(int slice)
-    {
-        return align_up((uint64_t)slice_size(slice) * Constants::kTileK *
-                            sizeof(uint16_t),
-                        Constants::kUramAlignment);
-    }
-
-    static constexpr uint64_t shared_bytes()
-    {
-        return align_up((uint64_t)(ProducerLoadsA ? kTileM : kTileN) *
-                            Constants::kTileK *
-                            sizeof(uint16_t),
-                        Constants::kUramAlignment);
-    }
-
-    static constexpr uint64_t c_bytes(int slice)
-    {
-        return align_up((uint64_t)max_rows(slice) * max_cols(slice) *
-                            sizeof(float),
-                        Constants::kUramAlignment);
-    }
-
-    static constexpr uint64_t local_base(int slice)
-    {
-        uint64_t base = 0;
-
-        for (int index = 0; index < slice; ++index)
-            base = align_up(base + local_bytes(index),
-                            Constants::kUramAlignment);
-        return base;
-    }
-
-    static constexpr uint64_t local_end()
-    {
-        return align_up(local_base(SliceCount - 1) +
-                            local_bytes(SliceCount - 1),
-                        Constants::kUramAlignment);
-    }
-
-    static constexpr uint64_t shared_base(int buffer)
-    {
-        return align_up(local_end() +
-                            (uint64_t)buffer * shared_bytes(),
-                        Constants::kUramAlignment);
-    }
-
-    static constexpr uint64_t c_start()
-    {
-        return align_up(shared_base(1) + shared_bytes(),
-                        Constants::kUramAlignment);
-    }
-
-    static constexpr uint64_t c_base(int slice)
-    {
-        uint64_t base = c_start();
-
-        for (int index = 0; index < slice; ++index)
-            base = align_up(base + c_bytes(index),
-                            Constants::kUramAlignment);
-        return base;
-    }
-
-    static constexpr uint64_t total_bytes()
-    {
-        return align_up(c_base(SliceCount - 1) + c_bytes(SliceCount - 1),
-                        Constants::kUramAlignment);
-    }
-};
-
-using AProducerLayout = UramLayout<true, MATMUL_BF16_1C_SLICES>;
-using BProducerLayout = UramLayout<false, MATMUL_BF16_1C_SLICES>;
-
-static_assert(MATMUL_BF16_1C_SLICES != 3 ||
-                  AProducerLayout::slice_size(0) == 128,
-              "A-producer consumers must own 128 columns");
-static_assert(MATMUL_BF16_1C_SLICES != 3 ||
-                  BProducerLayout::slice_size(0) == 128,
-              "B-producer consumers must own 128 rows");
-static_assert(MATMUL_BF16_1C_SLICES != 3 ||
-                  AProducerLayout::total_bytes() == 832U * 1024U,
-              "A-producer three-slice layout must use 832 KiB");
-static_assert(MATMUL_BF16_1C_SLICES != 3 ||
-                  BProducerLayout::total_bytes() == 832U * 1024U,
-              "B-producer three-slice layout must use 832 KiB");
-static_assert(AProducerLayout::total_bytes() <= MATMUL_BF16_1C_URAM_BYTES,
-              "A-producer matmul URAM layout is too large");
-static_assert(BProducerLayout::total_bytes() <= MATMUL_BF16_1C_URAM_BYTES,
-              "B-producer matmul URAM layout is too large");
-
-struct SharedBuffer {
-    dayan_resource_t resource;
-    volatile uint64_t generation;
+struct Buffer {
     uint64_t uram;
+    dayan_resource_t resource;
+};
+struct State {
+    const MatmulBf16Config *cfg;
+    uint64_t input[2], output, generations, c_swizzle;
+    uint32_t task, tasks;
+    int nt, kt, slice_m, slice_n;
+    bool buffer_a;
+    Buffer a[Slices], b[Slices], c[Slices];
+};
+struct LoadArgs {
+    State *state;
+    bool b;
+};
+struct Node {
+    uint64_t row, col;
+    int rows, cols, inner, step, a_index, b_index, users;
 };
 
-struct MatmulState {
-    int m;
-    int n;
-    int k;
-    int count_m;
-    int count_n;
-    int count_k;
-    uint64_t a_base;
-    uint64_t bt_base;
-    uint64_t c_base;
-    uint64_t a_stride;
-    uint64_t bt_stride;
-    uint64_t c_stride;
-    uint64_t uram_base;
-    SharedBuffer shared[2];
-    volatile int status;
-    volatile uint32_t start;
-    volatile uint32_t abort;
-};
-
-template <bool ProducerLoadsA>
-static inline int rows_for_tile(const MatmulState *state, int tile_m)
+static int extent(int64_t remaining, int size)
 {
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-    const int row_base = tile_m * Layout::kTileM;
-
-    if (state->m <= row_base)
-        return 0;
-    return min_int(state->m - row_base, Layout::kTileM);
+    return remaining <= 0 ? 0 : (remaining < size ? (int)remaining : size);
 }
 
-template <bool ProducerLoadsA>
-static inline int cols_for_tile(const MatmulState *state, int tile_n)
+// All stages use the same (output tile, K tile, slice) order. phase selects
+// the physical double buffer; Resource lifecycle phases are tracked separately.
+static Node node(const State &s, uint64_t generation, int slice)
 {
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-    const int col_base = tile_n * Layout::kTileN;
-
-    if (state->n <= col_base)
-        return 0;
-    return min_int(state->n - col_base, Layout::kTileN);
+    const uint64_t out = s.task + generation / s.kt * s.tasks;
+    const int step = (int)(generation % s.kt);
+    const int phase = (int)(generation & 1);
+    const uint64_t row = out / s.nt * TM;
+    const uint64_t col = out % s.nt * TN;
+    const int rows = extent((int64_t)s.cfg->m - (int64_t)row, TM);
+    const int cols = extent((int64_t)s.cfg->n - (int64_t)col, TN);
+    const int row_offset = s.buffer_a ? 0 : slice * s.slice_m;
+    const int col_offset = s.buffer_a ? slice * s.slice_n : 0;
+    const int users = s.buffer_a ? (cols + s.slice_n - 1) / s.slice_n
+                                 : (rows + s.slice_m - 1) / s.slice_m;
+    return {row + row_offset, col + col_offset,
+            extent(rows - row_offset, s.slice_m),
+            extent(cols - col_offset, s.slice_n),
+            extent((int64_t)s.cfg->k - (int64_t)step * TK, TK), step,
+            s.buffer_a ? phase : slice, s.buffer_a ? slice : phase, users};
 }
 
-template <bool ProducerLoadsA>
-static inline int rows_for_slice(const MatmulState *state, int tile_m,
-                                 int slice)
+static void check(int status)
 {
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-
-    if (ProducerLoadsA)
-        return rows_for_tile<ProducerLoadsA>(state, tile_m);
-    const int row_base = tile_m * Layout::kTileM +
-                         Layout::slice_offset(slice);
-
-    if (state->m <= row_base)
-        return 0;
-    return min_int(state->m - row_base, Layout::slice_size(slice));
-}
-
-template <bool ProducerLoadsA>
-static inline int cols_for_slice(const MatmulState *state, int tile_n,
-                                 int slice)
-{
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-
-    if (!ProducerLoadsA)
-        return cols_for_tile<ProducerLoadsA>(state, tile_n);
-    const int col_base = tile_n * Layout::kTileN +
-                         Layout::slice_offset(slice);
-
-    if (state->n <= col_base)
-        return 0;
-    return min_int(state->n - col_base, Layout::slice_size(slice));
-}
-
-static inline int k_for_tile(const MatmulState *state, int tile_k)
-{
-    const int k_base = tile_k * Constants::kTileK;
-
-    if (state->k <= k_base)
-        return 0;
-    return min_int(state->k - k_base, Constants::kTileK);
-}
-
-static inline int remember_error(MatmulState *state, int status)
-{
-    if (status < 0 && state->status == 0)
-        state->status = status;
-    return status;
-}
-
-/* major is the contiguous byte count in a row; minor is the row count. */
-template <long TcsrId>
-static inline void load_matrix(uint64_t major_left, uint64_t minor_left,
-                               uint64_t major_tile, uint64_t minor_tile,
-                               uint64_t uram_base, uint64_t dram_base)
-{
-    if (minor_left == 0 || major_left == 0)
-        return;
-
-    const uint64_t real_minor =
-        minor_left < minor_tile ? minor_left : minor_tile;
-    __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM1>(real_minor - 1U);
-
-    if (major_left >= major_tile) {
-        __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM0>(
-            major_tile / 64U - 1U);
-        __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(63);
-        __tx_lsu_dma_d2u<TcsrId>((long)uram_base, (long)dram_base);
-        return;
-    }
-
-    while (major_left) {
-        uint64_t handled_bytes = major_left & ~0x3fULL;
-        const uint64_t remaining_bytes = major_left & 0x3fULL;
-
-        if (handled_bytes == 0 && remaining_bytes > 0) {
-            __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM0>(0);
-            __tx_lsu_tcsr_write<
-                TcsrId * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(
-                remaining_bytes - 1U);
-            handled_bytes = remaining_bytes;
-        } else {
-            __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM0>(
-                handled_bytes / 64U - 1U);
-            __tx_lsu_tcsr_write<
-                TcsrId * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(63);
-        }
-        __tx_lsu_dma_d2u<TcsrId>((long)uram_base, (long)dram_base);
-        uram_base += handled_bytes;
-        dram_base += handled_bytes;
-        major_left -= handled_bytes;
-    }
-}
-
-template <long TcsrId>
-static inline void store_matrix(uint64_t major_left, uint64_t minor_left,
-                                uint64_t major_tile, uint64_t minor_tile,
-                                uint64_t uram_base, uint64_t dram_base)
-{
-    if (minor_left == 0 || major_left == 0)
-        return;
-
-    const uint64_t real_minor =
-        minor_left < minor_tile ? minor_left : minor_tile;
-    __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM1>(real_minor - 1U);
-
-    if (major_left >= major_tile) {
-        __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM0>(
-            major_tile / 64U - 1U);
-        __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(63);
-        __tx_lsu_dma_u2d<TcsrId>((long)dram_base, (long)uram_base);
-        return;
-    }
-
-    while (major_left) {
-        uint64_t handled_bytes = major_left & ~0x3fULL;
-        const uint64_t remaining_bytes = major_left & 0x3fULL;
-
-        if (handled_bytes == 0 && remaining_bytes > 0) {
-            __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM0>(0);
-            __tx_lsu_tcsr_write<
-                TcsrId * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(
-                remaining_bytes - 1U);
-            handled_bytes = remaining_bytes;
-        } else {
-            __tx_lsu_tcsr_write<TcsrId * LSU_GROUPSZ + LSU_DIM0>(
-                handled_bytes / 64U - 1U);
-            __tx_lsu_tcsr_write<
-                TcsrId * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(63);
-        }
-        __tx_lsu_dma_u2d<TcsrId>((long)dram_base, (long)uram_base);
-        uram_base += handled_bytes;
-        dram_base += handled_bytes;
-        major_left -= handled_bytes;
-    }
-}
-
-static inline int wait_for_generation(SharedBuffer *buffer,
-                                      uint64_t expected_generation)
-{
-    for (;;) {
-        if (buffer->generation == expected_generation)
-            return dayan_resource_wait_ready(buffer->resource,
-                                              (expected_generation / 2U) & 1U);
-
-        /*
-         * A READY buffer with another generation still has slower users.
-         * Wait until they release it, then let the producer publish the next
-         * generation.  The producer writes generation immediately after
-         * allocating the FREE resource, before issuing its DMA.
-         */
-        dayan_yield();
-    }
-}
-
-template <bool ProducerLoadsA, long GroupBase, int Slice>
-static void consume_slice(void *argument)
-{
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-
-    MatmulState *state = (MatmulState *)argument;
-    constexpr int slice_offset = Layout::slice_offset(Slice);
-    constexpr int max_rows = Layout::max_rows(Slice);
-    constexpr int max_cols = Layout::max_cols(Slice);
-    constexpr int local_rows = Layout::slice_size(Slice);
-    constexpr uint64_t c_row_bytes = max_cols * sizeof(float);
-    constexpr uint64_t c_swizzle =
-        c_row_bytes == 1024 ? kStride1024Swizzle : kStride512Swizzle;
-    const uint64_t local_uram =
-        state->uram_base + Layout::local_base(Slice);
-    const uint64_t c_uram = state->uram_base + Layout::c_base(Slice);
-
-    static_assert(c_row_bytes == 512 || c_row_bytes == 1024 ||
-                      c_row_bytes == 1536,
-                  "unsupported C row stride for swizzle");
-
-    while (!state->start)
-        dayan_yield();
-    if (state->abort)
-        return;
-
-    long checksum = 0;
-    set_lsu_matrix<GroupBase + Constants::kLsuLocal>(
-        checksum, local_rows,
-        Constants::kTileK * (int)sizeof(uint16_t),
-        (long)(ProducerLoadsA ? state->bt_stride : state->a_stride),
-        Constants::kTileK * (int)sizeof(uint16_t));
-    set_lsu_matrix<GroupBase + Constants::kLsuCStore>(
-        checksum, max_rows, max_cols * (int)sizeof(float),
-        max_cols * (int)sizeof(float), (long)state->c_stride);
-    __tx_lsu_tcsr_write<
-        (GroupBase + Constants::kLsuLocal) * LSU_GROUPSZ +
-        LSU_URAMWRITESWIZZLEMBS>(kStride512Swizzle);
-    __tx_lsu_tcsr_write<
-        (GroupBase + Constants::kLsuCStore) * LSU_GROUPSZ +
-        LSU_URAMREADSWIZZLEMBS>(c_swizzle);
-
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_M>(max_rows - 1);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_N>(max_cols - 1);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_K>(
-        Constants::kTileK - 1);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASTRIDE>(
-        Constants::kTileK * sizeof(uint16_t));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSTRIDE>(
-        Constants::kTileK * sizeof(uint16_t));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSTRIDE>(
-        max_cols * sizeof(float));
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_ASWIZZLEMBS>(
-        kStride512Swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_BSWIZZLEMBS>(
-        kStride512Swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_CSWIZZLEMBS>(c_swizzle);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_PERSISTENTMODE>(0);
-    __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_DATATYPE>(
-        BaseNPUInstBuilder::DT_BF16);
-
-    for (int tile_m = 0; tile_m < state->count_m; ++tile_m) {
-        const int real_rows =
-            rows_for_slice<ProducerLoadsA>(state, tile_m, Slice);
-
-        if (real_rows == 0)
-            continue;
-        for (int tile_n = 0; tile_n < state->count_n; ++tile_n) {
-            const int real_cols =
-                cols_for_slice<ProducerLoadsA>(state, tile_n, Slice);
-
-            if (real_cols == 0)
-                continue;
-
-            for (int tile_k = 0; tile_k < state->count_k; ++tile_k) {
-                const uint64_t generation =
-                    ((uint64_t)tile_m * state->count_n + tile_n) *
-                        state->count_k +
-                    tile_k;
-                SharedBuffer *shared = &state->shared[generation & 1U];
-                const int real_k = k_for_tile(state, tile_k);
-                const bool first_k = tile_k == 0;
-                const bool last_k = tile_k + 1 == state->count_k;
-                const uint64_t local_dram =
-                    (ProducerLoadsA ? state->bt_base : state->a_base) +
-                    (uint64_t)tile_k * Constants::kTileK *
-                        sizeof(uint16_t) +
-                    (ProducerLoadsA
-                         ? ((uint64_t)tile_n * Layout::kTileN +
-                            slice_offset) * state->bt_stride
-                         : ((uint64_t)tile_m * Layout::kTileM +
-                            slice_offset) * state->a_stride);
-
-                load_matrix<GroupBase + Constants::kLsuLocal>(
-                    (uint64_t)real_k * sizeof(uint16_t),
-                    ProducerLoadsA ? real_cols : real_rows,
-                    Constants::kTileK * sizeof(uint16_t), local_rows,
-                    local_uram, local_dram);
-                dayan_wait_lsu();
-
-                int status = wait_for_generation(shared, generation);
-                if (status < 0) {
-                    remember_error(state, status);
-                    return;
-                }
-
-                __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_M>(
-                    real_rows - 1);
-                __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_N>(
-                    real_cols - 1);
-                __tx_mat_tcsr_write<GroupBase * MAT_GROUPSZ + MAT_K>(
-                    real_k - 1);
-                if (ProducerLoadsA) {
-                    if (first_k)
-                        __tx_mat_mm<GroupBase>((long)c_uram,
-                                               (long)shared->uram,
-                                               (long)local_uram);
-                    else
-                        __tx_mat_mma<GroupBase>((long)c_uram,
-                                                (long)shared->uram,
-                                                (long)local_uram);
-                } else {
-                    if (first_k)
-                        __tx_mat_mm<GroupBase>((long)c_uram,
-                                               (long)local_uram,
-                                               (long)shared->uram);
-                    else
-                        __tx_mat_mma<GroupBase>((long)c_uram,
-                                                (long)local_uram,
-                                                (long)shared->uram);
-                }
-                dayan_wait_mat();
-
-                status = dayan_resource_consume_mat(
-                    DAYAN_RESOURCE_MASK(shared->resource));
-                if (status < 0) {
-                    remember_error(state, status);
-                    return;
-                }
-
-                if (last_k) {
-                    const uint64_t c_dram =
-                        state->c_base +
-                        ((uint64_t)tile_n * Layout::kTileN +
-                         (ProducerLoadsA ? slice_offset : 0)) *
-                            sizeof(float) +
-                        ((uint64_t)tile_m * Layout::kTileM +
-                         (ProducerLoadsA ? 0 : slice_offset)) *
-                            state->c_stride;
-
-                    store_matrix<GroupBase + Constants::kLsuCStore>(
-                        (uint64_t)real_cols * sizeof(float), real_rows,
-                        max_cols * sizeof(float), max_rows,
-                        c_uram, c_dram);
-                    /* The next local-input wait also retires this C store. */
-                } else {
-                    dayan_yield();
-                }
-            }
-        }
-    }
-    dayan_wait_lsu();
-    dayan_wait_mat();
-}
-
-template <bool ProducerLoadsA>
-static void producer_thread(void *argument)
-{
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-
-    MatmulState *state = (MatmulState *)argument;
-
-    while (!state->start)
-        dayan_yield();
-    if (state->abort)
-        return;
-
-    long checksum = 0;
-    set_lsu_matrix<Constants::kLsuShared>(
-        checksum,
-        ProducerLoadsA ? Layout::kTileM : Layout::kTileN,
-        Constants::kTileK * (int)sizeof(uint16_t),
-        (long)(ProducerLoadsA ? state->a_stride : state->bt_stride),
-        Constants::kTileK * (int)sizeof(uint16_t));
-    __tx_lsu_tcsr_write<
-        Constants::kLsuShared * LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(
-        kStride512Swizzle);
-
-    for (int tile_m = 0; tile_m < state->count_m; ++tile_m) {
-        for (int tile_n = 0; tile_n < state->count_n; ++tile_n) {
-            int users = 0;
-
-            for (int slice = 0; slice < MATMUL_BF16_1C_SLICES; ++slice) {
-                if (rows_for_slice<ProducerLoadsA>(
-                        state, tile_m, slice) > 0 &&
-                    cols_for_slice<ProducerLoadsA>(
-                        state, tile_n, slice) > 0)
-                    ++users;
-            }
-            if (!users)
-                continue;
-
-            for (int tile_k = 0; tile_k < state->count_k; ++tile_k) {
-                const uint64_t generation =
-                    ((uint64_t)tile_m * state->count_n + tile_n) *
-                        state->count_k +
-                    tile_k;
-                SharedBuffer *shared = &state->shared[generation & 1U];
-                const int real_k = k_for_tile(state, tile_k);
-                const uint64_t shared_dram =
-                    (ProducerLoadsA ? state->a_base : state->bt_base) +
-                    (uint64_t)tile_k * Constants::kTileK *
-                        sizeof(uint16_t) +
-                    (ProducerLoadsA
-                         ? (uint64_t)tile_m * Layout::kTileM *
-                               state->a_stride
-                         : (uint64_t)tile_n * Layout::kTileN *
-                               state->bt_stride);
-                int status = dayan_resource_wait_free(shared->resource);
-
-                if (status < 0) {
-                    remember_error(state, status);
-                    return;
-                }
-                shared->generation = generation;
-                load_matrix<Constants::kLsuShared>(
-                    (uint64_t)real_k * sizeof(uint16_t),
-                    ProducerLoadsA
-                        ? rows_for_tile<ProducerLoadsA>(state, tile_m)
-                        : cols_for_tile<ProducerLoadsA>(state, tile_n),
-                    Constants::kTileK * sizeof(uint16_t),
-                    ProducerLoadsA ? Layout::kTileM : Layout::kTileN,
-                    shared->uram, shared_dram);
-                status = dayan_resource_produce_lsu(
-                    shared->resource, (uint32_t)users, 0);
-                if (status < 0) {
-                    remember_error(state, status);
-                    return;
-                }
-                dayan_yield();
-            }
-        }
-    }
-}
-
-template <bool ProducerLoadsA>
-static int run_pipeline(const MatmulBf16Config *config,
-                        const uint16_t *a, const uint16_t *bt, float *c,
-                        uint64_t uram_base)
-{
-    using Layout = UramLayout<ProducerLoadsA, MATMUL_BF16_1C_SLICES>;
-
-    MatmulState state;
-    state.m = (int)config->m;
-    state.n = (int)config->n;
-    state.k = (int)config->k;
-    state.count_m = (state.m + Layout::kTileM - 1) / Layout::kTileM;
-    state.count_n = (state.n + Layout::kTileN - 1) / Layout::kTileN;
-    state.count_k = (state.k + Constants::kTileK - 1) /
-                    Constants::kTileK;
-    state.a_base = (uint64_t)(uintptr_t)a;
-    state.bt_base = (uint64_t)(uintptr_t)bt;
-    state.c_base = (uint64_t)(uintptr_t)c;
-    state.a_stride = config->a_stride;
-    state.bt_stride = config->bt_stride;
-    state.c_stride = config->c_stride;
-    state.uram_base = uram_base;
-    state.status = 0;
-    state.start = 0;
-    state.abort = 0;
-
-    for (int index = 0; index < 2; ++index) {
-        state.shared[index].resource = DAYAN_LOCAL_RESOURCE(index);
-        state.shared[index].generation = ~0ULL;
-        state.shared[index].uram =
-            state.uram_base + Layout::shared_base(index);
-    }
-
-    dayan_thread_resources_t resources;
-    dayan_thread_resources_init(&resources);
-    resources.local_resource_count = 2;
-    resources.lsu_tcsr_count = 1;
-    int status = dayan_create_thread("producer",
-                                     producer_thread<ProducerLoadsA>, &state,
-                                     &resources);
-    resources.lsu_tcsr_count = 2;
-    resources.mat_tcsr_count = 1;
-    if (status >= 0)
-        status = dayan_create_thread("consumer-0",
-                                     consume_slice<ProducerLoadsA, 0, 0>,
-                                     &state,
-                                     &resources);
-#if MATMUL_BF16_1C_SLICES == 3
-    if (status >= 0)
-        status = dayan_create_thread("consumer-1",
-                                     consume_slice<ProducerLoadsA, 0, 1>,
-                                     &state,
-                                     &resources);
-    if (status >= 0)
-        status = dayan_create_thread("consumer-2",
-                                     consume_slice<ProducerLoadsA, 0, 2>,
-                                     &state,
-                                     &resources);
-#endif
-    if (status < 0) {
-        state.status = status;
-        state.abort = 1;
-        state.start = 1;
-        (void)dayan_thread_join_all();
-        return status;
-    }
-
-    state.start = 1;
-    status = dayan_thread_join_all();
-    if (status < 0 && state.status == 0)
-        state.status = status;
-    return state.status;
-}
-
-static inline int config_valid(const MatmulBf16Config *config)
-{
-    const uint64_t int_limit = 0x7ffff000ULL;
-
-    if (!config || !config->m || !config->n || !config->k ||
-        config->m > int_limit || config->n > int_limit ||
-        config->k > int_limit ||
-        (config->n % 16U) != 0 ||
-        config->a_stride < config->k * sizeof(uint16_t) ||
-        config->bt_stride < config->k * sizeof(uint16_t) ||
-        config->c_stride < config->n * sizeof(float) ||
-        (config->c_stride & 63U) ||
-        config->a_stride > 0x7fffffffffffffffULL ||
-        config->bt_stride > 0x7fffffffffffffffULL ||
-        config->c_stride > 0x7fffffffffffffffULL)
-        return 0;
-    return 1;
-}
-
-} // namespace matmul_bf16_1c_detail
-
-#endif /* __DAYAN_DEVICE__ */
-
-__kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
-                               const uint16_t *a, const uint16_t *bt,
-                               float *c)
-{
-    using namespace matmul_bf16_1c_detail;
-
-    if (!config_valid(config) || !a || !bt || !c ||
-        dayan_task_mode() != 1U ||
-        dayan_task_dim(DAYAN_TASK_X) != 1U ||
-        dayan_task_dim(DAYAN_TASK_Y) != 1U ||
-        dayan_task_dim(DAYAN_TASK_Z) != 1U) {
-        dayan_thread_exit(-22);
-    }
-
-    void *uram = dayan_uram_base();
-    const bool producer_loads_a = config->m < config->n;
-    const uint64_t required_uram =
-        producer_loads_a ? AProducerLayout::total_bytes()
-                         : BProducerLayout::total_bytes();
-    if (!uram || dayan_uram_size() < required_uram)
-        dayan_thread_exit(-12);
-
-    const uint64_t uram_base = (uint64_t)(uintptr_t)uram &
-                               (Constants::kUramWindowStride - 1U);
-    const int status = producer_loads_a
-        ? run_pipeline<true>(config, a, bt, c, uram_base)
-        : run_pipeline<false>(config, a, bt, c, uram_base);
     if (status < 0)
         dayan_thread_exit(status);
 }
 
-DAYAN_KERNEL_RESOURCE_DESC_EX(
-    matmul_bf16_1c, 1U, MATMUL_BF16_1C_SLICES + 1,
-    DAYAN_KERNEL_RESOURCE_LOCKED_TASK, 0, MATMUL_BF16_1C_URAM_BYTES,
-    2 * MATMUL_BF16_1C_SLICES + 1, MATMUL_BF16_1C_SLICES, 0, 0, 2, 0);
+static void loader(void *argument)
+{
+    const LoadArgs &args = *(LoadArgs *)argument;
+    const State &s = *args.state;
+    const bool b = args.b;
+    const bool buffered = b ? !s.buffer_a : s.buffer_a;
+    long checksum = 0;
+
+    for (uint64_t gen = 0; gen < s.generations; ++gen) {
+        for (int slice = 0; slice < (buffered ? 1 : Slices); ++slice) {
+            const Node n = node(s, gen, slice);
+            if (!n.rows || !n.cols)
+                continue;
+            const Buffer &dst = b ? s.b[n.b_index] : s.a[n.a_index];
+            const int rows = b ? n.cols : n.rows;
+            const int bytes = n.inner * 2;
+            const uint32_t users = buffered ? n.users : 1;
+            const uint64_t stride = b ? s.cfg->bt_stride : s.cfg->a_stride;
+            const uint64_t src = s.input[b] + (b ? n.col : n.row) * stride +
+                                 (uint64_t)n.step * TK * 2;
+
+            check(dayan_resource_wait_free(dst.resource));
+            set_lsu_matrix<0>(checksum, rows, TK * 2, stride, TK * 2);
+            __tx_lsu_tcsr_write<LSU_URAMWRITESWIZZLEMBS>(InputSwizzle);
+            // One full-burst DMA and, for a K tail, one short DMA.
+            for (int pos = 0; pos < bytes;) {
+                const int count = bytes - pos >= 64 ? (bytes - pos) / 64 : 1;
+                const int request = bytes - pos >= 64 ? 64 : bytes - pos;
+                __tx_lsu_tcsr_write<LSU_DIM0>(count - 1);
+                __tx_lsu_tcsr_write<LSU_REQUESTREADSIZE>(request - 1);
+                __tx_lsu_dma_d2u<0>((long)(dst.uram + pos), (long)(src + pos));
+                pos += count * request;
+            }
+            check(dayan_resource_produce_lsu(dst.resource, users, 0));
+        }
+    }
+    dayan_wait_lsu();
+}
+
+static void calc(void *argument)
+{
+    const State &s = *(State *)argument;
+    uint64_t phases = 0;
+    __tx_mat_tcsr_write<MAT_ASTRIDE>(TK * 2);
+    __tx_mat_tcsr_write<MAT_BSTRIDE>(TK * 2);
+    __tx_mat_tcsr_write<MAT_CSTRIDE>(s.slice_n * 4);
+    __tx_mat_tcsr_write<MAT_ASWIZZLEMBS>(InputSwizzle);
+    __tx_mat_tcsr_write<MAT_BSWIZZLEMBS>(InputSwizzle);
+    __tx_mat_tcsr_write<MAT_CSWIZZLEMBS>(s.c_swizzle);
+    __tx_mat_tcsr_write<MAT_PERSISTENTMODE>(0);
+    __tx_mat_tcsr_write<MAT_DATATYPE>(BaseNPUInstBuilder::DT_BF16);
+    for (uint64_t gen = 0; gen < s.generations; ++gen) {
+        for (int slice = 0; slice < Slices; ++slice) {
+            const Node n = node(s, gen, slice);
+            if (!n.rows || !n.cols)
+                continue;
+            const Buffer &a = s.a[n.a_index], &b = s.b[n.b_index], &c = s.c[slice];
+            const auto inputs = DAYAN_RESOURCE_MASK(a.resource) |
+                                DAYAN_RESOURCE_MASK(b.resource);
+            check(dayan_resource_wait(
+                n.step == 0 ? DAYAN_RESOURCE_MASK(c.resource) : 0,
+                inputs, phases, 0));
+            __tx_mat_tcsr_write<MAT_M>(n.rows - 1);
+            __tx_mat_tcsr_write<MAT_N>(n.cols - 1);
+            __tx_mat_tcsr_write<MAT_K>(n.inner - 1);
+            if (n.step == 0)
+                __tx_mat_mm<0>((long)c.uram, (long)a.uram, (long)b.uram);
+            else
+                __tx_mat_mma<0>((long)c.uram, (long)a.uram, (long)b.uram);
+            if (n.step + 1 == s.kt)
+                check(dayan_resource_produce_mat(c.resource, 1, inputs));
+            else
+                check(dayan_resource_consume_mat(inputs));
+            // Sliced inputs advance once per use; the buffered input is shared
+            // by all active slices of this generation.
+            phases ^= DAYAN_RESOURCE_MASK(s.buffer_a ? b.resource : a.resource);
+            if (slice + 1 == n.users)
+                phases ^= DAYAN_RESOURCE_MASK(s.buffer_a ? a.resource : b.resource);
+        }
+    }
+    dayan_wait_mat();
+}
+
+static void post(void *argument)
+{
+    const State &s = *(State *)argument;
+    uint64_t phases = 0;
+    long checksum = 0;
+    set_lsu_matrix<0>(checksum, s.slice_m, s.slice_n * 4,
+                      s.slice_n * 4, s.cfg->c_stride);
+    __tx_lsu_tcsr_write<LSU_URAMREADSWIZZLEMBS>(s.c_swizzle);
+    for (uint64_t gen = s.kt - 1; gen < s.generations; gen += s.kt) {
+        for (int slice = 0; slice < Slices; ++slice) {
+            const Node n = node(s, gen, slice);
+            if (!n.rows || !n.cols)
+                continue;
+            const Buffer &c = s.c[slice];
+            const auto mask = DAYAN_RESOURCE_MASK(c.resource);
+            check(dayan_resource_wait(0, mask, phases, 0));
+            // Release this C slice only after its final store completes.
+            __tx_lsu_tcsr_write<LSU_DIM0>(n.cols * 4 / 64 - 1);
+            __tx_lsu_tcsr_write<LSU_DIM1>(n.rows - 1);
+            const uint64_t dst = s.output + n.row * s.cfg->c_stride + n.col * 4;
+            __tx_lsu_dma_u2d<0>((long)dst, (long)c.uram);
+            check(dayan_resource_consume_lsu(mask));
+            phases ^= mask;
+        }
+    }
+    dayan_wait_lsu();
+}
+
+static bool config_valid(const MatmulBf16Config *c)
+{
+    constexpr uint64_t limit = 0x7ffff000ULL;
+    if (!c || !c->m || !c->n || !c->k || c->m > limit ||
+        c->n > limit || c->k > limit || c->n % 16)
+        return false;
+    const uint64_t rows[] = {c->m, c->n, c->m};
+    const uint64_t widths[] = {c->k * 2, c->k * 2, c->n * 4};
+    const uint64_t strides[] = {c->a_stride, c->bt_stride, c->c_stride};
+    for (int i = 0; i < 3; ++i)
+        if (strides[i] < widths[i] || strides[i] > INT64_MAX / rows[i])
+            return false;
+    return !(c->a_stride & 1) && !(c->bt_stride & 1) && !(c->c_stride & 63);
+}
+
+} // namespace matmul_bf16_1c_detail
+#endif
+
+__kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
+                              const uint16_t *a, const uint16_t *bt, float *c)
+{
+    using namespace matmul_bf16_1c_detail;
+    if (!config_valid(config) || !a || !bt || !c ||
+        ((uintptr_t)a & 1) || ((uintptr_t)bt & 1) || ((uintptr_t)c & 63) ||
+        dayan_task_mode() != 1 || !dayan_task_dim(DAYAN_TASK_X) ||
+        dayan_task_dim(DAYAN_TASK_Y) != 1 || dayan_task_dim(DAYAN_TASK_Z) != 1)
+        dayan_thread_exit(-22);
+    State s = {};
+    s.cfg = config;
+    s.input[0] = (uintptr_t)a;
+    s.input[1] = (uintptr_t)bt;
+    s.output = (uintptr_t)c;
+    s.task = dayan_task_id(DAYAN_TASK_X);
+    s.tasks = dayan_task_dim(DAYAN_TASK_X);
+    s.nt = (int)((config->n + TN - 1) / TN);
+    s.kt = (int)((config->k + TK - 1) / TK);
+    const uint64_t outputs = (config->m + TM - 1) / TM * s.nt;
+    if (s.task >= s.tasks)
+        dayan_thread_exit(-22);
+    if (s.task >= outputs)
+        return;
+    // Round-robin complete output tiles; every Task owns its entire K loop.
+    const uint64_t tiles = (outputs - 1 - s.task) / s.tasks + 1;
+    if (tiles > UINT64_MAX / s.kt)
+        dayan_thread_exit(-22);
+    s.generations = tiles * s.kt;
+    s.buffer_a = config->m < config->n;
+    s.slice_m = s.buffer_a ? TM : TM / Slices;
+    s.slice_n = s.buffer_a ? TN / Slices : TN;
+    s.c_swizzle = s.buffer_a ? MAT_BATCH_SWIZZLE(5, 0, 1)
+                            : MAT_BATCH_SWIZZLE(7, 2, 3);
+    const int counts[] = {s.buffer_a ? 2 : Slices, s.buffer_a ? Slices : 2, Slices};
+    const uint64_t bytes[] = {(uint64_t)s.slice_m * TK * 2,
+                              (uint64_t)s.slice_n * TK * 2,
+                              (uint64_t)s.slice_m * s.slice_n * 4};
+    const uint64_t required = counts[0] * bytes[0] + counts[1] * bytes[1] +
+                              counts[2] * bytes[2];
+    const uint64_t physical = (uintptr_t)dayan_uram_base();
+    // Tensor U addresses are offsets in this Core's 2 MiB window.
+    // Task coordinates do not identify the Core selected by the scheduler.
+    uint64_t address = physical & (WindowStride - 1);
+    if (!physical || required > MatmulBf16Shape::kUramBytes ||
+        dayan_uram_size() < required || address > WindowStride - required)
+        dayan_thread_exit(-12);
+    int resource = 0;
+    Buffer *buffers[] = {s.a, s.b, s.c};
+    for (int operand = 0; operand < 3; ++operand) {
+        for (int i = 0; i < counts[operand]; ++i) {
+            buffers[operand][i] = {address, DAYAN_LOCAL_RESOURCE(resource++)};
+            address += bytes[operand];
+        }
+    }
+    LoadArgs loads[] = {{&s, false}, {&s, true}};
+    dayan_thread_resources_t resources = {};
+    resources.lsu_tcsr_count = 1;
+    resources.local_resource_count = LocalResources;
+    check(dayan_create_thread("load-a", loader, &loads[0], &resources));
+    check(dayan_create_thread("load-b", loader, &loads[1], &resources));
+    check(dayan_create_thread("post", post, &s, &resources));
+    calc(&s);
+    check(dayan_thread_join_all());
+}
+
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
+    matmul_bf16_1c, 1, MatmulBf16Shape::kWorkers,
+    0, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
+    2 * MatmulBf16Shape::kSlices + 2, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 
@@ -778,9 +312,10 @@ extern "C" __host__ char *getenv(const char *name);
 
 __host__ static void usage(const char *program)
 {
-    std::printf("usage: %s [M N K]\n", program);
-    std::printf("  defaults: M=768 N=512 K=1536\n");
+    std::printf("usage: %s [M N K [TASKS]]\n", program);
+    std::printf("  defaults: M=1024 N=1536 K=1536 TASKS=1\n");
     std::printf("  N must be a multiple of 16.\n");
+    std::printf("  TASKS are independent single-Core shards, scheduled on available Cores.\n");
     std::printf("  B is generated/stored as BT[N][K], and C is FP32.\n");
 }
 
@@ -886,7 +421,7 @@ __host__ static bool checked_elements(uint64_t rows, uint64_t columns,
                                       size_t element_size,
                                       size_t *elements, size_t *bytes)
 {
-    if (rows > SIZE_MAX / columns)
+    if (!rows || !columns || rows > SIZE_MAX / columns)
         return false;
     const uint64_t count = rows * columns;
 
@@ -910,7 +445,8 @@ __host__ static void initialize_inputs(std::vector<uint16_t> *a,
     }
     for (size_t column = 0; column < n; ++column) {
         for (size_t inner = 0; inner < k; ++inner) {
-            const int code = (int)((column * 7U + inner * 5U) % 7U) - 3;
+            const int code =
+                (int)((column * 11U + inner * 5U) % 7U) - 3;
 
             (*bt)[column * k + inner] =
                 float_to_bf16((float)code * 0.125f);
@@ -948,9 +484,8 @@ __host__ static int validate_output(const std::vector<float> &actual,
     for (size_t index = 0; index < actual.size(); ++index) {
         const float absolute = std::fabs(actual[index] - reference[index]);
         const float relative = absolute /
-            (std::fabs(reference[index]) > 1.0e-6f
-                 ? std::fabs(reference[index])
-                 : 1.0f);
+            (std::fabs(reference[index]) > 1.0e-6f ?
+                 std::fabs(reference[index]) : 1.0f);
 
         if (!std::isfinite(actual[index]) ||
             absolute > 1.0e-4f + 1.0e-4f * std::fabs(reference[index])) {
@@ -984,31 +519,36 @@ __host__ static int validate_output(const std::vector<float> &actual,
 
 __host__ int main(int argc, char **argv)
 {
-    uint64_t m = 768;
-    uint64_t n = 512;
+    uint64_t m = 1024;
+    uint64_t n = 1536;
     uint64_t k = 1536;
+    uint64_t tasks = 1;
     size_t a_elements = 0;
     size_t bt_elements = 0;
     size_t c_elements = 0;
     size_t a_bytes = 0;
     size_t bt_bytes = 0;
     size_t c_bytes = 0;
-    /* Full-size RTL simulation can take several wall minutes. */
     const uint32_t timeout_ms = 3600000;
 
     if (argc == 2 && std::strcmp(argv[1], "--help") == 0) {
         usage(argv[0]);
         return 0;
     }
-    if (argc != 1 && argc != 4) {
+    if (argc != 1 && argc != 4 && argc != 5) {
         usage(argv[0]);
         return 2;
     }
-    if (argc == 4 &&
+    if (argc >= 4 &&
         (parse_dimension(argv[1], &m) < 0 ||
          parse_dimension(argv[2], &n) < 0 ||
          parse_dimension(argv[3], &k) < 0)) {
         std::printf("M, N and K must be positive decimal integers\n");
+        return 2;
+    }
+    if (argc == 5 &&
+        (parse_dimension(argv[4], &tasks) < 0 || tasks > UINT32_MAX)) {
+        std::printf("TASKS must be a positive 32-bit integer\n");
         return 2;
     }
     if (m > UINT64_C(0x7ffff000) || n > UINT64_C(0x7ffff000) ||
@@ -1079,27 +619,28 @@ __host__ int main(int argc, char **argv)
         status = upload(stream, bt_buffer, bt.data(), bt_bytes, timeout_ms);
 
     if (status == 0) {
-        const uint64_t tile_m = m < n ? kMatmulBf16TileShort
-                                      : kMatmulBf16TileLong;
-        const uint64_t tile_n = m < n ? kMatmulBf16TileLong
-                                      : kMatmulBf16TileShort;
+        const uint64_t tiles_m =
+            (m + MatmulBf16Shape::kTileM - 1U) / MatmulBf16Shape::kTileM;
+        const uint64_t tiles_n =
+            (n + MatmulBf16Shape::kTileN - 1U) / MatmulBf16Shape::kTileN;
 
         npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
                                      "matmul-bf16-1c");
-        launch_attrs.config.task_dim = NPUTaskDim3{1, 1, 1};
+        launch_attrs.config.task_dim = NPUTaskDim3{(uint32_t)tasks, 1, 1};
         launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
         launch_attrs.timeout_ms = timeout_ms;
         std::printf("[host] launch matmul_bf16_1c: A[%llu,%llu] x "
-                    "BT[%llu,%llu] -> C[%llu,%llu], slices=%u, "
-                    "tile=%llux%llux%llu, producer=%s\n",
+                    "BT[%llu,%llu] -> C[%llu,%llu], tile=%ux%ux%u, "
+                    "slices=%u, tile-grid=%llux%llu, tasks=%llu, buffered=%s, loaders=A+B\n",
                     (unsigned long long)m, (unsigned long long)k,
                     (unsigned long long)n, (unsigned long long)k,
                     (unsigned long long)m, (unsigned long long)n,
-                    (unsigned)MATMUL_BF16_1C_SLICES,
-                    (unsigned long long)tile_m,
-                    (unsigned long long)tile_n,
-                    (unsigned long long)kMatmulBf16TileK,
-                    m < n ? "A" : "B");
+                    (unsigned)MatmulBf16Shape::kTileM,
+                    (unsigned)MatmulBf16Shape::kTileN,
+                    (unsigned)MatmulBf16Shape::kTileK,
+                    (unsigned)MatmulBf16Shape::kSlices,
+                    (unsigned long long)tiles_m,
+                    (unsigned long long)tiles_n, (unsigned long long)tasks, m < n ? "A" : "B");
         status = matmul_bf16_1c(config_buffer, a_buffer, bt_buffer,
                                 c_buffer, &launch_attrs);
     }

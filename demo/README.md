@@ -13,7 +13,7 @@ demo/
 ├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
-├── matmul_bf16_1c.cpp           # BF16 OS kernel、Host launcher 与 CPU 校验
+├── matmul_bf16_1c.cpp           # 非协作 BF16：4 个 slice、双缓冲、独立 Task 分片
 ├── matmul_bf16_4c.cpp           # 2x2 Cluster：4 个 slice、共享输入双缓冲、独立 Post
 ├── matmul_fp8_4c.cpp            # 相同四核流水线，E4M3 输入，K tile=512
 ├── matmul_fp4_4c.cpp            # 四核流水线，打包 E2M1，512×512×640 tile、2 个 slice
@@ -212,29 +212,39 @@ Service 转发给发起算子的 Runtime Session，并由 demo 进程输出；`d
 A[M][K] (BF16) × BT[N][K] (BF16) -> C[M][N] (FP32)
 ```
 
-这里 Host 直接按转置布局提供 B。Device 严格沿用原版 output-stationary 的一个 producer
-和三个 consumer Thread：当 `M < N` 时使用 `256x384x256` tile，producer 双缓冲读取
-A，三个 consumer 各处理 128 列并读取自己的 BT；否则使用原版的 `384x256x256`
-tile，producer 双缓冲读取 BT，三个 consumer 各处理 128 行并读取自己的 A。共享 tile
-的代际与 producer / consumer 关系由两个硬件 Local Resource 管理。producer 通过
-`dayan_resource_wait_free()` 预留双缓冲，并用 `dayan_resource_produce_lsu()` 发布；
-MAT consumer 在完成后用 `dayan_resource_consume_mat()` 释放输入。三切片模式的 URAM
-占用为 832 KiB。
+Host 按转置布局提供 BT，三个 stride 均以字节为单位。核内流水沿用
+`matmul_bf16_4c` 的 `512×384×256` tile、4 个 slice、两个 Loader Thread、
+根 Calc Proc 和一个 Post Thread，按输出 tile → K tile → slice 的顺序推进。
+`M<N` 时 A 双缓冲，BT 分为四份 `96×256`；否则 BT 双缓冲，A 分为四份
+`128×256`。每个 slice 保留独立 C，直到全部 K 累加完成，再由 Post 写回。
 
-默认 Host case 为 `M=768, N=512, K=1536`。程序生成确定性 BF16 输入、执行 Device
-kernel，并逐元素和 CPU 参考结果比较：
+每个 Task 自己从 DRAM 加载 A/BT，只用 10 个 Local Resource 管理核内依赖，
+不做跨核复制、Shared Resource 选举或 Cluster barrier，也不申请 atomic/shared
+存储。两种布局分别使用 1,472 KiB、1,408 KiB URAM，统一申请 1,536 KiB，
+每 Core 同时驻留一个 Task。
+
+默认 `M=1024, N=1536, K=1536, TASKS=1`，启动单 Core Task。可选第四个参数
+指定独立 Task 数，始终使用 `kSingleCore` 模式：输出 tile 按 M/N 行优先展开，
+Task `t` 处理 `t, t+TASKS, ...`，各自完成整个 K 循环。Runtime 将 Task 调度到
+可用 Core；Task 数多于输出 tile 时，多余 Task 直接返回。核间不共享 URAM 输入
+切片，也不做部分和归约。程序生成确定性 BF16 输入并逐元素比较 CPU 参考结果：
 
 ```sh
+make -C demo ../build/demo/matmul_bf16_1c
 build/demo/matmul_bf16_1c
 build/demo/matmul_bf16_1c 128 5088 1272
+# 连接启用了多个 Core 的 Server，启动四个独立分片
+build/demo/matmul_bf16_1c 1024 1536 1536 4
 ```
 
 `N` 必须是 16 的整数倍；K 尾块通过实际 `MAT_K` 和窄 DMA 请求处理，不要求是 256
-的整数倍。编译期可把切片模式改成单 slice；切换已有产物时用 `-B` 强制重新构建：
+的整数倍。M/N 尾块只计算有效行列，Resource 消费计数按有效 slice 数设置。
 
-```sh
-make -B -C demo MATMUL_SLICES=1
-```
+VisualSwizzle 按实际类型、尺寸、URAM 基地址和 32 个 Bank 搜索：A/BT 的 512B
+行跨度与 C 的 1536B 行跨度使用 `M=7,B=2,S=3`，每拍 Bank 峰值由 4x 降至 1x，
+连续四块覆盖从 8/32 提升到 32/32；C 的 384B 行跨度在线性布局下已为 1x、32/32，
+使用 identity `M=5,B=0,S=1`。每个 buffer 的 LSU/MAT 映射一致，重排不跨分配边界。
+这些是布局模型的冲突指标，不是 RTL 性能测量。
 
 ## 四 Core BF16 matmul
 
@@ -302,15 +312,17 @@ bash demo/run_cmodel.sh 10 20 30 40 50 60 70
 `build/demo/cmodel.log`、`build/demo/dayan_server.log` 和
 `build/demo/print_demo.log` 便于排查。
 
-matmul 使用独立的一键脚本，默认只启动一个 Hart：
+单 Core matmul 可用以下两个终端运行：
 
 ```sh
-make -C demo run-matmul
-bash demo/run_matmul_cmodel.sh 64 384 248
+# 终端一
+NPU_CMODEL_HARTS=1 ./run_cmodel_server.sh
+# 终端二
+build/demo/matmul_bf16_1c
 ```
 
-对应日志为 `build/demo/matmul_cmodel.log`、
-`build/demo/matmul_dayan_server.log` 和 `build/demo/matmul_bf16_1c.log`。
+模拟器日志为 `build/cmodel/cmodel.log`。测试多个独立 Task 时，可将
+`NPU_CMODEL_HARTS` 设为 4，并在 Host 的 `[M N K]` 后追加 Task 数。
 
 四 Core 版本固定启动 4 个 Hart，并以 Cluster mode 提交 `task_dim={4,1,1}`：
 
@@ -349,6 +361,18 @@ A/B 的 URAM 行跨度为 512 字节，A 共享路径使用 1,472 KiB，B 共享
 共享输入双缓冲占 320 KiB，2 份专有输入各占 80 KiB，共 160 KiB。
 两条路径均使用 1,504 KiB，剩余 32 KiB；申请 6 个 Local、8 个 Shared Resource。
 两种格式均直接执行 MAT MM/MMA，不使用分块 scale。
+
+FP4 Host 的 C 使用 `N*4+64` 字节 DRAM 行跨度，默认 N=2048 时为 8256 字节。
+在当前模拟器按物理地址 `[13:12]` 选择四个 DRAM 通道的配置下，这使每轮写回
+分散到四个通道。A 和 BT 的底层 Buffer 均按 16 KiB 对齐，BT 在其 Buffer 内
+偏移 4 KiB 创建 View，保证起始通道相对 A 错开一个；上传和 kernel 参数均使用
+该 View。A/BT 的 DRAM 行跨度仍为 `(K+1)/2` 字节。C 下载包含行尾 padding，
+Host 按跨度校验有效输出，并检查预填 NaN 的 padding 未被覆盖。这些是 DRAM
+布局调整，URAM 行跨度、Swizzle 和 Tile 尺寸不变。
+
+FP4 的 A/B Loader 在输入 Buffer 可复用、跨核复制依赖满足后即可预取下一输出
+tile，与当前 C 写回重叠。Post 在每个有效 C slice 的 U2D 后提交 Consume，
+对应 Buffer 在写回完成后释放，供下一轮 MAT 使用。
 
 FP4 沿 K 维打包：偶数索引在低半字节，奇数索引在高半字节，每行占
 `(K+1)/2` 字节。支持奇数 K，最后一个高半字节不参与计算；Host 校验时故意在

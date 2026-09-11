@@ -4,7 +4,6 @@ DYCC := $(ROOT)/host/dycc/dycc
 DYCC_BIN := $(ROOT)/build/host/dycc/dycc-bin
 RUNTIME_LIB := $(ROOT)/build/host/driver/libDayanRuntime.a
 DAYAN_API_HEADERS := $(wildcard $(ROOT)/device/include/api/*.h)
-MATMUL_SLICES ?= 3
 MATMUL_BROADCAST_SLICES ?= 4
 DEVICE_ISA_CHECK := ./check_device_isa.sh
 
@@ -142,7 +141,6 @@ $(MATMUL_1C_TARGET): matmul_bf16_1c.cpp $(DAYAN_API_HEADERS) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
 	$(DYCC) --save-temps=$(MATMUL_1C_TEMPS) -O2 -Wall -Wextra -Werror \
-		-DMATMUL_BF16_1C_SLICES=$(MATMUL_SLICES) \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(MATMUL_1C_TEMPS)/matmul_bf16_1c.cpp.dycc.device.o
