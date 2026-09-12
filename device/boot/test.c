@@ -60,8 +60,8 @@ int test_build_request(const dayan_test_desc_t *test,
 
     memset(request, 0, sizeof(*request));
     request->entry = (uintptr_t)test->entry;
-    request->stack_size = CONFIG_PROC_STACK_SIZE;
-    request->printf_buffer_size = CONFIG_PROC_PRINTF_SIZE;
+    request->stack_size_m1 = CONFIG_PROC_STACK_SIZE - 1U;
+    request->printf_size = CONFIG_PROC_PRINTF_SIZE;
     request->argc = test->argc;
     memcpy(request->args, test->args, sizeof(request->args));
     memcpy(request->name, test->name, sizeof(request->name));
@@ -70,9 +70,6 @@ int test_build_request(const dayan_test_desc_t *test,
     for (unsigned axis = 0; axis < 3; ++axis)
         request->task_dim[axis] = 1;
     request->shared_size = resources->atomic_cache_size;
-    request->shared_base = request->shared_size ? CONFIG_COHERENT_BASE : 0;
-    request->uram_size = resources->uram_size;
-    request->uram_base = request->uram_size ? CONFIG_URAM_BASE : 0;
     request->tensor_context = dayan_context_pack(&tensor);
     request->resource_context = dayan_resource_context_pack(&named);
     request->cookie = (uintptr_t)test;
@@ -108,7 +105,8 @@ static void test_main(void)
                 continue;
             }
             if (request.shared_size)
-                memset((void *)(uintptr_t)request.shared_base, 0,
+                memset((void *)(uintptr_t)(CONFIG_COHERENT_BASE +
+                                           request.shared_offset), 0,
                        request.shared_size);
             task = task_proc_create(&request);
             if (!task) {

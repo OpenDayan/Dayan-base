@@ -17,6 +17,7 @@
 #include "trap.h"
 
 #define NPU_DEFAULT_RPC_POLL_US 1000U
+#define NPU_DEVICE_COHERENT_BASE UINT64_C(0x00400000)
 #define NPU_DEFAULT_TIMEOUT_MS  60000U
 #define NPU_DEFAULT_STACK_SIZE  UINT64_C(0x10000)
 #define NPU_DEFAULT_PRINTF_SIZE UINT64_C(0x1000)
@@ -924,7 +925,9 @@ static int shared_address(npu_service_device_t *device,
     if (status < 0 || address > UINT64_MAX - desc->shared_offset)
         return status < 0 ? status : -EOVERFLOW;
     address += desc->shared_offset;
-    if (address & 15U)
+    if ((address & 15U) || address < NPU_DEVICE_COHERENT_BASE ||
+        address - NPU_DEVICE_COHERENT_BASE > UINT32_MAX ||
+        desc->shared_size > UINT32_MAX)
         return -EINVAL;
     *address_out = address;
     return 0;
@@ -1265,7 +1268,8 @@ static void submit_launch(npu_service_launch_t *launch)
     }
     status = npu_hal_memory_read(launch->device->hal,
                                  launch->request_allocation, launch->target,
-                                 &request, 0, sizeof(request));
+                                 &request, 0,
+                                 offsetof(struct rpc_proc_create_request, args));
     if (status == 0 && !launch_request_valid(launch, &request)) {
         fprintf(stderr,
                 "dayan_server: PROC_CREATE request mismatch: hart=%u "
@@ -1378,7 +1382,7 @@ int npu_service_launch(npu_service_device_t *device,
     if (!launch)
         return -ENOMEM;
     status = npu_service_alloc_rpc_descriptor(
-        device, desc->target, sizeof(request), &allocation);
+        device, desc->target, rpc_proc_create_size(desc->argc), &allocation);
     if (status < 0)
         goto fail;
     status = npu_service_mmu_device_address(device, allocation, desc->target,
@@ -1387,20 +1391,19 @@ int npu_service_launch(npu_service_device_t *device,
         status = status < 0 ? status : -EOVERFLOW;
         goto fail;
     }
-    memset(&request, 0, sizeof(request));
-    request.state = RPC_PROC_SUBMITTED;
+    memset(&request, 0, rpc_proc_create_size(desc->argc));
     request.entry = desc->entry;
-    request.stack_size = desc->stack_size;
-    request.shared_base = shared_base;
-    request.shared_size = desc->shared_size;
+    request.stack_size_m1 = (uint16_t)(desc->stack_size - 1U);
+    request.shared_offset = desc->shared_size ?
+        (uint32_t)(shared_base - NPU_DEVICE_COHERENT_BASE) : 0;
+    request.shared_size = (uint32_t)desc->shared_size;
     request.max_child_threads = desc->max_child_threads;
-    request.uram_base = uram_base;
-    request.uram_size = desc->uram_size;
     request.resource_context = desc->resource_context;
     request.tensor_context = desc->tensor_context;
-    request.printf_buffer_size = desc->printf_buffer_size;
-    request.argc = desc->argc;
-    memcpy(request.args, desc->args, desc->argc * sizeof(desc->args[0]));
+    request.printf_size = (uint16_t)desc->printf_buffer_size;
+    request.argc = (uint8_t)desc->argc;
+    for (size_t i = 0; i < desc->argc; ++i)
+        request.args[i] = desc->args[i];
     request.cookie = desc->cookie;
     for (axis = 0; axis < 3; ++axis) {
         request.task_id[axis] = desc->task_id[axis];
@@ -1409,7 +1412,7 @@ int npu_service_launch(npu_service_device_t *device,
     request.task_mode = desc->task_mode;
     memcpy(request.name, desc->name, strlen(desc->name) + 1U);
     status = npu_hal_memory_write(device->hal, allocation, desc->target, 0,
-                                  &request, sizeof(request));
+                                  &request, rpc_proc_create_size(desc->argc));
     if (status < 0)
         goto fail;
     launch->device = device;

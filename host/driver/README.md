@@ -186,9 +186,18 @@ opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
-create-proc ABI 使用 416-byte `rpc_proc_create_request`，包含 entry、栈、shared、
-printf buffer、0–32 个 RV64 参数、cookie、`task_id[3]`、`task_dim[3]`、`task_mode`，
-最大子 Thread 数、URAM base/size、64-bit Tensor Context，以及固定 16-byte Proc 名称。Runtime launch 必须提供
+create-proc ABI 使用 64-byte 对齐的 `rpc_proc_create_request`：前 11 个 RV64 word
+依次为 entry、cookie、shared offset/size、启动配置、Tensor Context、Resource Context、
+三个 task ID/dimension word 和两个 name word。启动配置依次打包
+`stack_size_m1:u16/printf_size:u16/argc:u8/task_mode:u8/max_child_threads:u8/reserved:u8`；
+`stack_size_m1 + 1` 支持完整 64KiB 栈。shared offset 相对 `0x00400000`，
+Resource Context 高 32 位清零；URAM 范围由 Tensor Context 携带。
+word 11..15 放 args 0..4，后续每条缓存行放 8 个参数：
+0–5/6–13/14–21/22–29/30–32 个参数分别占 2/3/4/5/6 条缓存行。
+Host 只分配和写入这些缓存行，Device 对同一范围执行 invalidate/flush。
+Device 消费 entry 后，用 word 0 返回 `status:i32/proc_id:u16/hart_id:u8/state:u8`，
+Host 读取前 88 bytes 校验返回值、cookie、task 和名称。此布局要求 Host 与固件同步更新。
+Runtime launch 必须提供
 非空 Task 名称；名称最多 15 bytes，最后一 byte 留给 NUL。BL1 创建 root 时一次性专属
 预留全部子 slot，并复制启动数据。创建事务全程阻塞，Host 读取创建回复后即可回收描述符；
 最终结果由 `RPC_PROC_EXIT` 单独上报。`dayan_create_thread(name, entry, argument, resources)` 在同一 Core

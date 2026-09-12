@@ -10,6 +10,7 @@ _Alignas(64) uint8_t __cpu_start[CONFIG_CPU_LOCAL_SIZE];
 static _Alignas(16) unsigned char stack[1024];
 static uintptr_t observed[32];
 static uintptr_t observed_sp, observed_gp;
+static _Alignas(16) unsigned char proc_stacks[CONFIG_PROC_SLOT_COUNT][CONFIG_PROC_STACK_SIZE];
 
 extern void run_bootstrap(uintptr_t sp, uintptr_t pc);
 
@@ -108,6 +109,64 @@ static void entry32(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uint
     observed[31] = a31;
 }
 
+static void test_proc_create(void)
+{
+    struct rpc_proc_create_request request = {0};
+    struct thread_runtime *runtime = &cpu_self()->threads;
+
+    request.entry = (uintptr_t)entry32;
+    request.cookie = 0xfedcba9876543210ULL;
+    request.shared_offset = 0x100;
+    request.shared_size = 0x200;
+    request.task_mode = 1;
+    request.printf_size = 17;
+    request.max_child_threads = 3;
+    request.tensor_context = 0x123456789abcdef0ULL;
+    request.resource_context = 3U << 16; /* Shared resources; no local HW init. */
+    strcpy(request.name, "0123456789abcde");
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        request.task_id[axis] = 0x87654320U + axis;
+        request.task_dim[axis] = 0xfedcba90U + axis;
+    }
+    for (unsigned argc = 0; argc <= RPC_PROC_MAX_ARGS; ++argc) {
+        size_t stack_size = argc & 1 ? CONFIG_PROC_STACK_SIZE : 1024;
+        request.stack_size_m1 = stack_size - 1;
+        request.argc = argc;
+        for (unsigned i = 0; i < RPC_PROC_MAX_ARGS; ++i)
+            request.args[i] = i < argc ? 0xfedcba9876543200ULL + i : 0;
+        memset(runtime, 0, sizeof(*runtime));
+        memset(proc_stacks[0], 0xa5, sizeof(proc_stacks[0]));
+        runtime->stacks = proc_stacks;
+        struct task_proc *task = task_proc_create(&request);
+        assert(task && task->descriptor.last_slot == 4);
+        assert(task->descriptor.cookie == request.cookie);
+        assert(task->descriptor.shared == request.shared);
+        assert(task->descriptor.launch == (request.launch | (4ULL << 56)));
+        assert(!memcmp(task->descriptor.task_words, request.task_words, 24));
+        assert(!memcmp(task->thread.name, request.name, 16));
+        assert(task->thread.tensor_context == request.tensor_context);
+        assert(task->thread.resource_state == request.resource_context);
+        assert(task->thread.parent == THREAD_SLOT_NONE);
+        assert(!task->thread.profile_defined && !task->thread.node.next && !task->thread.node.prev);
+        struct proc_frame *frame = (struct proc_frame *)task->thread.sp;
+        uintptr_t *stack_args = (uintptr_t *)(frame + 1);
+        assert(!(task->thread.sp & 15));
+        assert(frame->entry == request.entry && !frame->reserved);
+        assert(frame->shared == CONFIG_COHERENT_BASE + request.shared_offset);
+        for (unsigned i = 0; i < argc; ++i)
+            assert((i < 8 ? frame->args[i] : stack_args[i - 8]) == request.args[i]);
+        assert(proc_stacks[0][0] == 0xa5);
+        if (stack_size < CONFIG_PROC_STACK_SIZE)
+            assert(proc_stacks[0][stack_size] == 0xa5);
+        if (argc == 32) {
+            memset(observed, 0, sizeof(observed));
+            run_bootstrap(task->thread.sp, task->thread.pc);
+            for (unsigned i = 0; i < argc; ++i)
+                assert(observed[i] == request.args[i]);
+        }
+    }
+}
+
 int main(void)
 {
     static const size_t counts[] = {0, 1, 8, 9, 32};
@@ -150,5 +209,6 @@ int main(void)
             assert(!observed[i]);
         assert(stack[0] == 0xa5);
     }
+    test_proc_create();
     return 0;
 }

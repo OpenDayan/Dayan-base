@@ -20,7 +20,6 @@ SHARED_NOTIFY_TARGET := $(BUILD)/shared_notify_latency
 MATMUL_1C_TARGET := $(BUILD)/matmul_bf16_1c
 MATMUL_4C_TARGET := $(BUILD)/matmul_bf16_4c
 MATMUL_LOWP_TARGETS := $(BUILD)/matmul_fp8_4c $(BUILD)/matmul_fp4_4c
-MATMUL_4C_BROADCAST_TARGET := $(BUILD)/matmul_bf16_broadcast_4c
 PRINT_TEMPS := $(BUILD)/print_demo-temps
 ADD_FP32_MACRO_TEMPS := $(BUILD)/add_fp32_macro-temps
 ADD_FP32_VEC_TEMPS := $(BUILD)/add_fp32_vec-temps

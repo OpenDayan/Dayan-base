@@ -57,6 +57,13 @@ _Static_assert(offsetof(struct thread, resource_context) ==
                "assembly thread Context2 offset");
 _Static_assert(offsetof(struct thread, token_ext) == THREAD_TOKEN_EXT_OFFSET,
                "assembly thread token extension offset");
+_Static_assert(sizeof(struct thread) == 56 &&
+                   offsetof(struct thread, name) == 40 &&
+                   offsetof(struct thread, profile_defined) == 7,
+               "thread machine-word initialization layout");
+_Static_assert(sizeof(struct task_descriptor) == 48 &&
+                   offsetof(struct task_descriptor, task_words) == 24,
+               "task descriptor word copy layout");
 
 #define TASK_INDEX(slot)   ((slot) - TASK_SLOT_FIRST)
 #define WAIT_INDEX(slot)   ((slot) - 1U)
@@ -156,10 +163,35 @@ void thread_schedule(struct thread *thread)
     __builtin_riscv_tx_base_tcsr_write((uintptr_t)thread, 0, RESOURCE_WAIT);
 }
 
-void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
+static inline __attribute__((always_inline))
+void startup_words(uintptr_t *out, const uintptr_t *in, size_t count)
+{
+    while (count >= 8) {
+        out[0] = in[0];
+        if (count > 8)
+            platform_prefetch_read(in + 8);
+        out[1] = in[1];
+        out[2] = in[2];
+        out[3] = in[3];
+        out[4] = in[4];
+        out[5] = in[5];
+        out[6] = in[6];
+        out[7] = in[7];
+        in += 8;
+        out += 8;
+        count -= 8;
+    }
+    while (count--)
+        *out++ = *in++;
+}
+
+static inline __attribute__((always_inline))
+void thread_start_internal(struct thread *thread, uint8_t slot, uint8_t type,
                  const char *name, thread_fn entry,
                  void *stack, size_t stack_size, void *shared_base,
-                 size_t argc, const uintptr_t *args)
+                 size_t argc, const uintptr_t *args, int rpc_args,
+                 uint64_t tensor_context, uint64_t resource_state,
+                 uint8_t parent)
 {
     struct thread_runtime *runtime = &cpu_self()->threads;
     uintptr_t top = ((uintptr_t)stack + stack_size) & ~(uintptr_t)0xf;
@@ -170,26 +202,49 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
     uintptr_t *stack_args = (uintptr_t *)top;
 
     /* Initialize live fields once; do not byte-clear them before overwriting. */
-    thread->node = (struct thread_list_node){0, 0};
-    thread->tensor_context = 0;
-    thread->resource_context = 0;
-    thread->token_ext = 0;
-    thread->profile_defined = 0;
-    strncpy(thread->name, name, sizeof(thread->name));
+    thread->tensor_context = tensor_context;
+    thread->resource_state = resource_state;
+    if (rpc_args) {
+        typedef uint64_t name_word_t __attribute__((__may_alias__));
+        const name_word_t *words = (const name_word_t *)name;
+        thread->name_words[0] = words[0];
+        thread->name_words[1] = words[1];
+    } else {
+        strncpy(thread->name, name, sizeof(thread->name));
+    }
     if (!++runtime->generation[slot])
         ++runtime->generation[slot];
-    thread->type = type;
-    thread->state = THREAD_WAIT_START;
-    thread->slot = slot;
-    thread->generation = runtime->generation[slot];
-    thread->parent = THREAD_SLOT_NONE;
+    thread->identity = (uint64_t)slot | ((uint64_t)THREAD_WAIT_START << 8) |
+        ((uint64_t)runtime->generation[slot] << 16) | ((uint64_t)type << 24) |
+        ((uint64_t)parent << 32);
     frame->entry = (uintptr_t)entry;
     frame->ra = (uintptr_t)thread_exit;
-    for (size_t i = 0; i < register_argc; ++i)
-        frame->args[i] = args[i];
-    /* Stack arguments go directly to their final ABI locations. */
-    for (size_t i = 0; i < stack_argc; ++i)
-        stack_args[i] = args[PROC_REGISTER_ARGS + i];
+    if (rpc_args) {
+        /* The base always contains five padded args, even when argc is zero. */
+        frame->args[0] = args[0];
+        if (argc > 5)
+            platform_prefetch_read(args + 5);
+        frame->args[1] = args[1];
+        frame->args[2] = args[2];
+        frame->args[3] = args[3];
+        frame->args[4] = args[4];
+        if (argc > 5) {
+            /* Extra cache lines start at args 5, 13, 21, 29. */
+            frame->args[5] = args[5];
+            if (argc > 13)
+                platform_prefetch_read(args + 13);
+            frame->args[6] = args[6];
+            frame->args[7] = args[7];
+            size_t first = stack_argc < 5 ? stack_argc : 5;
+            startup_words(stack_args, args + PROC_REGISTER_ARGS, first);
+            if (argc > 13)
+                startup_words(stack_args + 5, args + 13, argc - 13);
+        }
+    } else {
+        startup_words(frame->args, args, register_argc);
+        if (stack_argc)
+            startup_words(stack_args, args + PROC_REGISTER_ARGS, stack_argc);
+    }
     frame->shared = (uintptr_t)shared_base;
     frame->reserved = 0;
     thread->sp = (uintptr_t)frame;
@@ -205,6 +260,15 @@ void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
         thread_state_set(thread, THREAD_WAIT_POLL);
     else if (type == THREAD_TYPE_SYSTEM)
         thread_schedule(thread);
+}
+
+void thread_start(struct thread *thread, uint8_t slot, uint8_t type,
+                 const char *name, thread_fn entry,
+                 void *stack, size_t stack_size, void *shared_base,
+                 size_t argc, const uintptr_t *args)
+{
+    thread_start_internal(thread, slot, type, name, entry, stack, stack_size,
+                          shared_base, argc, args, 0, 0, 0, THREAD_SLOT_NONE);
 }
 
 /* No family tokens may remain. A terminal caller must next abandon its stack. */
@@ -247,25 +311,19 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *request
 
     task = (struct task_proc *)thread_slot_get(root);
     runtime->slot_state[root] = SLOT_ROOT;
-    task->descriptor.last_slot = last;
-    for (size_t axis = 0; axis < 3; ++axis) {
-        task->descriptor.task_id[axis] = request->task_id[axis];
-        task->descriptor.task_dim[axis] = request->task_dim[axis];
-    }
-    task->descriptor.task_mode = (uint8_t)request->task_mode;
-    task->descriptor.child_stack_size_m1 = (uint16_t)(request->stack_size - 1U);
-    task->descriptor.child_printf_size = (uint16_t)request->printf_buffer_size;
-    task->descriptor.shared_offset = request->shared_base ?
-        (uint32_t)(request->shared_base - CONFIG_COHERENT_BASE) : 0;
-    task->descriptor.shared_size = (uint32_t)request->shared_size;
     task->descriptor.cookie = request->cookie;
-    thread_start(&task->thread, root, THREAD_TYPE_TASK_PROC, request->name,
+    task->descriptor.shared = request->shared;
+    task->descriptor.launch = request->launch | ((uint64_t)last << 56);
+    task->descriptor.task_words[0] = request->task_words[0];
+    task->descriptor.task_words[1] = request->task_words[1];
+    task->descriptor.task_words[2] = request->task_words[2];
+    thread_start_internal(&task->thread, root, THREAD_TYPE_TASK_PROC, request->name,
                   (thread_fn)(uintptr_t)request->entry,
                   runtime->stacks[TASK_INDEX(root)],
                   task_child_stack_size(task), task_shared_base(task),
-                  request->argc, (const uintptr_t *)request->args);
-    task->thread.tensor_context = request->tensor_context;
-    task->thread.resource_context = request->resource_context;
+                  request->argc, (const uintptr_t *)request->args, 1,
+                  request->tensor_context, request->resource_context,
+                  THREAD_SLOT_NONE);
     const struct dayan_resource_context_fields resources =
         dayan_resource_context_unpack(request->resource_context);
     if (resources.local.count)
@@ -377,13 +435,13 @@ int thread_create_child(const char *name, thread_fn entry, void *argument,
         return -ENOMEM;
 
     child = thread_slot_get(child_slot);
-    thread_start(child, child_slot, THREAD_TYPE_TASK_THREAD, name,
-                  entry, runtime->stacks[TASK_INDEX(child_slot)],
-                  task_child_stack_size(task), task_shared_base(task), 1, &arg);
-    child->parent = thread_slot_id(current);
     /* Host validated root; reservation bounded every child range by root. */
-    child->tensor_context = dayan_context_pack_validated(&child_context);
-    child->resource_context = dayan_resource_context_pack_validated(&child_resources);
+    thread_start_internal(child, child_slot, THREAD_TYPE_TASK_THREAD, name,
+                  entry, runtime->stacks[TASK_INDEX(child_slot)],
+                  task_child_stack_size(task), task_shared_base(task), 1, &arg, 0,
+                  dayan_context_pack_validated(&child_context),
+                  dayan_resource_context_pack_validated(&child_resources),
+                  thread_slot_id(current));
     runtime->slot_state[child_slot] = SLOT_CHILD;
     thread_schedule(child);
     return thread_id(child);

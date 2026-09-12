@@ -39,19 +39,29 @@ enum thread_type {
 /* The fixed prefix addressed by tp for every execution context. */
 struct thread {
     /* Little-endian halfword: slot[7:0], state[15:8] for profiling. */
-    uint8_t slot;
-    uint8_t state;
-    uint8_t generation;
-    uint8_t type;
-    uint8_t parent;
-    struct thread_list_node node;
+    union {
+        struct {
+            uint8_t slot;
+            uint8_t state;
+            uint8_t generation;
+            uint8_t type;
+            uint8_t parent;
+            struct thread_list_node node;
+            uint8_t profile_defined;
+        };
+        uint64_t identity;
+    };
     uintptr_t sp;
     uintptr_t pc;
     uint64_t tensor_context;
-    uint32_t resource_context;
-    uint8_t token_ext;
-    char name[THREAD_NAME_SIZE];
-    uint8_t profile_defined;
+    union {
+        struct { uint32_t resource_context; uint8_t token_ext; };
+        uint64_t resource_state;
+    };
+    union {
+        char name[THREAD_NAME_SIZE] __attribute__((aligned(8)));
+        uint64_t name_words[2];
+    };
 };
 
 static inline uint16_t thread_id(const struct thread *thread)

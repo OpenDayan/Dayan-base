@@ -712,8 +712,9 @@ int main(void)
         memcpy(reply.name, desc.name, strlen(desc.name) + 1);
         fd = open_file(directory, "xdma0_c2h_0", O_RDWR);
         assert(fd >= 0);
-        assert(pwrite(fd, &reply, sizeof(reply), launch->request_address) ==
-               (ssize_t)sizeof(reply));
+        size_t reply_size = rpc_proc_create_size(desc.argc);
+        assert(pwrite(fd, &reply, reply_size, launch->request_address) ==
+               (ssize_t)reply_size);
         close(fd);
         pthread_mutex_lock(&server->device->mutex);
         server->device->calls[0].status = 0;
@@ -725,7 +726,7 @@ int main(void)
         assert(info.state == NPU_SERVICE_LAUNCH_EXITED && info.status == 37);
         assert(!launch->request_allocation && !launch->descriptor_may_be_live);
         assert(npu_service_alloc_rpc_descriptor(server->device, desc.target,
-                                                sizeof(reply), &reused) == 0);
+                                                reply_size, &reused) == 0);
         assert(npu_hal_memory_address(server->hal, reused, desc.target,
                                       &address) == 0);
         assert(address == launch->request_address);

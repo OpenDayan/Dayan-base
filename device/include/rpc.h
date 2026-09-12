@@ -146,35 +146,54 @@ enum rpc_proc_state {
 /*
  * Host validates the launch fields and owns this cache-line-isolated storage
  * until the blocking CREATE reply. Device copies all launch data and flushes
- * the entire descriptor before replying; it never accesses it again. Host
+ * the occupied cache lines before replying; it never accesses them again. Host
  * reads RUNNING/FAILED only after the reply. PROC_EXIT carries the final result.
  */
 struct rpc_proc_create_request {
-    uint32_t state;
-    uint32_t flags;
-    uint64_t entry;
-    uint64_t stack_size;
-    uint64_t shared_base;
-    uint64_t shared_size;
-    uint64_t printf_buffer_size;
-    uint32_t argc;
-    uint32_t reserved;
-    uint64_t args[RPC_PROC_MAX_ARGS];
-    uint32_t task_mode;
-    uint32_t max_child_threads;
-    int64_t status;
-    uint32_t proc_id;
-    uint32_t hart_id;
+    /* Request words 0..10.  Keep this prefix identical to the fast slot copy. */
+    union {
+        uint64_t entry;
+        /* Reply overlays word 0 after entry has been copied to the frame. */
+        struct {
+            int32_t status;
+            uint16_t proc_id;
+            uint8_t hart_id;
+            uint8_t state;
+        };
+    };
     uint64_t cookie;
-    uint32_t task_id[3];
-    uint32_t task_dim[3];
-    uint32_t task_reserved;
-    uint32_t resource_context;
-    uint64_t uram_base;
-    uint64_t uram_size;
+    union {
+        struct { uint32_t shared_offset, shared_size; };
+        uint64_t shared;
+    };
+    union {
+        struct {
+            uint16_t stack_size_m1;
+            uint16_t printf_size;
+            uint8_t argc;
+            uint8_t task_mode;
+            uint8_t max_child_threads;
+            uint8_t reserved;
+        };
+        uint64_t launch;
+    };
     uint64_t tensor_context;
-    char name[RPC_PROC_NAME_SIZE];
-};
+    uint64_t resource_context;
+    union {
+        struct { uint32_t task_id[3]; uint32_t task_dim[3]; };
+        uint64_t task_words[3];
+    };
+    union { char name[RPC_PROC_NAME_SIZE]; uint64_t name_words[2]; };
+    uint64_t args[RPC_PROC_MAX_ARGS];
+} __attribute__((aligned(RPC_DESCRIPTOR_GRANULE)));
+
+/* Host and Device use exactly these whole cache lines, including base padding. */
+static inline size_t rpc_proc_create_size(unsigned argc)
+{
+    size_t size = offsetof(struct rpc_proc_create_request, args) + argc * 8U;
+    return (size + RPC_DESCRIPTOR_GRANULE - 1U) &
+           ~(size_t)(RPC_DESCRIPTOR_GRANULE - 1U);
+}
 
 struct rpc_proc_info {
     uint32_t proc_id;
@@ -351,28 +370,16 @@ _Static_assert(offsetof(struct rpc_proc_exit_request, cookie) == 24,
                "Host proc exit cookie offset");
 _Static_assert(sizeof(struct rpc_proc_exit_request) == 32,
                "Host proc exit ABI must stay fixed");
-_Static_assert(offsetof(struct rpc_proc_create_request, entry) == 8,
-               "Host proc entry offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, args) == 56,
-               "Host proc argument offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, status) == 320,
-               "Host proc status offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, task_id) == 344,
-               "Host proc task ID offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, task_dim) == 356,
-               "Host proc task dimension offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, task_mode) == 312,
-               "Host proc task mode offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 316,
-               "Host proc child resource offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, uram_base) == 376,
-               "Host proc URAM base offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, tensor_context) == 392,
-               "Host proc tensor Context offset");
-_Static_assert(offsetof(struct rpc_proc_create_request, name) == 400,
-               "Host proc name offset");
-_Static_assert(sizeof(struct rpc_proc_create_request) == 416,
-               "Host proc create ABI must stay fixed");
+_Static_assert(offsetof(struct rpc_proc_create_request, entry) == 0, "Host proc entry offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, cookie) == 8, "Host proc cookie offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, shared_offset) == 16, "Host proc shared offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, launch) == 24, "Host proc launch word offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, tensor_context) == 32, "Host proc tensor Context offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, resource_context) == 40, "Host proc resource Context offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, task_id) == 48, "Host proc task offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, name) == 72, "Host proc name offset");
+_Static_assert(offsetof(struct rpc_proc_create_request, args) == 88, "Host proc argument offset");
+_Static_assert(sizeof(struct rpc_proc_create_request) == 384, "Host proc create ABI must stay fixed");
 _Static_assert(offsetof(struct rpc_proc_info, result) == 56,
                "Host proc info result offset");
 _Static_assert(offsetof(struct rpc_proc_info, cookie) == 72,

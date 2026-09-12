@@ -10,6 +10,11 @@ uintptr_t platform_hart_id(void);
 void platform_cache_init(void);
 void platform_cache_flush(const void *addr, size_t size);
 void platform_cache_invalidate(void *addr, size_t size);
+static inline void platform_prefetch_read(const void *addr)
+{
+    /* Zicbop prefetch.r 0(addr); a harmless ORI-to-x0 hint without Zicbop. */
+    __asm__ volatile (".insn i 0x13, 6, x0, %0, 1" :: "r"(addr) : "memory");
+}
 void platform_data_fence(void);
 void platform_instruction_fence(void);
 

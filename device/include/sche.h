@@ -16,14 +16,25 @@ typedef void (*thread_fn)(void);
 
 struct task_descriptor {
     uint64_t cookie;
-    uint32_t task_id[3];
-    uint32_t task_dim[3];
-    uint32_t shared_offset;
-    uint32_t shared_size;
-    uint16_t child_stack_size_m1;
-    uint16_t child_printf_size;
-    uint8_t task_mode;
-    uint8_t last_slot; /* Family slots lie between root and this slot. */
+    union {
+        struct { uint32_t shared_offset, shared_size; };
+        uint64_t shared;
+    };
+    union {
+        struct {
+            uint16_t child_stack_size_m1;
+            uint16_t child_printf_size;
+            uint8_t argc;
+            uint8_t task_mode;
+            uint8_t max_child_threads;
+            uint8_t last_slot;
+        };
+        uint64_t launch;
+    };
+    union {
+        struct { uint32_t task_id[3]; uint32_t task_dim[3]; };
+        uint64_t task_words[3];
+    };
 };
 
 struct task_proc {

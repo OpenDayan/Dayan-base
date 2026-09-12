@@ -30,23 +30,32 @@ static int rpc_proc_create(uint64_t arg, uint64_t *response_command)
     int status = -EINVAL;
 
     *response_command = rpc_command_pack(RPC_PROC_CREATE_RESPONSE, arg);
-    if (!rpc_descriptor_address_valid(arg, sizeof(*request)))
+    if (!rpc_descriptor_address_valid(arg, 2 * CONFIG_CACHE_LINE_SIZE))
         return 1;
 
     request = (struct rpc_proc_create_request *)(uintptr_t)arg;
-    platform_cache_invalidate(request, sizeof(*request));
+    size_t request_size = 2 * CONFIG_CACHE_LINE_SIZE;
+    platform_cache_invalidate(request, request_size);
+    platform_prefetch_read(request);
+    unsigned argc = request->argc;
+    platform_prefetch_read((const char *)request + CONFIG_CACHE_LINE_SIZE);
     /* Host validates the ABI; only this image's static capacity is local. */
-    if (request->stack_size <= CONFIG_PROC_STACK_SIZE &&
-        request->printf_buffer_size <= CONFIG_PROC_PRINTF_SIZE) {
+    if (argc <= RPC_PROC_MAX_ARGS &&
+        (uint32_t)request->stack_size_m1 + 1U <= CONFIG_PROC_STACK_SIZE &&
+        request->printf_size <= CONFIG_PROC_PRINTF_SIZE) {
+        request_size = rpc_proc_create_size(argc);
+        if (request_size > 2 * CONFIG_CACHE_LINE_SIZE)
+            platform_cache_invalidate((char *)request + 2 * CONFIG_CACHE_LINE_SIZE,
+                                       request_size - 2 * CONFIG_CACHE_LINE_SIZE);
         task = task_proc_create(request);
         status = task ? 0 : -ENOMEM;
     }
-    request->status = status;
-    request->proc_id = task ? thread_id(&task->thread) : 0;
-    request->hart_id = (uint32_t)platform_hart_id();
-    request->state = task ? RPC_PROC_RUNNING : RPC_PROC_FAILED;
+    request->entry = (uint32_t)status |
+        ((uint64_t)(task ? thread_id(&task->thread) : 0) << 32) |
+        ((uint64_t)platform_hart_id() << 48) |
+        ((uint64_t)(task ? RPC_PROC_RUNNING : RPC_PROC_FAILED) << 56);
     /* Return every descriptor cache line to Host before replying. */
-    platform_cache_flush(request, sizeof(*request));
+    platform_cache_flush(request, request_size);
     if (task) {
         /* The blocking receiver will reply and ack before its next switch. */
         thread_schedule(&task->thread);

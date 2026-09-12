@@ -14,6 +14,7 @@ static _Alignas(RPC_DESCRIPTOR_GRANULE) struct rpc_proc_create_request request;
 static struct rpc_proc_create_request host_request;
 static struct task_proc task;
 static unsigned create_step;
+static size_t invalidated_size;
 static unsigned fence_count;
 static int no_slots;
 
@@ -24,16 +25,27 @@ uintptr_t platform_hart_id(void)
 
 void platform_cache_invalidate(void *address, size_t size)
 {
-    assert(address == &request && size == sizeof(request));
-    assert(create_step++ == 0);
-    request = host_request;
+    if (!create_step) {
+        assert(address == &request && size == 128);
+        create_step = 1;
+    } else {
+        assert(create_step == 1 && invalidated_size == 128);
+        assert(address == (char *)&request + 128);
+        assert(size == rpc_proc_create_size(host_request.argc) - 128);
+    }
+    memcpy(address, (char *)&host_request + invalidated_size, size);
+    invalidated_size += size;
 }
 
 struct task_proc *task_proc_create(const struct rpc_proc_create_request *input)
 {
     assert(create_step++ == 1);
     assert(input == &request);
-    assert(input->args[0] == 0x1234 && strcmp(input->name, "create-test") == 0);
+    assert(invalidated_size == rpc_proc_create_size(host_request.argc));
+    assert(input->entry == host_request.entry);
+    assert(strcmp(input->name, "create-test") == 0);
+    for (unsigned i = 0; i < input->argc; ++i)
+        assert(input->args[i] == 0xfedcba9876543200ULL + i);
     task.thread.slot = 1;
     task.thread.generation = 1;
     return no_slots ? 0 : &task;
@@ -41,10 +53,13 @@ struct task_proc *task_proc_create(const struct rpc_proc_create_request *input)
 
 void platform_cache_flush(const void *address, size_t size)
 {
-    assert(address == &request && size == sizeof(request));
+    assert(address == &request && size == invalidated_size);
     assert(create_step == 1 || create_step == 2);
     create_step = 3;
-    host_request = request;
+    memcpy(&host_request, &request, size);
+    /* Neither invalidate nor reply may touch a following allocation. */
+    for (size_t i = size; i < sizeof(request); ++i)
+        assert(((const unsigned char *)&request)[i] == 0xa5);
 }
 
 void platform_instruction_fence(void)
@@ -82,27 +97,32 @@ static void test_create(void)
 {
     uint64_t response;
 
-    memset(&host_request, 0, sizeof(host_request));
-    host_request.stack_size = RPC_PROC_MIN_STACK_SIZE;
-    host_request.argc = 1;
-    host_request.args[0] = 0x1234;
-    strcpy(host_request.name, "create-test");
-    for (unsigned attempt = 0; attempt < 3; ++attempt) {
-        /* Device begins with stale cache contents on every descriptor reuse. */
-        memset(&request, 0xa5, sizeof(request));
-        create_step = 0;
-        no_slots = attempt == 1;
-        if (attempt == 2)
-            host_request.stack_size = CONFIG_PROC_STACK_SIZE + 1U;
-        assert(rpc_receive(RPC_PROC_CREATE, (uintptr_t)&request, &response) == 1);
-        assert(response == rpc_command_pack(RPC_PROC_CREATE_RESPONSE,
-                                            (uintptr_t)&request));
-        if (attempt == 0) {
-            assert(create_step == 4);
-        } else {
-            assert(create_step == 3);
-            assert(!host_request.proc_id && host_request.state == RPC_PROC_FAILED);
-            assert(host_request.status == (no_slots ? -ENOMEM : -EINVAL));
+    for (unsigned argc = 0; argc <= RPC_PROC_MAX_ARGS; ++argc) {
+        memset(&host_request, 0, sizeof(host_request));
+        host_request.stack_size_m1 = RPC_PROC_MAX_STACK_SIZE - 1U;
+        host_request.argc = argc;
+        for (unsigned i = 0; i < argc; ++i)
+            host_request.args[i] = 0xfedcba9876543200ULL + i;
+        strcpy(host_request.name, "create-test");
+        for (unsigned attempt = 0; attempt < 3; ++attempt) {
+            /* Device begins with stale cache contents on every descriptor reuse. */
+            memset(&request, 0xa5, sizeof(request));
+            create_step = 0;
+            invalidated_size = 0;
+            host_request.entry = 0x80001234;
+            no_slots = attempt == 1;
+            if (attempt == 2)
+                host_request.printf_size = CONFIG_PROC_PRINTF_SIZE + 1U;
+            assert(rpc_receive(RPC_PROC_CREATE, (uintptr_t)&request, &response) == 1);
+            assert(response == rpc_command_pack(RPC_PROC_CREATE_RESPONSE,
+                                                (uintptr_t)&request));
+            if (attempt == 0) {
+                assert(create_step == 4);
+            } else {
+                assert(create_step == 3);
+                assert(!host_request.proc_id && host_request.state == RPC_PROC_FAILED);
+                assert(host_request.status == (no_slots ? -ENOMEM : -EINVAL));
+            }
         }
     }
     assert(fence_count == 0);
@@ -125,7 +145,7 @@ int main(void)
     assert(sizeof(struct rpc_heap_response) == 16);
     assert(sizeof(struct rpc_heap_release) == 16);
     assert(sizeof(struct rpc_proc_exit_request) == 32);
-    assert(sizeof(struct rpc_proc_create_request) == 416);
+    assert(sizeof(struct rpc_proc_create_request) == 384);
     assert(sizeof(struct rpc_proc_info) == 96);
     assert(sizeof(struct rpc_proc_ps_snapshot) == 1864);
     assert(sizeof(struct rpc_proc_kill_result) == 40);
@@ -135,16 +155,12 @@ int main(void)
     assert(sizeof(struct rpc_profile_config) == 56);
     assert(sizeof(struct rpc_profile_flush_request) == 32);
     assert(sizeof(struct rpc_profile_flush_response) == 24);
-    assert(offsetof(struct rpc_proc_create_request, args) == 56);
-    assert(offsetof(struct rpc_proc_create_request, status) == 320);
-    assert(offsetof(struct rpc_proc_create_request, task_id) == 344);
-    assert(offsetof(struct rpc_proc_create_request, task_dim) == 356);
-    assert(offsetof(struct rpc_proc_create_request, task_mode) == 312);
-    assert(offsetof(struct rpc_proc_create_request, max_child_threads) == 316);
-    assert(offsetof(struct rpc_proc_create_request, resource_context) == 372);
-    assert(offsetof(struct rpc_proc_create_request, uram_base) == 376);
-    assert(offsetof(struct rpc_proc_create_request, tensor_context) == 392);
-    assert(offsetof(struct rpc_proc_create_request, name) == 400);
+    assert(offsetof(struct rpc_proc_create_request, args) == 88);
+    assert(offsetof(struct rpc_proc_create_request, task_id) == 48);
+    assert(offsetof(struct rpc_proc_create_request, task_mode) == 29);
+    assert(offsetof(struct rpc_proc_create_request, resource_context) == 40);
+    assert(offsetof(struct rpc_proc_create_request, tensor_context) == 32);
+    assert(offsetof(struct rpc_proc_create_request, name) == 72);
     assert(offsetof(struct rpc_proc_info, name) == 80);
     assert(offsetof(struct rpc_profile_slot_define, name) == 8);
     assert(RPC_PROC_SLOTS_PER_HART == 16);
