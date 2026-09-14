@@ -1,4 +1,4 @@
-TESTS := $(notdir $(patsubst %/,%,$(wildcard *_test/)))
+TESTS := $(sort $(patsubst ./%/meta.json,%,$(shell find . -type f -name meta.json)))
 
 .PHONY: all clean $(TESTS)
 

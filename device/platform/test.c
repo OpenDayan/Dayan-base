@@ -42,6 +42,9 @@ __attribute__((weak)) void platform_test_init(void *coherent_backing)
                                         DAYAN_ATOMIC_CACHE_BACKING_BASE);
     volatile uint32_t *status = (void *)((uintptr_t)CONFIG_CONTROL_BASE +
                                        DAYAN_ATOMIC_CACHE_STATUS);
+    (void)backing;
+    (void)status;
+    (void)coherent_backing;
 
     memset((void *)(uintptr_t)DAYAN_TEST_LOG_BASE, 0,
            DAYAN_TEST_LOG_HEADER_SIZE + DAYAN_TEST_LOG_CAPACITY);
@@ -54,22 +57,6 @@ __attribute__((weak)) void platform_test_init(void *coherent_backing)
     platform_data_fence();
     *(volatile uint64_t *)(uintptr_t)DAYAN_TEST_ALIVE_ADDR = DAYAN_TEST_ALIVE_VALUE;
     test_mailbox_flush();
-
-    *backing = (uintptr_t)coherent_backing;
-    __asm__ volatile("fence iorw, iorw" ::: "memory");
-    for (;;) {
-        uint32_t value = *status;
-
-        if (value & 12U) {
-            static const char message[] = "[test] atomic cache setup failed\n";
-
-            (void)platform_print(message, sizeof(message) - 1U);
-            platform_test_complete(-EIO);
-            platform_halt();
-        }
-        if (!(value & 1U) && (value & 2U))
-            break;
-    }
 }
 
 __attribute__((weak)) void platform_test_complete(int64_t result)

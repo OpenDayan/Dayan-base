@@ -1,6 +1,6 @@
 # Included by device/Makefile so tests and libnpu-os.a share the exact ABI/config.
 DEVICE_TEST_BUILD ?= $(ROOT)/build/device_tests
-DEVICE_TEST_NAMES := $(notdir $(patsubst %/,%,$(wildcard $(ROOT)/device_tests/*_test/)))
+DEVICE_TEST_NAMES := $(sort $(patsubst $(ROOT)/device_tests/%/meta.json,%,$(shell find $(ROOT)/device_tests -type f -name meta.json)))
 DEVICE_TEST_OBJECTS :=
 
 .PHONY: device-tests device-tests-clean
@@ -15,20 +15,31 @@ DEVICE_TEST_OBJECTS += $$(DEVICE_TEST_OBJECTS_$(1))
 
 .PHONY: device-test-$(1)
 device-tests: device-test-$(1)
-device-test-$(1): $(DEVICE_TEST_BUILD)/$(1)/$(1).elf $(DEVICE_TEST_BUILD)/$(1)/$(1).bin
+device-test-$(1): $(DEVICE_TEST_BUILD)/$(1)/$(notdir $(1)).elf $(DEVICE_TEST_BUILD)/$(1)/$(notdir $(1)).bin
 
-$(DEVICE_TEST_BUILD)/$(1)/$(1).elf: $$(DEVICE_TEST_OBJECTS_$(1)) $(LIB) \
+$(DEVICE_TEST_BUILD)/$(1)/$(notdir $(1)).elf: $$(DEVICE_TEST_OBJECTS_$(1)) $(LIB) \
     linker.ld $(ROOT)/device_tests/rules.mk $(ROOT)/device_tests/$(1)
 	@mkdir -p $$(dir $$@)
-	$(CLANG) $(LDFLAGS) -Wl,-Map,$(DEVICE_TEST_BUILD)/$(1)/$(1).map,--gc-sections \
+	$(CLANG) $(LDFLAGS) -Wl,-Map,$(DEVICE_TEST_BUILD)/$(1)/$(notdir $(1)).map,--gc-sections \
 		-Wl,--defsym=CONFIG_REQUIRE_TESTS=1 \
 		$$(DEVICE_TEST_OBJECTS_$(1)) $(LIB) -o $$@
 
-$(DEVICE_TEST_BUILD)/$(1)/$(1).bin: $(DEVICE_TEST_BUILD)/$(1)/$(1).elf
+$(DEVICE_TEST_BUILD)/$(1)/$(notdir $(1)).bin: $(DEVICE_TEST_BUILD)/$(1)/$(notdir $(1)).elf
 	$(OBJCOPY) -O binary $$< $$@
 endef
 
 $(foreach test,$(DEVICE_TEST_NAMES),$(eval $(call device_test_rules,$(test))))
+
+define device_test_alias
+ifneq ($(1),$(notdir $(1)))
+ifeq ($(words $(filter %/$(notdir $(1)) $(notdir $(1)),$(DEVICE_TEST_NAMES))),1)
+.PHONY: device-test-$(notdir $(1))
+device-test-$(notdir $(1)): device-test-$(1)
+endif
+endif
+endef
+
+$(foreach test,$(DEVICE_TEST_NAMES),$(eval $(call device_test_alias,$(test))))
 
 $(DEVICE_TEST_BUILD)/%.c.o: $(ROOT)/device_tests/%.c $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)

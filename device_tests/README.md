@@ -1,6 +1,8 @@
 # Device tests
 
 Create a directory ending in `_test`, following `device_tests/smoke_test/`.
+Nested directories such as `device_tests/VEC/one_test/` are supported. Each test
+is discovered recursively through its own `meta.json`; helper directories are not tests.
 Put its C, C++, assembly and local header files directly in that directory.
 Each directory produces one ELF containing all of its registered `DAYAN_TEST`
 descriptors. The build automatically discovers `.c`, `.cpp`, `.cc` and `.S`
@@ -26,6 +28,7 @@ build/device_tests/
 make device-tests                    # All *_test directories
 make -C device_tests                 # Same build
 make -C device_tests smoke_test      # One directory
+make -C device_tests VEC/vec_check_int_add_test
 make -C device_tests clean           # Remove build/device_tests only
 ```
 
@@ -54,7 +57,7 @@ uses a byte address and byte size inside the reservation. Do not initialize or
 dump the entire 1 GiB unless the test actually needs it. Program paths are
 inferred from the test directory and are not metadata fields.
 
-The build generates `build/device_tests/<name>/<name>.bin`; it does not generate
+The build generates `build/device_tests/<relative-test-path>/<leaf-name>.bin`; it does not generate
 or copy `meta.json`. See [smoke_test/README.md](smoke_test/README.md) for its exact
 regions and the simulator completion protocol.
 
