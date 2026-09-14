@@ -3,7 +3,7 @@
   "name": "smoke_test",
   "timeout": {
     "alive_cycles": 100000,
-    "done_cycles": 100000000,
+    "done_cycles": 100000,
     "qemu_seconds": 120
   },
   "mailbox": {
