@@ -1,5 +1,4 @@
 import json
-import math
 import sys
 
 
@@ -14,13 +13,8 @@ snapshots = [event for event in events if event["name"] == "PCU snapshot"]
 assert [event["args"]["cycle"] for event in snapshots] == [1000, 2000, 4000]
 assert [event["ts"] for event in snapshots] == [2, 4, 8]
 assert all(len(event["args"]["counters"]) == 112 for event in snapshots)
-intervals = [event for event in events if event["ph"] == "X"]
-assert len(intervals) == 2
-first, second = intervals
-assert first["ts"] == 2 and first["dur"] == 2
-assert second["ts"] == 4 and second["dur"] == 4
-assert first["args"]["cycles"] == 1000
-assert second["args"]["cycles"] == 2000
+assert not any(event["ph"] == "X" for event in events)
+assert not any(event["name"] == "PCU interval" for event in events)
 expected = {
     "URAM read mean (%)": 50,
     "URAM read variance (%^2)": 2500,
@@ -36,12 +30,16 @@ expected = {
     "VEC total IPC": 0.75,
     "Scalar IPC": 1.5,
 }
-pid = 0x10000 + (2 << 32) + 1
+pid = next(event["pid"] for event in events if event["name"] == "process_name")
+pcu_tid = next(
+    event["tid"] for event in events
+    if event["name"] == "thread_name" and event["args"]["name"] == "PCU snapshots"
+)
+assert 0 < pcu_tid <= 0xFFFFFFFF and pcu_tid != pid
 for name, value in expected.items():
-    assert math.isclose(first["args"][name], value)
-    assert second["args"][name] == 0
     counters = [e for e in events if e["name"] == name and e["ph"] == "C"]
     assert [e["ts"] for e in counters] == [2, 4, 8]
     assert [e["args"]["value"] for e in counters] == [value, 0, 0]
     assert all(e["pid"] == pid for e in counters)
-assert all(e["tid"] == 1 << 40 for e in intervals + snapshots)
+    assert all(e["tid"] == pcu_tid for e in counters)
+assert all(e["tid"] == pcu_tid for e in snapshots)

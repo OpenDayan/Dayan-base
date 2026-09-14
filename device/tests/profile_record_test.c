@@ -45,7 +45,8 @@ int main(void)
     profiler.end = base + sizeof(buffer.records);
     thread.slot = 1;
     thread.generation = 1;
-    thread.type = THREAD_TYPE_TASK_THREAD;
+    thread.type = THREAD_TYPE_TASK_PROC;
+    cpu_self()->threads.slot_owner[0] = 1;
     thread.state = THREAD_READY;
     assert(thread_id(&thread) == 0x101);
     memcpy(thread.name, "first", sizeof("first"));
@@ -58,7 +59,7 @@ int main(void)
     assert(thread.profile_defined && profiler.next == base + 32);
     assert(rpc_profile_record_slot(buffer.records[0]) == 1);
     assert(rpc_profile_record_state(buffer.records[0]) ==
-           RPC_PROFILE_RECORD_SLOT_DEFINE);
+           (RPC_PROFILE_RECORD_SLOT_DEFINE | 1));
     assert(!memcmp(&buffer.records[1], thread.name, sizeof(thread.name)));
     assert(rpc_profile_record_slot(buffer.records[3]) == 1);
     assert(rpc_profile_record_state(buffer.records[3]) == THREAD_READY);
@@ -75,13 +76,14 @@ int main(void)
     memset(&thread, 0, sizeof(thread));
     thread.slot = 1;
     thread.generation = 2;
+    thread.type = THREAD_TYPE_TASK_PROC;
     thread.state = THREAD_WAIT_START;
     assert(thread_id(&thread) == 0x201);
     memcpy(thread.name, "reused", sizeof("reused"));
     profile_record_thread_start(&thread);
     assert(profiler.next == base + 72);
     assert(rpc_profile_record_state(buffer.records[5]) ==
-           RPC_PROFILE_RECORD_SLOT_DEFINE);
+           (RPC_PROFILE_RECORD_SLOT_DEFINE | 1));
     assert(!memcmp(&buffer.records[6], thread.name, sizeof(thread.name)));
     assert(rpc_profile_record_state(buffer.records[8]) == THREAD_WAIT_START);
 
@@ -109,12 +111,33 @@ int main(void)
     profile_record_thread_start(&thread);
     assert(profiler.next == base + 40);
     assert(rpc_profile_record_state(buffer.records[1]) ==
-           RPC_PROFILE_RECORD_SLOT_DEFINE);
+           (RPC_PROFILE_RECORD_SLOT_DEFINE | 1));
     assert(!memcmp(&buffer.records[2], thread.name, sizeof(thread.name)));
     profiler.next = profiler.end - 32;
     profile_record_thread_start(&thread);
     assert(profiler.next == profiler.end && !cpu_self()->profiler);
     assert(wakes == 2);
+    assert(buffer.guard == untouched);
+
+    /* A nested child records its family root, not its immediate parent. */
+    profiler.next = base;
+    profiler.full_pending = 0;
+    cpu_self()->profiler = &profiler;
+    thread.slot = 7;
+    thread.parent = 4;
+    thread.type = THREAD_TYPE_TASK_THREAD;
+    cpu_self()->threads.slot_owner[6] = 1;
+    profile_record_thread_start(&thread);
+    assert(profiler.next == base + 32);
+    assert(rpc_profile_record_slot(buffer.records[0]) == 7);
+    assert(rpc_profile_record_state(buffer.records[0]) ==
+           (RPC_PROFILE_RECORD_SLOT_DEFINE | 1));
+    thread.slot = RPC_PROFILE_SLOT_RPC_RECEIVE;
+    thread.type = THREAD_TYPE_SYSTEM;
+    profile_record_thread_start(&thread);
+    assert(profiler.next == base + 64);
+    assert(rpc_profile_record_state(buffer.records[4]) ==
+           RPC_PROFILE_RECORD_SLOT_DEFINE);
     assert(buffer.guard == untouched);
     return 0;
 }

@@ -27,9 +27,13 @@ void profile_record_thread_start(struct thread *thread)
     uint64_t cycle;
 
     if (state) {
+        uint8_t slot = thread_slot_id(thread);
+        uint8_t root = thread->type == THREAD_TYPE_SYSTEM ? 0 :
+            cpu_self()->threads.slot_owner[slot - RPC_PROFILE_SLOT_USER_BASE];
+
         __asm__ volatile("rdcycle %0" : "=r"(cycle));
         *(uint64_t *)state->next = rpc_profile_record_pack(
-            cycle, thread_slot_id(thread), RPC_PROFILE_RECORD_SLOT_DEFINE);
+            cycle, slot, RPC_PROFILE_RECORD_SLOT_DEFINE | root);
         memcpy(state->next + RPC_PROFILE_RECORD_SIZE,
                thread->name, sizeof(thread->name));
         state->next += RPC_PROFILE_SLOT_DEFINE_SIZE;

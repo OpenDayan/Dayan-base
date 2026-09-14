@@ -766,7 +766,7 @@ static int finish_profile(npu_profile_t *profile, unsigned core_count)
             state = npu_profile_record_state(raw);
             if (!slot || slot >= NPU_PROFILE_SLOT_COUNT)
                 return -EIO;
-            if (state == NPU_PROFILE_RECORD_SLOT_DEFINE) {
+            if (npu_profile_record_size(raw) == NPU_PROFILE_SLOT_DEFINE_SIZE) {
                 const char *name;
 
                 if (batch.byte_count - offset <

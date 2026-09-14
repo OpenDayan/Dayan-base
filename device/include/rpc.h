@@ -277,6 +277,7 @@ enum rpc_profile_proc_state {
 };
 
 enum rpc_profile_record_tag {
+    /* Low seven bits carry the owning Proc's root slot; zero is ungrouped. */
     RPC_PROFILE_RECORD_SLOT_DEFINE = 0x80,
 };
 

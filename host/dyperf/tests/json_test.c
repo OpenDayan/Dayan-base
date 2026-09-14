@@ -11,9 +11,9 @@ static uint64_t record(uint64_t counter, uint8_t slot, uint8_t state)
 
 static size_t append_define(unsigned char *data, size_t offset,
                             uint64_t counter, uint8_t slot,
-                            const char *name)
+                            uint8_t root, const char *name)
 {
-    uint64_t value = record(counter, slot, NPU_PROFILE_RECORD_SLOT_DEFINE);
+    uint64_t value = record(counter, slot, NPU_PROFILE_RECORD_SLOT_DEFINE | root);
 
     memcpy(data + offset, &value, sizeof(value));
     memset(data + offset + sizeof(value), 0, NPU_PROC_NAME_SIZE);
@@ -72,6 +72,43 @@ static int rejects_record(const unsigned char *data, uint32_t size)
     return status == -EPROTO;
 }
 
+static int write_rounds(struct trace_writer *writer, uint32_t cluster)
+{
+    static const struct {
+        uint8_t slot, root;
+        const char *name;
+    } definitions[] = {
+        {1, 1, "z-root"}, {8, 8, "a-root"}, {9, 8, "post"},
+        {5, 1, "load-b"}, {2, 1, "load-a"}, {3, 1, "load-a"},
+        {2, 1, "load-a"},
+    };
+    unsigned char data[256];
+    size_t size = 0;
+    int status;
+
+    size = append_define(data, size, 1, 17, 0, "rpc-receive");
+    size = append_define(data, size, 2, 19, 0, "profile-flush");
+    status = write_chunked(writer, cluster, 1, data, size);
+    if (status < 0)
+        return status;
+    /* Interleaved families, noncontiguous slots, child reuse and >256 rounds. */
+    for (unsigned round = 0; round < 300; ++round) {
+        size = 0;
+        for (size_t i = 0; i < sizeof(definitions) / sizeof(definitions[0]); ++i) {
+            uint64_t cycle = 100 + round * 100 + i;
+
+            size = append_define(data, size, cycle, definitions[i].slot,
+                                  definitions[i].root, definitions[i].name);
+            size = append_state(data, size, cycle, definitions[i].slot,
+                                 NPU_PROFILE_PROC_READY);
+        }
+        status = write_chunked(writer, cluster, 1, data, size);
+        if (status < 0)
+            return status;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     unsigned char hart3[128];
@@ -105,26 +142,27 @@ int main(int argc, char **argv)
     if (argc != 2)
         return 2;
     hart3_size = append_define(hart3, hart3_size,
-                               UINT64_C(0xfffffffffff0), 7, "worker");
+                               UINT64_C(0xfffffffffff0), 7, 7, "worker");
     hart3_size = append_state(hart3, hart3_size,
                               UINT64_C(0xfffffffffff0), 7,
                               NPU_PROFILE_PROC_WAIT_EVENT);
     hart3_size = append_state(hart3, hart3_size, UINT64_C(0x10), 7,
                               NPU_PROFILE_PROC_READY);
-    hart3_size = append_define(hart3, hart3_size, UINT64_C(0x20), 9,
+    hart3_size = append_define(hart3, hart3_size, UINT64_C(0x20), 9, 7,
                                "late\"child");
     hart3_size = append_state(hart3, hart3_size, UINT64_C(0x20), 9,
                               NPU_PROFILE_PROC_WAIT_START);
     hart3_size = append_state(hart3, hart3_size, UINT64_C(0x28), 7,
                               NPU_PROFILE_PROC_RUNNING);
-    hart3_size = append_define(hart3, hart3_size, UINT64_C(0x30), 7,
+    hart3_size = append_define(hart3, hart3_size, UINT64_C(0x30), 7, 7,
                                "worker-2");
     hart3_size = append_state(hart3, hart3_size, UINT64_C(0x30), 7,
                               NPU_PROFILE_PROC_WAIT_START);
     hart3_size = append_state(hart3, hart3_size, UINT64_C(0x38), 7,
                               NPU_PROFILE_PROC_RUNNING);
 
-    hart0_size = append_define(hart0, hart0_size, 100, 1, "zeta");
+    /* Legacy definitions with no family tag remain readable. */
+    hart0_size = append_define(hart0, hart0_size, 100, 1, 0, "zeta");
     hart0_size = append_state(hart0, hart0_size, 100, 1,
                               NPU_PROFILE_PROC_RUNNING);
     hart0_size = append_state(hart0, hart0_size, 120, 1,
@@ -141,13 +179,17 @@ int main(int argc, char **argv)
         };
         status = trace_write_batch(&writer, &batch, hart0);
     }
+    if (status == 0)
+        status = write_rounds(&writer, 0);
+    if (status == 0)
+        status = write_rounds(&writer, 2);
     if (trace_writer_close(&writer) < 0)
         status = -EIO;
     if (command_start(command, "/tmp/dyperf-test.sock", &command_pid) < 0 ||
         command_wait(command_pid, 0, &command_status) < 0 ||
         command_status != 23)
         status = -EIO;
-    malformed_header = record(1, 1, 0x81);
+    malformed_header = record(1, 1, 0x91);
     memcpy(malformed, &malformed_header, sizeof(malformed_header));
     if (!rejects_record(malformed, NPU_PROFILE_RECORD_SIZE))
         status = -EIO;
@@ -160,6 +202,13 @@ int main(int argc, char **argv)
     memcpy(malformed, &malformed_header, sizeof(malformed_header));
     memcpy(malformed + NPU_PROFILE_RECORD_SIZE, "invalid", 8);
     if (!rejects_record(malformed, NPU_PROFILE_SLOT_DEFINE_SIZE))
+        status = -EIO;
+    /* Reject a child whose root has not been defined, and a system family. */
+    append_define(malformed, 0, 1, 2, 1, "child");
+    if (!rejects_record(malformed, sizeof(malformed)))
+        status = -EIO;
+    append_define(malformed, 0, 1, 17, 1, "system");
+    if (!rejects_record(malformed, sizeof(malformed)))
         status = -EIO;
     return status < 0;
 }

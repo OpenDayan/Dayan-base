@@ -97,8 +97,8 @@ Host 按 `~/npu-cluster` 的 `PerformanceCounter.scala` 和 `RVTPMU.scala` 读�
 | Scalar IPC | `delta(scalarCommit) / C`，为退休 IPC |
 
 这些指标在对应 Hart 下输出为 Chrome Trace `C` 计数器轨道，值从区段起点生效。
-`PCU intervals` 轨道同时输出 `X` 区间，含起止周期及全部指标；`PCU snapshot` 瞬时
-事件保留周期和按事件编号排列的 112 个原始计数值。采集结束处的 `C=0` 是轨道终止点，
+`PCU snapshots` 轨道上的 `PCU snapshot` 瞬时事件保留周期和按事件编号排列的
+112 个原始计数值，不再输出 `PCU interval` 区间。采集结束处的 `C=0` 是轨道终止点，
 不代表又采集了一段空闲时间。跨 Cluster 的快照先后采集，各自使用设备时间戳定位。
 
 ## 并发模型
@@ -114,11 +114,16 @@ Runtime 连接、提交 memcpy 或 launch。
 应像 `dyperf` 一样使用单独 Runtime Session。
 
 每个 Hart 映射为独立 `pid`，并通过 `process_sort_index` 固定按 Cluster、Hart 编号升序
-排列；同一 Hart 内的轨道通过 `thread_sort_index` 按 Proc 名称排序，同名 Proc 再按 tid
-排序。Device 输入是紧密排列的 profile v4 字节流：普通状态记录为 8 B，`SLOT_DEFINE`
+排列；同一 Hart 内先放 `scheduler` 和按名称排序的系统线程，再按 Proc 创建时间排列
+线程族，每族先放 Proc 自身的 Thread，子 Thread 按名称排序，同名时按创建顺序排列。
+PCU 快照轨道放在最后。Device 输入是紧密排列的变长字节流：普通状态记录为 8 B，`SLOT_DEFINE`
 为 24 B。工具读取每个 8-B header 的 state/tag 决定记录长度，并保留跨 Runtime batch
-的未完整记录。每次 slot 重新定义都会产生新的 generation，因此同一 slot 上先后运行的
-Thread 不会合并为一个 `tid`。`scheduler` 轨道由工具根据当前 Proc 离开
+的未完整记录。定义记录的 tag 为 `0x80 | root_slot`，其中 `root_slot` 是所属 Proc 的
+根 slot，系统线程为 0；名称仍占 16 B，状态记录和 FIFO 布局不变。每次 slot 重新定义
+都会分配新的 `tid`，所有 Hart/Cluster 的 pid/tid 共用递增的 32-bit ID 空间，避免
+多轮运行或查看器截断 ID 导致名称混淆。旧固件的 `0x80` 定义仍可读取，但缺少 family
+信息，用户线程只能各自按出现时间排列。要使用线程族排序，需更新设备固件和 dyperf。
+`scheduler` 轨道由工具根据当前 Proc 离开
 `RUNNING` 到下一个 Proc 进入 `RUNNING` 之间的区间合成该轨道，不增加 Device profile
 记录。Device 在 START 时为所有现存 Proc 先报告 `SLOT_DEFINE` 和初始状态，之后状态
 切换只报告 8-B 目标状态；采样期间 slot 分配给新 Thread 时再报告一次 24-B 定义，名称

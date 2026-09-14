@@ -252,8 +252,9 @@ byte 为单位。容量可通过 `npu_profile_options_t.buffer_size` 配置。
 
 普通状态记录固定 8 B：低 48 bit 是 Device counter，中间 8 bit 是 Hart 内 slot，最高
 8 bit 是状态。状态 `0..7` 与 Device 的 `THREAD_*` 一致；`0/1` 分别是 RUNNING/READY，
-`2..7` 是各种等待、退出与 kill-wait-produce 状态。tag `0x80` 表示 24-B
-`SLOT_DEFINE`：相同的 8-B header 后紧跟 16-B NUL 结尾 Proc 名称。用户 Proc 使用 slot
+`2..7` 是各种等待、退出与 kill-wait-produce 状态。tag `0x80 | root_slot` 表示 24-B
+`SLOT_DEFINE`：相同的 8-B header 后紧跟 16-B NUL 结尾 Proc 名称。`root_slot` 为所属
+Proc family 的根 slot，系统线程为 0；仅使用定义 tag 的空闲位，记录长度不变。用户 Proc 使用 slot
 `1..16`，三个系统 Proc 固定使用 `17..19`，slot 0 留给 `dyperf` 合成 scheduler 轨道。
 
 START 会为该 Hart 所有现存 Proc 依次写 `SLOT_DEFINE + state`。之后状态切换只增加 8 B；
@@ -290,8 +291,9 @@ npu_profile_destroy(profile);
 `batch.cluster/hart` 只描述观测数据来源，`batch.byte_count` 是本次返回的原始字节数；
 这些字段不参与 Runtime 的 kernel 调度接口。
 `host/dyperf` 封装上述流程并生成 Chrome Trace Viewer JSON；每个 Hart 是独立 pid，
-Hart 按 Cluster/Hart 编号升序排列。每次 slot 定义是独立 generation，Host 使用
-`(cluster, hart, slot, generation)` 区分轨道；同一 Hart 内按 Proc 名称排序。`scheduler`
+Hart 按 Cluster/Hart 编号升序排列。每次 slot 定义分配全局唯一的 32-bit tid；同一 Hart
+内先放 scheduler 和系统线程，再按创建时间排列 Proc family，族内父 Thread 在前，
+子 Thread 按名称排序，同名时按创建顺序排列。`scheduler`
 轨道由相邻 Proc 的 `RUNNING` 边界合成。`thread_name` 只使用 `SLOT_DEFINE` 中的名称，
 各目标状态被展开为连续的状态区间。Device counter 按 1 ns 解释，
 Trace `ts` 写为带纳秒精度的小数微秒。

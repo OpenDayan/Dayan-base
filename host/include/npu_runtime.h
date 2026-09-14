@@ -231,6 +231,7 @@ typedef enum npu_profile_proc_state {
 } npu_profile_proc_state_t;
 
 typedef enum npu_profile_record_tag {
+    /* Low seven bits carry the owning Proc's root slot; zero is ungrouped. */
     NPU_PROFILE_RECORD_SLOT_DEFINE = 0x80,
 } npu_profile_record_tag_t;
 
@@ -249,13 +250,19 @@ static inline uint8_t npu_profile_record_state(uint64_t value)
     return (uint8_t)(value >> NPU_PROFILE_STATE_SHIFT);
 }
 
+static inline uint8_t npu_profile_record_root_slot(uint64_t value)
+{
+    return npu_profile_record_state(value) & 0x7fU;
+}
+
 static inline size_t npu_profile_record_size(uint64_t value)
 {
     uint8_t state = npu_profile_record_state(value);
 
     if (state <= NPU_PROFILE_PROC_STATE_MAX)
         return NPU_PROFILE_RECORD_SIZE;
-    if (state == NPU_PROFILE_RECORD_SLOT_DEFINE)
+    if (state >= NPU_PROFILE_RECORD_SLOT_DEFINE &&
+        npu_profile_record_root_slot(value) < NPU_PROFILE_SLOT_RPC_RECEIVE)
         return NPU_PROFILE_SLOT_DEFINE_SIZE;
     return 0;
 }

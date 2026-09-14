@@ -51,6 +51,7 @@ constexpr long TX_EXT_ELEMENTWISE = 0x00;
 constexpr long TX_EXT_SFU = 0x02;
 constexpr long TX_EXT_REDUCE = 0x03;
 
+/* MAT legacy single-format encodings (EXT=0). */
 constexpr long DT_FP32 = 0x00;
 constexpr long DT_BF16 = 0x02;
 constexpr long DT_FP16 = 0x03;
@@ -59,12 +60,33 @@ constexpr long DT_E5M2 = 0x05;
 constexpr long DT_MXFP8_E4M3 = 0x06;
 constexpr long DT_MXFP8_E5M2 = 0x07;
 constexpr long DT_FP4_E2M1 = 0x08;
-constexpr long DT_S32 = 0x20;
-constexpr long DT_U32 = 0x21;
-constexpr long DT_S16 = 0x22;
-constexpr long DT_U16 = 0x23;
-constexpr long DT_S8 = 0x24;
-constexpr long DT_U8 = 0x25;
+constexpr long DT_S32 = 0x10;
+constexpr long DT_U32 = 0x11;
+constexpr long DT_S16 = 0x12;
+constexpr long DT_U16 = 0x13;
+constexpr long DT_S8 = 0x14;
+constexpr long DT_U8 = 0x15;
+constexpr long DT_S4 = 0x18;
+constexpr long DT_U4 = 0x19;
+
+/* MAT A/B operand BaseFormat encodings (EXT=1, Version=0). */
+constexpr long DT_MATIN_E0M7 = 0x00;
+constexpr long DT_MATIN_E1M6 = 0x01;
+constexpr long DT_MATIN_E2M5 = 0x02;
+constexpr long DT_MATIN_E3M4 = 0x03;
+constexpr long DT_MATIN_E4M3 = 0x04;
+constexpr long DT_MATIN_E5M2 = 0x05;
+constexpr long DT_MATIN_E6M1 = 0x06;
+constexpr long DT_MATIN_S8 = 0x08;
+constexpr long DT_MATIN_U8 = 0x09;
+constexpr long DT_MATIN_TF16 = 0x0a;
+constexpr long DT_MATIN_TF32 = 0x10;
+constexpr long DT_MATIN_FP16 = 0x11;
+constexpr long DT_MATIN_BF16 = 0x12;
+constexpr long DT_MATIN_FP4_E2M1 = 0x18;
+constexpr long DT_MATIN_S4 = 0x19;
+constexpr long DT_MATIN_U4 = 0x1a;
+constexpr long DT_MATIN_MX_BIT = 0x20;
 
 constexpr long TX_ELEM_ADD = 0x00;
 constexpr long TX_ELEM_SUB = 0x01;
@@ -250,6 +272,17 @@ __attribute__((always_inline)) static inline void emit_vec_vv_fp32()
 } // namespace BaseNPUInstBuilder
 
 #if defined(__riscv)
+template <long Vb, long Vrs1, long Op>
+__attribute__((always_inline)) static inline void __tx_vec_v_fp32_eru()
+{
+    static_assert(Vb >= 0 && Vb < 2);
+    static_assert(Vrs1 >= 0 && Vrs1 < 32);
+    static_assert(Op >= 0 && Op < 2);
+    constexpr long encoding = BaseNPUInstBuilder::OPCODE_CUSTOM_32B |
+        (Vrs1 << 7) | (Op << 12) | (1L << 17) | (2L << 20) | (Vb << 25) | (0x20L << 26);
+    BaseNPUInstBuilder::detail::emit_void_32<encoding>();
+}
+
 template <long Vb, long Vrs1, long Vrs2, long Rm>
 __attribute__((always_inline)) static inline void __tx_vec_vv_fp32_max()
 {
@@ -498,6 +531,7 @@ enum MACRO_TCSR {
 
 #define MAT_GROUPSZ 32
 #define MACRO_GROUPSZ 32
+#define MAT_DATATYPE_PAIR(a, b) (0x8000L | (((b) & 0x3fL) << 6) | ((a) & 0x3fL))
 #define MAT_BATCH_SWIZZLE(matrix, batch, spatial)                         \
     (((uint64_t)(uint8_t)(matrix) << 16) |                                \
      ((uint64_t)(uint8_t)(batch) << 8) |                                  \

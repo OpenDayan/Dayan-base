@@ -21,6 +21,11 @@ static void compile_child(void *argument)
 }
 
 #ifdef __cplusplus
+static_assert(MAT_DATATYPE_PAIR(BaseNPUInstBuilder::DT_MATIN_TF32, BaseNPUInstBuilder::DT_MATIN_TF32) == 0x8410, "TF32 pair encoding");
+static_assert(MAT_DATATYPE_PAIR(BaseNPUInstBuilder::DT_MATIN_BF16, BaseNPUInstBuilder::DT_MATIN_FP16) == 0x8452, "mixed 16-bit encoding");
+static_assert(MAT_DATATYPE_PAIR(BaseNPUInstBuilder::DT_MATIN_E4M3 | BaseNPUInstBuilder::DT_MATIN_MX_BIT, BaseNPUInstBuilder::DT_MATIN_S8) == 0x8224, "A-only MX encoding");
+static_assert(MAT_DATATYPE_PAIR(BaseNPUInstBuilder::DT_MATIN_S8, BaseNPUInstBuilder::DT_MATIN_E4M3 | BaseNPUInstBuilder::DT_MATIN_MX_BIT) == 0x8908, "B-only MX encoding");
+
 static void compile_intrinsics(long destination, long left, long right)
 {
     long checksum;
@@ -34,6 +39,7 @@ static void compile_intrinsics(long destination, long left, long right)
     __tx_lsu_dma_d2u<0>(destination, left);
     __tx_lsu_dma_d2d<0>(destination, left);
     __tx_mat_tcsr_write<MAT_DATATYPE>(BaseNPUInstBuilder::DT_BF16);
+    __tx_mat_tcsr_write<MAT_DATATYPE>(MAT_DATATYPE_PAIR(BaseNPUInstBuilder::DT_MATIN_TF32, BaseNPUInstBuilder::DT_MATIN_TF32));
     __tx_mat_tcsr_read<MAT_DATATYPE>(value);
     __tx_mat_mm<0>(destination, left, right);
     __tx_mat_mma<0>(destination, left, right);
