@@ -50,6 +50,8 @@ HAL 使用 `npu_hal_core_t { cluster, core }` 指定寄存器、RPC、内存可�
 执行目标。Server 启动时读取 HAL topology，并为每个启用的物理 Core 建立内部 slot。
 当前 ABI 固定每个 Cluster 有 4 个 Core。
 
+`npu_runtime_get_topology(runtime, &topology)` 返回 HAL 的 `cluster_count`、`cores_per_cluster` 和 Server 实际启用的 `enabled_cluster_mask`、`enabled_core_mask`。Core mask 对每个启用的 Cluster 都适用。应用可据此选择协作模式和逻辑网格大小；查询不暴露寄存器或分配物理 Core。旧 Server 不支持此查询时返回负 errno。
+
 公开 Runtime 使用下列逻辑配置：
 
 ```cpp

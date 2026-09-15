@@ -326,6 +326,19 @@ int main(void)
     runtime_options.output_context = &output_capture;
     assert(npu_runtime_open(&runtime, &runtime_options) == 0);
     {
+        npu_runtime_topology_t topology;
+
+        assert(npu_runtime_get_topology(0, &topology) == -EINVAL);
+        assert(npu_runtime_get_topology(runtime, 0) == -EINVAL);
+        assert(npu_runtime_get_topology(runtime, &topology) == 0);
+        assert(topology.cluster_count == server->hal_info.cluster_count);
+        assert(topology.cores_per_cluster == server->hal_info.cores_per_cluster);
+        assert(topology.enabled_cluster_mask == server->options.enabled_cluster_mask);
+        assert(topology.enabled_core_mask == server->options.enabled_core_mask);
+        assert(runtime_control_call(runtime, NPU_IPC_TOPOLOGY, 1,
+                                    0, 0, &topology, sizeof(topology), 0) == -EINVAL);
+    }
+    {
         struct profile_read_state profile_read;
         struct server_session *profile_session;
         npu_runtime_t *concurrent_runtime = 0;

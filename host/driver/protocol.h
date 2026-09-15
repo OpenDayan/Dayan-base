@@ -29,6 +29,7 @@
 
 typedef enum npu_ipc_opcode {
     NPU_IPC_HELLO = 1,
+    NPU_IPC_TOPOLOGY = 2,
     NPU_IPC_CONTEXT_CREATE = 0x0100,
     NPU_IPC_CONTEXT_DESTROY,
     NPU_IPC_BUFFER_CREATE = 0x0200,

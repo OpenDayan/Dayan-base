@@ -69,6 +69,13 @@ typedef struct npu_kernel npu_kernel_t;
 typedef struct npu_event npu_event_t;
 typedef struct npu_profile npu_profile_t;
 
+typedef struct npu_runtime_topology {
+    uint32_t cluster_count;
+    uint32_t cores_per_cluster;
+    uint32_t enabled_cluster_mask;
+    uint32_t enabled_core_mask;
+} npu_runtime_topology_t;
+
 typedef void (*npu_runtime_output_fn)(void *context, uint32_t cluster,
                                       uint32_t core, uint32_t proc,
                                       const void *data, size_t size,
@@ -292,6 +299,9 @@ void npu_kernel_arg_buffer(npu_kernel_arg_t *arg, npu_buffer_t *buffer,
 int npu_runtime_open(npu_runtime_t **runtime_out,
                      const npu_runtime_options_t *options);
 int npu_runtime_close(npu_runtime_t *runtime);
+/* Core mask applies to each enabled Cluster. Masks include only enabled slots. */
+int npu_runtime_get_topology(npu_runtime_t *runtime,
+                             npu_runtime_topology_t *topology);
 
 /* Destroying a Context cancels its queued work and reclaims all child objects. */
 int npu_context_create(npu_runtime_t *runtime,

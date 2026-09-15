@@ -2166,6 +2166,21 @@ static int dispatch_control(dayan_server_t *server,
     *response_size = 0;
     pthread_mutex_lock(&server->mutex);
     switch (header->opcode) {
+    case NPU_IPC_TOPOLOGY: {
+        npu_runtime_topology_t *topology = response;
+
+        if (!payload_exact(header, 0) || header->object_id) {
+            status = -EINVAL;
+            break;
+        }
+        topology->cluster_count = server->hal_info.cluster_count;
+        topology->cores_per_cluster = server->hal_info.cores_per_cluster;
+        topology->enabled_cluster_mask = server->options.enabled_cluster_mask;
+        topology->enabled_core_mask = server->options.enabled_core_mask;
+        *response_size = sizeof(*topology);
+        status = 0;
+        break;
+    }
     case NPU_IPC_CONTEXT_CREATE:
         if (payload_exact(header, sizeof(npu_ipc_context_create_t)))
             status = context_create_locked(server, session, payload,

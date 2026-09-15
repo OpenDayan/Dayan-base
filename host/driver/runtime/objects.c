@@ -9,6 +9,15 @@
 
 #define RUNTIME_OUTPUT_POLL_MS 100U
 
+int npu_runtime_get_topology(npu_runtime_t *runtime,
+                             npu_runtime_topology_t *topology)
+{
+    if (!runtime || !topology)
+        return -EINVAL;
+    return runtime_control_call(runtime, NPU_IPC_TOPOLOGY, 0,
+                                0, 0, topology, sizeof(*topology), 0);
+}
+
 void npu_context_desc_init(npu_context_desc_t *desc)
 {
     if (!desc)
