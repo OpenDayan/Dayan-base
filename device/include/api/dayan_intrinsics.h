@@ -22,6 +22,7 @@
 #define __tx_vec_cvt_fp32_bf16 __dayan_builtin_tx_vec_cvt_fp32_bf16
 #define __tx_vec_cvt_fp16_fp32 __dayan_builtin_tx_vec_cvt_fp16_fp32
 #define __tx_vec_cvt_bf16_fp32 __dayan_builtin_tx_vec_cvt_bf16_fp32
+#define __tx_vec_cvt_mxfp4_bf16 __dayan_builtin_tx_vec_cvt_mxfp4_bf16
 #include <rvt_intrinsics.h>
 #undef __tx_vec_vv_fp32_max
 #undef __tx_vec_cvt_fp32_int32
@@ -30,6 +31,7 @@
 #undef __tx_vec_cvt_fp32_bf16
 #undef __tx_vec_cvt_fp16_fp32
 #undef __tx_vec_cvt_bf16_fp32
+#undef __tx_vec_cvt_mxfp4_bf16
 #endif
 
 /*
@@ -323,6 +325,12 @@ template <long Vb, long Vrs1, long Rm>
 __attribute__((always_inline)) static inline void __tx_vec_cvt_bf16_fp32()
 {
     BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 5>();
+}
+
+template <long Vb, long Vrs1, long Rm>
+__attribute__((always_inline)) static inline void __tx_vec_cvt_mxfp4_bf16()
+{
+    BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 7>();
 }
 #endif
 

@@ -16,6 +16,7 @@ static int profile_config_call(npu_service_device_t *device,
     struct rpc_profile_config config;
     npu_hal_allocation_t *allocation = 0;
     uint64_t descriptor_address;
+    uint32_t timeout_ms = device->options.default_timeout_ms;
     int descriptor_may_be_live = 0;
     int status;
 
@@ -44,9 +45,12 @@ static int profile_config_call(npu_service_device_t *device,
                                   &config, sizeof(config));
     if (status < 0)
         goto out;
+    /* Allow twice the default response time without wrapping finite waits. */
+    if (timeout_ms != NPU_SERVICE_TIMEOUT_INFINITE)
+        timeout_ms = timeout_ms > (UINT32_MAX - 1U) / 2U ?
+            UINT32_MAX - 1U : timeout_ms * 2U;
     status = npu_service_rpc_call(device, core->target, RPC_PROFILE_CONFIG,
-                                  descriptor_address,
-                                  device->options.default_timeout_ms,
+                                  descriptor_address, timeout_ms,
                                   &descriptor_may_be_live);
     if (status < 0)
         goto out;
