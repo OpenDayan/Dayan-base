@@ -15,10 +15,10 @@
 #define NPU_IRQ_STATUS_OFFSET    0x00U
 #define NPU_IRQ_CLEAR_OFFSET     0x0cU
 #define NPU_IRQ_MAILBOX_OFFSET   0x20U
-#define NPU_IRQ_POLL_INTERVAL_NS 1000000L
+#define NPU_IRQ_POLL_INTERVAL_NS 1000L /* Requested polling sleep: 1 us. */
 
 static const struct npu_hal_backend_ops *const backends[] = {
-    &npu_hal_xdma_backend_ops,
+    &npu_hal_xilinx_dma_backend_ops,
 };
 
 static const struct npu_hal_backend_ops *default_backend(void)

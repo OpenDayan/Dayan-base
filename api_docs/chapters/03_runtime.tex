@@ -33,6 +33,8 @@ Runtime 不访问寄存器或中断设备。公开入口由
   \code{npu_event_state_t} & Event 的排队、运行和终态枚举。 \\
   \code{npu_profile_proc_state_t} & 性能采样记录中的 Proc 调度状态。 \\
   \code{npu_runtime_options_t} & Server 地址、连接超时、命令超时和 Device 输出回调。 \\
+  \code{npu_runtime_topology_t} & Cluster 数、每 Cluster Core 数及实际启用的 Cluster/Core mask；用于查询拓扑，不分配物理 Core。 \\
+  \code{npu_pcu_batch_t} & 一次 PCU 读取的单 Cluster 快照；Core 数组索引对应物理 Hart。 \\
   \code{npu_context_desc_t} & Context 的内存配额和待处理命令上限。 \\
   \code{npu_buffer_desc_t} & Buffer 的大小、对齐、读写权限、一致性和位置要求。 \\
   \code{npu_stream_desc_t} & Stream 的优先级和标志。 \\
@@ -77,6 +79,7 @@ Runtime 不访问寄存器或中断设备。公开入口由
   \code{NPU_EVENT_QUEUED} / \code{NPU_EVENT_RUNNING} & Event 尚未执行或正在执行。 \\
   \code{NPU_EVENT_COMPLETE} / \code{NPU_EVENT_FAILED} / \code{NPU_EVENT_CANCELLED} & Event 的三个终态。 \\
   \code{NPU_PROFILE_BATCH_END} & 当前批次是停止采样后的最后一批数据。 \\
+  \code{NPU_PCU_ROUND_END} & PCU 批次 flags 中表示当前轮各 Cluster 扫描结束的标志。 \\
 \end{dayantable}
 
 所有版本化描述符必须先调用对应 init 函数。
@@ -102,6 +105,7 @@ Runtime 不访问寄存器或中断设备。公开入口由
   API & 行为 \\
   \code{npu_runtime_open} & 建立控制连接和传输授权连接，导入 HAL 设备句柄，并启动传输线程。 \\
   \code{npu_runtime_close} & 依次关闭性能采样和全部 Context，等待数据传输结束，停止传输线程并关闭会话。 \\
+  \code{npu_runtime_get_topology} & 查询 Server 的 Cluster/Core 数及启用 mask，返回 \code{npu_runtime_topology_t}。 \\
   \code{npu_context_create} & 在 Session 内创建隔离 Context。 \\
   \code{npu_context_destroy} & 取消 Context 中的命令，并回收全部子对象和已授权传输。 \\
   \code{npu_buffer_create} & 按描述符向 Server 申请逻辑 Buffer。 \\
@@ -157,6 +161,7 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
   API & 行为 \\
   \code{npu_profile_start} & 取得设备级采样功能的独占权，并让 Service 配置所有已经启动的 Hart。 \\
   \code{npu_profile_read} & 读取来自同一 Cluster 和 Hart 的一批原始字节；支持超时，单条记录可以跨越两次读取。 \\
+  \code{npu_profile_pcu_read} & 每次返回一个 Cluster 的 PCU 批次；读取至 flags 含 \code{NPU_PCU_ROUND_END} 后开始下一轮。 \\
   \code{npu_profile_stop} & 停止 Device 采样，并使最后一批数据可被读取。 \\
   \code{npu_profile_destroy} & 停止采样且读完最后一批数据后，释放性能采样句柄。 \\
 \end{dayantable}
@@ -165,6 +170,9 @@ Core。Runtime 不接受 Cluster 或 Core 参数，物理位置由 Server 调度
   API & 含义 \\
   \code{NPU_PROFILE_PROC_RUNNING} / \code{NPU_PROFILE_PROC_READY} & Proc 正在执行或位于调度器的就绪队列。 \\
   \code{NPU_PROFILE_PROC_POLLING} & 轮询状态；barrier 轮询 64 次后以最低调度优先级让出。 \\
+  \code{NPU_PROFILE_PROC_WAIT_POLL} & \code{NPU_PROFILE_PROC_POLLING} 的兼容别名。 \\
+  \code{NPU_PROFILE_PROC_WAIT_PRODUCE} & 值为 6，保留为兼容的通用异步等待状态。 \\
+  \code{NPU_PROFILE_PROC_STATE_MAX} & 当前普通状态上限，等于 \code{NPU_PROFILE_PROC_WAIT_RESOURCE}。 \\
   \code{NPU_PROFILE_PROC_WAIT_EVENT} / \code{NPU_PROFILE_PROC_WAIT_JOIN} & 等待事件，或等待子 Thread 退出。 \\
   \code{NPU_PROFILE_PROC_WAIT_LSU} / \code{NPU_PROFILE_PROC_WAIT_MAT} / \code{NPU_PROFILE_PROC_WAIT_VEC} / \code{NPU_PROFILE_PROC_WAIT_MACRO} & 等待对应异步执行单元完成。 \\
   \code{NPU_PROFILE_PROC_WAIT_RESOURCE} & 等待 Named Resource；\code{WAIT_PRODUCE} 为兼容的通用异步等待状态。 \\

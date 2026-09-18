@@ -69,6 +69,10 @@ Socket 协议不属于公开 API。
 正常关闭前，调用方应等待所有 \code{npu_service_launch_t} 到达终态并释放句柄。如果设备
 已经无法访问，Server 会先中止 Service，再走只回收 Host 资源的放弃路径。
 
+这里的 1 ms 是 Service 的 \code{rpc_poll_interval_us} 默认值，用于 Service 层的重试和
+等待；它不等于 HAL 的 IRQ status polling 间隔。Xilinx DMA 选择 polling completion
+时，HAL 每轮请求休眠 1 微秒，IRQ 模式则阻塞等待事件节点。
+
 \subsection{BL1、Device API 与算子}
 
 \begin{dayantable}{固件和算子 API}{tab:api-service-kernel}{X[40,l] X[60,l]}

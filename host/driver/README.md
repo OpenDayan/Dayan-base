@@ -19,15 +19,16 @@ dayan_server：会话、对象校验、网格调度                 |  不传输
 HAL 配置与控制面                               用户进程中的 HAL 数据提供器
 拓扑 / 寄存器 / 中断 / 内存                    导入设备句柄，解释传输令牌
         |                                             |
-        +------------------- XDMA ---------------------+
+        +---------- Xilinx DMA (XDMA / QDMA) -----------+
                          直接 pread/pwrite
                   /dev 或 /tmp/virtual_npu
 ```
 
 - `hal/include/`：公开的通用配置、控制面和数据面 ABI。`npu_hal_config.h` 只描述设备
   拓扑、内存和抽象后端配置。
-- `hal/`：通用 HAL 生命周期、内存管理和数据提供器分派；`hal/backend/xdma/` 包含
-  XDMA 私有配置、设备端点、低地址翻译、中断和直传实现。每个后端提供一张完整的能力
+- `hal/`：通用 HAL 生命周期、内存管理和数据提供器分派；`hal/backend/xilinx_dma/` 包含
+  统一的 Xilinx DMA 配置、设备端点、低地址翻译、中断和直传实现；`driver` 区分 XDMA/QDMA。
+  两者共享同一套状态、Ops 和 Runtime 数据面。每个后端提供一张完整的能力
   表，`npu_hal_open()` 通过注册表选择能力表，不使用后端选择 `switch`。
 - `server/`：`service.[ch]` 负责 BL1 装载、Host 与 BL1 之间的 RPC、Device 堆和动态
   算子重定位；`server.[ch]` 与 `scheduler.c` 提供 Unix 域 Socket 服务、会话隔离、
@@ -38,7 +39,7 @@ HAL 配置与控制面                               用户进程中的 HAL 数�
   对外动态符号均为 `npu_` 前缀。
 
 `dayan_server` 先打开具体 HAL 后端，再把不透明的 `npu_hal_t` 交给 Service。Service
-配置不包含 XDMA 路径等后端私有字段。`libDayanRuntime` 只链接通用数据面分派器和已
+配置不包含 DMA 设备路径等后端私有字段。`libDayanRuntime` 只链接通用数据面分派器和已
 支持的数据提供器，不链接 HAL 控制面或 Service。以后加入基于 `ioctl` 或 `mmap` 的
 实现时，不需要改变 Runtime 公共头文件或会话协议。
 
@@ -84,10 +85,13 @@ Runtime、Server 和 BL1 都会校验 mode 只能为 1 或 4，并在 mode 4 时
 
 ### HAL 拓扑与内存
 
-`npu_hal_options_t` 只配置设备拓扑、内存区域和抽象的 `backend_options` 指针。XDMA
-后端的私有配置包含运行环境、设备目录、设备编号、Cluster 步长和 MMIO 地址偏移。
-`backend_options` 为空时，HAL 注册表选择默认后端；当前默认项是 XDMA 模拟器配置。
-XDMA 后端将 Cluster `c` 映射到：
+`npu_hal_options_t` 只配置设备拓扑、内存区域和抽象的 `backend_options` 指针。
+当前注册的是 `NPU_HAL_BACKEND_XILINX_DMA`，配置结构为
+`npu_hal_xilinx_dma_options_t`，头文件位于 `hal/backend/xilinx_dma/npu_hal_xilinx_dma.h`。
+统一初始化函数 `npu_hal_xilinx_dma_options_init()` 保留 `simulator/fpga` profile；
+`driver` 独立选择 XDMA 或 QDMA。旧 `npu_hal_xdma_options_t` 配置接口已移除。
+`backend_options` 为空时采用统一后端的默认配置：XDMA、simulator、IRQ completion。
+未指定 `device_name` 的 XDMA 模式将 Cluster `c` 映射到：
 
 ```text
 xdma[device_index + c * cluster_device_stride]
@@ -98,11 +102,24 @@ xdma[device_index + c * cluster_device_stride]
 - `simulator`：设备目录 `/tmp/virtual_npu`，MMIO 偏移 `0x0`；
 - `fpga`：设备目录 `/dev`，MMIO 偏移 `0x4000000000`，与当前 AXVU13P DUT 地址图一致。
 
-这些默认值可以通过 `--xdma-device-dir` 和 `--xdma-mmio-offset` 分别覆盖。XDMA
-H2C/C2H 地址翻译为：设备地址低于 `0x80000000` 时加 `mmio_address_offset`，从
+这些默认值可以通过 `--dma-device-dir` 和 `--dma-mmio-offset` 分别覆盖，显式值优先于
+profile 默认值，不受参数顺序影响。两种驱动的 H2C/C2H 地址翻译相同：设备地址低于
+`0x80000000` 时加 `mmio_address_offset`，从
 `0x80000000` 开始的 DRAM 地址保持不变。后端把翻译后的地址写入传输令牌，Runtime
-本身不知道偏移或 Cluster。`_user` 设备是独立的相对寄存器窗口，不重复
+本身不解释偏移或 Cluster。XDMA 的 `_user` 设备是独立的相对寄存器窗口，不重复
 应用该物理地址偏移。
+
+| 用途 | XDMA 示例 | QDMA 示例 |
+| --- | --- | --- |
+| H2C | `xdma0_h2c_0`，写方式打开 | `qdma01000-MM-0`，写方式打开 |
+| C2H | `xdma0_c2h_0`，读方式打开 | 同一个 `qdma01000-MM-0`，另以读方式打开 |
+| 控制窗口 | 可选 `xdma0_user` | 通过 MM 数据节点访问 |
+| 事件节点 | `xdma0_events_0` | `qdma01000-user_irq0` |
+
+QDMA 的 user IRQ 节点来自本地驱动扩展，原生驱动不保证提供。MM queue 与 user IRQ
+编号独立；XDMA channel 与 event 编号也独立。QDMA 不需要 XDMA 名称的符号链接。
+当前 QDMA 或显式 `device_name` 配置只支持单 Cluster；多 Cluster 只支持上述 XDMA
+索引/步长映射，不会将同一 QDMA function 的多个 queue 自动视为不同 Cluster。
 
 内存 region 同时描述 memory class 与 visibility scope：
 
@@ -141,8 +158,8 @@ Runtime 为一个会话建立两条 Unix `SOCK_STREAM` 连接。控制连接负�
 请求；传输授权连接只传递设备文件描述符、传输令牌和完成状态。两条连接都不传输 H2D
 或 D2H 的用户数据。
 
-XDMA 数据提供器本身不使用 Socket。Server 在建立会话时打开 `/dev` 或
-`/tmp/virtual_npu` 下的 XDMA 设备文件，并通过 `SCM_RIGHTS` 把文件描述符交给用户
+Xilinx DMA 数据提供器本身不使用 Socket。Server 打开 HAL 时打开 `/dev` 或
+`/tmp/virtual_npu` 下所选驱动的设备节点，并在建立会话时通过 `SCM_RIGHTS` 把文件描述符交给用户
 进程。`SCM_RIGHTS` 只传递一个已打开文件的引用，不复制设备数据。Runtime 随后直接
 对这些文件描述符执行 `pread/pwrite`。
 
@@ -151,7 +168,7 @@ H2D/D2H 流程如下：
 1. Runtime 通过控制连接把传输排入 Stream，只发送逻辑 Buffer、偏移和长度。
 2. 命令到达 Stream 队首后，Runtime 的传输线程申请令牌。Server 校验内存归属、方向、
    范围和可见 Cluster，再由 HAL 生成仅用于该次传输的令牌。
-3. Runtime 把 Host 缓冲区和令牌交给 XDMA 数据提供器。提供器根据方向选择 H2C 或
+3. Runtime 把 Host 缓冲区和令牌交给 Xilinx DMA 数据提供器。提供器根据方向选择 H2C 或
    C2H 文件，并直接执行 `pread/pwrite`。数据不经过 Socket 或 Server 缓冲区。
 4. Runtime 原样交还令牌和传输结果。Server 核对后完成 Event，并允许相关设备内存
    被释放或复用。
@@ -160,7 +177,7 @@ H2D/D2H 流程如下：
 地址。D2D 不涉及 Host 缓冲区，由 Server 直接调用 HAL 控制面搬运。
 
 这条路径避免了“用户进程到 Server、Server 再到设备”的中转拷贝，但不表示内核和
-XDMA 驱动内部一定是零拷贝。令牌用于可信 Runtime 与 Server 之间的范围校验和生命周期
+XDMA/QDMA 驱动内部一定是零拷贝。令牌用于可信 Runtime 与 Server 之间的范围校验和生命周期
 管理；设备文件权限仍是防止恶意进程越权访问的系统安全边界。其它 HAL 后端也应采用
 相同模式：Server 签发令牌，用户进程中的数据提供器直接使用设备资源完成传输。
 
@@ -168,9 +185,12 @@ XDMA 驱动内部一定是零拷贝。令牌用于可信 Runtime 与 Server 之�
 
 Service 为每个 Cluster 分别加载 BL1 `ET_EXEC` 的 `PT_LOAD` 段，向选定 Core 的 BL0
 mailbox 写入口、置 MSIP，并等待 BL1 打开对应 Host IRQ bit。后台 RPC worker 调用
-`npu_hal_irq_wait()`，由 HAL 在超时前返回发生中断的 Cluster 和 IRQ status。XDMA
-后端优先等待 `_events_0`；事件接口缺失或不支持阻塞等待时，兼容轮询也只存在于 HAL
-内部。
+`npu_hal_irq_wait()`，由 HAL 在超时前返回发生中断的 Cluster 和 IRQ status。
+`--dma-completion irq` 要求成功打开 XDMA 的 `_events_<N>` 或 QDMA 的 `-user_irq<N>`；
+事件节点缺失或读写出错时直接报错，不自动退回 polling。`--dma-completion polling`
+不打开事件节点，直接读取 NPU IRQ status，每轮请求休眠 1 微秒；实际周期还包含
+PCIe 访问和 Linux 调度开销。IRQ 模式等待前以及被唤醒后也会读取 status，以确认待处理事件。
+只有完全使用旧命令行入口时才保留 optional-event 兼容行为；Service 不区分等待方式。
 
 `run_server.sh` 默认设置 `DAYAN_RPC_DEBUG=1`，打印双向 RPC 的 begin/end、Cluster/Hart、
 opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关闭。直接启动
@@ -225,6 +245,9 @@ Device 用 `dayan_uram_base()` / `dayan_uram_size()` 读取当前实例的 Core-
 `dayan_cluster_barrier(4, barrier)`；Server 在启动四个 lane 前初始化本次 launch 的
 shared allocation。该 barrier 使用 `AMOADD.D` ticket，可跨多轮复用；其它
 参与者数量或非 `kFourCore` launch 会被拒绝。
+
+共享区大小取整、设备端 allocation 对齐，以及 Host 侧初始化 image 的 `aligned_alloc`
+均使用 `SERVER_SHARED_ALIGNMENT`（当前为 64 字节）；image 分配后显式清零。
 
 动态 kernel loader 接收 RISC-V `ET_REL`，只从 `npu-os-api.elf` 的白名单符号表解析
 未定义符号。每个 Cluster 在 BL1 启动前预留 16 MiB kernel arena，按 ELF 对齐要求
@@ -312,6 +335,11 @@ make
 make -C host/driver
 ```
 
+`host/driver` 是 Host C 代码，默认由系统 `cc` 编译（可通过 `CC` 覆盖）。Device 固件与
+demo 需要支持 Dayan 自定义指令的 LLVM 工具链，配置方式见
+[`host/dycc/README.md`](../dycc/README.md)。Runtime 静态库更新后，静态链接它的
+demo 和 llama 需要重新链接才能包含更新后的数据面实现。
+
 主要产物位于 `build/host/driver/`：
 
 - `dayan_server`；
@@ -325,13 +353,31 @@ make -C host/driver
 build/host/driver/dayan_server \
   --firmware build/device/npu-os.elf \
   --api-elf build/device/npu-os-api.elf \
-  --xdma-profile simulator \
+  --backend xilinx-dma --dma-driver xdma --dma-profile simulator \
+  --dma-completion polling \
   --cluster-count 1 --core-mask 0xf
 ```
 
-多 Cluster 可追加 `--cluster-count N --cluster-stride S`；也可用
+上例显式选择 polling；模拟器提供事件节点时可改为 `--dma-completion irq`。
+XDMA 模式未显式指定设备名时，多 Cluster 可追加 `--cluster-count N --cluster-stride S`；也可用
 `--cluster-mask` 关闭部分 Cluster。应用默认连接 `/tmp/dayan-server.sock`，可在
 `npu_runtime_options_t.server_socket` 中覆盖。
+
+QDMA FPGA 示例（先加载驱动并启动双向 MM queue 0）：
+
+```sh
+build/host/driver/dayan_server \
+  --firmware build/device/npu-os.elf \
+  --api-elf build/device/npu-os-api.elf \
+  --backend xilinx-dma --dma-driver qdma --dma-profile fpga \
+  --dma-device-name qdma01000 --dma-queue 0 --dma-user-irq 0 \
+  --dma-completion irq --cluster-count 1 --core-mask 0xf
+```
+
+若驱动未提供 user IRQ 扩展节点，应显式使用 `--dma-completion polling`。
+`--xdma-profile/--xdma-device-dir/--xdma-mmio-offset` 仅作为旧 XDMA 命令行别名保留；
+旧 `--backend qdma` 和 `--qdma-*` 不再是有效参数。完整选项见
+[`hal/backend/xilinx_dma/README.md`](hal/backend/xilinx_dma/README.md)。
 
 典型 Runtime 顺序为：
 
@@ -365,7 +411,9 @@ make -C host/driver cmodel-smoke
 NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 ```
 
-该脚本不启动具体后端，因此可连接 cmodel、`npu-cluster-sim` 的 RTL 模拟器或硬件。
+该脚本不启动具体后端，因此可连接 cmodel、`npu-cluster-sim` 的 RTL 模拟器或 XDMA 硬件。
+它仍检查 `xdma<index>_h2c_0/c2h_0` 并构造旧 XDMA 参数；QDMA 或自定义 channel/name
+应使用上面的 `dayan_server` 直接命令，不要将新参数直接传给该脚本。
 脚本和 Server 会把启动进度直接写到标准错误并立即刷新，包括等待 XDMA endpoint、打开
 HAL、识别 topology、加载 API ELF、为各 Cluster 配置 Atomic Cache backing、启动各
 Core、等待 BL1 ready，以及 Unix socket 就绪状态。若启动被阻塞，终端中的最后一条
@@ -373,7 +421,7 @@ Core、等待 BL1 ready，以及 Unix socket 就绪状态。若启动被阻塞�
 Server 还会记录 Runtime control/data 连接的建立与断开，以及停止过程。
 收到 SIGINT/SIGTERM 后，Server 会停止接收请求，并行向各已启用 Hart 发送短超时的
 `RPC_PROC_KILL_ALL`，随后取消仍在等待的 Host RPC 并回收 scheduler 资源。HAL 会保存
-首个不可恢复的设备 I/O 错误；XDMA endpoint 返回 `EIO`、`ENODEV`、`EBADF` 等
+首个不可恢复的设备 I/O 错误；DMA endpoint 返回 `EIO`、`ENODEV`、`EBADF` 等
 错误时，Server 无需额外信号便会自动退出，并跳过已经不可能完成的 Device 侧清理。
 
 需要由脚本同时启动 cmodel 与 `dayan_server` 时运行：

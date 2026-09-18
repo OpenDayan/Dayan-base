@@ -13,7 +13,7 @@
 
 #include "npu_package.h"
 #include "npu_runtime.h"
-#include "backend/xdma/npu_hal_xdma.h"
+#include "backend/xilinx_dma/npu_hal_xilinx_dma.h"
 #include "server_internal.h"
 #include "service_internal.h"
 #include "tensor_interrupt.h"
@@ -839,7 +839,7 @@ int main(int argc, char **argv)
     npu_package_argument_t arguments[5];
     npu_package_kernel_desc_t kernel_desc[8];
     dayan_server_options_t server_options;
-    npu_hal_xdma_options_t xdma_options;
+    npu_hal_xilinx_dma_options_t xdma_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
     npu_buffer_t *buffer = 0;
@@ -964,9 +964,10 @@ int main(int argc, char **argv)
     assert(snprintf(socket_path, sizeof(socket_path),
                     "/tmp/dayan-cmodel-%ld.sock", (long)getpid()) > 0);
     dayan_server_options_init(&server_options);
-    if (npu_hal_xdma_options_init(
-            &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) < 0)
+    if (npu_hal_xilinx_dma_options_init(
+            &xdma_options, NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR) < 0)
         return 1;
+    xdma_options.completion = NPU_HAL_XILINX_DMA_COMPLETION_POLLING;
     server_options.hal.backend_options = &xdma_options.base;
     server_options.socket_path = socket_path;
     server_options.firmware_path = argv[1];

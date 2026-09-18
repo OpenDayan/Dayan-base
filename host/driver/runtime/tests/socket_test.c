@@ -17,7 +17,7 @@
 #include "rpc.h"
 #include "runtime_internal.h"
 #include "server_internal.h"
-#include "backend/xdma/npu_hal_xdma.h"
+#include "backend/xilinx_dma/npu_hal_xilinx_dma.h"
 #include "service_internal.h"
 
 struct run_state {
@@ -278,7 +278,7 @@ int main(void)
     uint64_t output[2] = { 0, 0 };
     struct output_capture output_capture = { { 0 }, 0, 0, 0, 0, 0, 0 };
     dayan_server_options_t server_options;
-    npu_hal_xdma_options_t xdma_options;
+    npu_hal_xilinx_dma_options_t xdma_options;
     npu_runtime_options_t runtime_options;
     npu_context_t *context = 0;
     npu_context_t *foreign_context = 0;
@@ -302,8 +302,9 @@ int main(void)
                     directory) > 0);
 
     dayan_server_options_init(&server_options);
-    assert(npu_hal_xdma_options_init(
-        &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) == 0);
+    assert(npu_hal_xilinx_dma_options_init(
+        &xdma_options, NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR) == 0);
+    xdma_options.completion = NPU_HAL_XILINX_DMA_COMPLETION_POLLING;
     server_options.hal.backend_options = &xdma_options.base;
     assert(server_options.max_procs_per_hart == NPU_PACKAGE_HART_MAX_PROCS);
     server_options.max_procs_per_hart = NPU_PACKAGE_HART_MAX_PROCS + 1U;

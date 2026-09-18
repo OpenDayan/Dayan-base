@@ -12,6 +12,6 @@ struct npu_hal_data_plane_ops {
                     void *host_buffer, size_t size);
 };
 
-extern const struct npu_hal_data_plane_ops npu_hal_xdma_data_plane_ops;
+extern const struct npu_hal_data_plane_ops npu_hal_xilinx_dma_data_plane_ops;
 
 #endif

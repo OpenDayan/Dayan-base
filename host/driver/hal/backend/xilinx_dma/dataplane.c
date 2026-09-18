@@ -8,21 +8,21 @@
 
 #include "io.h"
 
-struct xdma_data_endpoint {
+struct xilinx_dma_data_endpoint {
     int h2d_fd;
     int d2h_fd;
 };
 
-struct xdma_data_plane {
+struct xilinx_dma_data_plane {
     uint32_t endpoint_count;
-    struct xdma_data_endpoint endpoints[];
+    struct xilinx_dma_data_endpoint endpoints[];
 };
 
-static int xdma_data_import(const npu_hal_data_export_t *exported,
+static int xilinx_dma_data_import(const npu_hal_data_export_t *exported,
                             int *handles, size_t handle_count,
                             void **state_out)
 {
-    struct xdma_data_plane *data_plane;
+    struct xilinx_dma_data_plane *data_plane;
     uint64_t endpoint_count = exported->opaque[0];
     size_t client_size;
     size_t index;
@@ -59,9 +59,9 @@ static int xdma_data_import(const npu_hal_data_export_t *exported,
     return 0;
 }
 
-static void xdma_data_close(void *opaque)
+static void xilinx_dma_data_close(void *opaque)
 {
-    struct xdma_data_plane *data_plane = opaque;
+    struct xilinx_dma_data_plane *data_plane = opaque;
     uint32_t index;
 
     if (!data_plane)
@@ -73,11 +73,11 @@ static void xdma_data_close(void *opaque)
     free(data_plane);
 }
 
-static int xdma_data_transfer(void *opaque,
+static int xilinx_dma_data_transfer(void *opaque,
                               const npu_hal_data_token_t *token,
                               void *host_buffer, size_t size)
 {
-    struct xdma_data_plane *data_plane = opaque;
+    struct xilinx_dma_data_plane *data_plane = opaque;
     uint64_t offset = token->opaque[0];
     uint64_t endpoint = token->opaque[1];
 
@@ -86,11 +86,11 @@ static int xdma_data_transfer(void *opaque,
         return -EACCES;
     switch (token->direction) {
     case NPU_HAL_DATA_HOST_TO_DEVICE:
-        return npu_hal_xdma_pwrite(
+        return npu_hal_xilinx_dma_pwrite(
             data_plane->endpoints[endpoint].h2d_fd, offset,
             host_buffer, size);
     case NPU_HAL_DATA_DEVICE_TO_HOST:
-        return npu_hal_xdma_pread(
+        return npu_hal_xilinx_dma_pread(
             data_plane->endpoints[endpoint].d2h_fd, offset,
             host_buffer, size);
     default:
@@ -98,9 +98,9 @@ static int xdma_data_transfer(void *opaque,
     }
 }
 
-const struct npu_hal_data_plane_ops npu_hal_xdma_data_plane_ops = {
-    .provider = NPU_HAL_DATA_PROVIDER_XDMA,
-    .import = xdma_data_import,
-    .close = xdma_data_close,
-    .transfer = xdma_data_transfer,
+const struct npu_hal_data_plane_ops npu_hal_xilinx_dma_data_plane_ops = {
+    .provider = NPU_HAL_DATA_PROVIDER_XILINX_DMA,
+    .import = xilinx_dma_data_import,
+    .close = xilinx_dma_data_close,
+    .transfer = xilinx_dma_data_transfer,
 };

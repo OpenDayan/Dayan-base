@@ -39,6 +39,7 @@ HAL 由两个相互独立的部分组成：
   \code{npu_hal_backend_options_t} & 所有后端配置共有的头部，包含配置版本和后端标识。 \\
   \code{npu_hal_options_t} & HAL 通用配置，包含设备拓扑、普通内存默认容量、内存区域表和后端配置指针。 \\
   \code{npu_hal_info_t} & 已打开 HAL 的版本、拓扑、数据提供器和传输能力。 \\
+  \code{npu_pcu_batch_t} & 一个 Cluster 的 PCU 快照，包含 Cluster 编号、Core 数、flags 和各物理 Hart 的 cycle/counters。 \\
   \code{npu_hal_memory_request_t} & 一次内存申请的类别、范围、用途、所有者、位置、大小、对齐和可选固定地址。 \\
   \code{npu_hal_allocation_info_t} & 已分配内存的地址和属性快照。 \\
 \end{dayantable}
@@ -61,7 +62,8 @@ HAL 由两个相互独立的部分组成：
   \code{NPU_HAL_MEMORY_KERNEL_URAM} / \code{NPU_HAL_MEMORY_PROFILE} / \code{NPU_HAL_MEMORY_ATOMIC_CACHE_BACKING} & 算子 URAM、性能采样区和 Atomic Cache 后备区用途。 \\
   \code{NPU_HAL_DATA_HOST_TO_DEVICE} / \code{NPU_HAL_DATA_DEVICE_TO_HOST} & 两种用户进程直传方向。 \\
   \code{NPU_HAL_DATA_MAX_HANDLES} & 一个数据面实例最多导入 64 个设备句柄。 \\
-  \code{NPU_HAL_BACKEND_XDMA} / \code{NPU_HAL_DATA_PROVIDER_XDMA} & XDMA 控制后端和与其配套的数据提供器标识。 \\
+  \code{NPU_HAL_BACKEND_XILINX_DMA} / \code{NPU_HAL_DATA_PROVIDER_XILINX_DMA} & 统一的 Xilinx DMA 控制后端和数据提供器标识，支持 XDMA 与 QDMA 驱动，两者数值均为 1。 \\
+  \code{NPU_HAL_BACKEND_XDMA} / \code{NPU_HAL_DATA_PROVIDER_XDMA} & 上述标识的旧源码别名，不表示另一套后端；Runtime 传输格式和提供器数值保持兼容。 \\
 \end{dayantable}
 
 结构版本由 \code{NPU_HAL_ABI_VERSION}、\code{NPU_HAL_OPTIONS_VERSION}、
@@ -78,10 +80,55 @@ HAL 由两个相互独立的部分组成：
   \code{npu_hal_close} & 关闭后端并释放全部内存管理和同步状态。可传入空指针。 \\
   \code{npu_hal_device_status} & 返回 0，或此前记录的首个不可恢复设备 I/O 错误。 \\
   \code{npu_hal_get_info} & 返回 HAL 版本、设备拓扑、数据提供器和传输限制。 \\
+  \code{npu_hal_pcu_snapshot} & 读取指定 Cluster 的 PCU 快照，结果写入 \code{npu_pcu_batch_t}；调用方负责与其它 PCU 用户串行化。 \\
   \code{npu_hal_get_memory_region} & 按索引读取一项物理内存区域配置。 \\
   \code{npu_hal_core_valid} & 判断给定 Cluster 和 Core 编号是否存在。 \\
   \code{npu_hal_memory_capacity} & 统计指定 Core 可见的某类内存总容量。 \\
 \end{dayantable}
+
+\subsection{Xilinx DMA 后端配置（内部接口）}
+
+当前仅注册一套 Xilinx DMA 后端。内部配置头文件为
+\code{host/driver/hal/backend/xilinx_dma/npu_hal_xilinx_dma.h}，配置类型为
+\code{npu_hal_xilinx_dma_options_t}，由 \code{npu_hal_xilinx_dma_options_init()}
+初始化。旧 XDMA 配置类型、初始化函数和版本 1 适配层已经删除。
+
+\begin{dayantable}{Xilinx DMA 配置维度}{tab:api-hal-xilinx-config}{X[24,l] X[76,l]}
+  字段 & 含义 \\
+  \code{driver} & XDMA 或 QDMA，只决定设备节点打开规则；状态管理、寄存器、中断和数据传输共享实现。 \\
+  \code{profile} & simulator 默认目录 \code{/tmp/virtual_npu}、MMIO 偏移 0；fpga 默认目录 \code{/dev}、偏移 \code{0x4000000000}。 \\
+  \code{completion} & IRQ 模式必须打开事件节点；polling 模式跳过事件节点并轮询 NPU IRQ status。 \\
+  \code{device_name} & 可选的设备名，如 \code{xdma0} 或 \code{qdma01000}。显式设备名当前只支持单 Cluster。 \\
+  \code{channel} / \code{event} & XDMA 的 H2C/C2H channel 与事件编号。 \\
+  \code{queue} / \code{user_irq} & QDMA 的 MM queue 与 user IRQ 编号；二者独立。QDMA 当前只支持单 Cluster。 \\
+\end{dayantable}
+
+默认配置为 XDMA、simulator、IRQ。未指定设备名时，XDMA 保留
+\code{device_index + cluster * cluster_device_stride} 的多 Cluster 映射。
+XDMA 分别打开 \code{xdma0_h2c_0} 与 \code{xdma0_c2h_0}；QDMA 将同一个
+\code{qdma01000-MM-0} 以写、读方式各打开一次，因此不需要 XDMA 符号链接。
+两个驱动均通过独立 fd 导出为统一的数据提供器。
+
+XDMA 的事件节点为 \code{xdma0_events_0}；QDMA 的
+\code{qdma01000-user_irq0} 是本地驱动扩展，不是原生驱动必有接口。
+IRQ 模式使用 \code{poll()} 和 32-bit 事件计数读取，并在等待前及唤醒后检查 IRQ status。
+polling 模式每轮读取 NPU IRQ status 后请求休眠 1 微秒；实际周期包含 I/O 和调度时间。
+新接口 IRQ 模式不因事件缺失或 I/O 错误自动改成 polling。仅旧命令行入口保留
+optional-event 兼容行为。
+
+Server 的新参数为：
+\begin{itemize}
+  \item \code{--backend}：取值 \code{xilinx-dma}。
+  \item \code{--dma-driver}：取值 \code{xdma} 或 \code{qdma}。
+  \item \code{--dma-profile}：取值 \code{simulator} 或 \code{fpga}。
+  \item \code{--dma-completion}：取值 \code{irq} 或 \code{polling}。
+\end{itemize}
+\code{--dma-device-dir} 与 \code{--dma-mmio-offset} 覆盖 profile 默认值且不受参数顺序影响。
+旧 \code{--xdma-*} 参数只作为 XDMA 命令行别名保留，不能与 QDMA driver 混用。
+
+低于 \code{0x80000000} 的设备地址加配置的 MMIO 偏移，DRAM 地址保持不变。
+XDMA 可选的 \code{_user} 节点使用相对寄存器偏移；没有该节点时，通过 H2C/C2H
+访问物理控制窗口。QDMA 同样通过 MM 节点访问控制窗口。
 
 \subsection{设备地址、寄存器、中断与启动}
 
@@ -127,7 +174,7 @@ HAL 由两个相互独立的部分组成：
 \subsection{令牌化数据面}
 
 数据面的目标是让用户进程直接访问设备，避免把大块数据先送到 Server 再转发。当前
-XDMA 数据提供器不创建、不连接也不读写 Socket。它运行在 Runtime 所在的用户进程中，
+Xilinx DMA 数据提供器不创建、不连接也不读写 Socket。它运行在 Runtime 所在的用户进程中，
 直接对 \code{/dev} 或 \code{/tmp/virtual_npu} 下的 H2C/C2H 设备文件执行
 \code{pread}/\code{pwrite}。
 
@@ -144,7 +191,7 @@ Unix 域 Socket 只属于 Runtime 与 Server 之间的通用协议。建立会�
   \code{npu_hal_transfer_finish} & Server 侧核对用户进程返回的完整令牌，把数据提供器的传输结果交给后端完成收尾，并返回处理结果。 \\
   \code{npu_hal_data_plane_import} & Runtime 侧根据提供器标识选择实现，接管导入的设备文件描述符，并创建数据面实例。 \\
   \code{npu_hal_data_plane_close} & 关闭数据面实例持有的设备文件描述符并释放内部状态。 \\
-  \code{npu_hal_data_plane_transfer} & Runtime 侧把令牌和用户缓冲区交给数据提供器。XDMA 提供器据此选择 H2C 或 C2H 文件、Cluster 和设备偏移，直接执行读写。 \\
+  \code{npu_hal_data_plane_transfer} & Runtime 侧把令牌和用户缓冲区交给数据提供器。Xilinx DMA 提供器据此选择 H2C 或 C2H fd、Cluster 和设备偏移，直接执行读写。 \\
 \end{dayantable}
 
 一次 H2D 或 D2H 传输按以下顺序执行：
@@ -152,7 +199,7 @@ Unix 域 Socket 只属于 Runtime 与 Server 之间的通用协议。建立会�
 \begin{enumerate}
   \item Runtime 只把逻辑 Buffer、偏移和长度提交给 Server，不发送用户数据。
   \item Server 检查对象所有权和物理内存范围。命令可以执行时，HAL 生成一次性令牌。
-  \item Runtime 的传输线程取得令牌，调用匹配的数据提供器。XDMA 提供器直接读写设备文件。
+  \item Runtime 的传输线程取得令牌，调用匹配的数据提供器。Xilinx DMA 提供器直接读写 XDMA 或 QDMA 设备文件。
   \item Runtime 把原令牌和传输结果交还 Server。Server 核对后完成 Event，并允许相关内存被释放或复用。
 \end{enumerate}
 
@@ -161,7 +208,7 @@ Unix 域 Socket 只属于 Runtime 与 Server 之间的通用协议。建立会�
 签发令牌，用户进程中的数据提供器使用导入的设备资源直接传输；具体实现可以使用
 \code{read/write}、\code{ioctl} 或 \code{mmap}，但不应让 Server 代理数据本身。
 
-令牌是 Runtime、Server 和 HAL 之间的协议授权与生命周期凭据。当前 XDMA 驱动把完整
+令牌是 Runtime、Server 和 HAL 之间的协议授权与生命周期凭据。当前 Xilinx DMA 后端把完整
 设备文件描述符交给用户进程，因此令牌本身不是针对恶意进程的内核级访问隔离；进程权限
 和设备文件权限仍是安全边界。
 

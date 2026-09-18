@@ -20,7 +20,7 @@ make -C api_docs check
 
 ## API 边界
 
-- HAL：`host/driver/hal/{hal,dataplane}.h`；
+- HAL：`host/driver/hal/include/{npu_hal_config,hal,dataplane}.h`；
 - Service：`host/driver/server/{service,server}.h`；
 - Runtime：`host/include/{npu_runtime,npu_package,dayan_kernel,dayan_runtime}.h`，以及
   `host/dycc/include/dayan_compiler.h` 的源码标注；
@@ -28,3 +28,7 @@ make -C api_docs check
 - dapi：`device/include/api/*.h` 与 `device/dayan-api.symbols`。
 
 新增或删除公开接口时，应同步更新对应章节和 symbol manifest，再执行 `make check`。
+
+HAL 章节另有内部 Xilinx DMA 配置说明：`driver` 区分 XDMA/QDMA，`profile` 保留
+simulator/fpga，completion 可选 IRQ/polling。相关配置头文件位于
+`host/driver/hal/backend/xilinx_dma/`，不是应用 Runtime 的公开接口。

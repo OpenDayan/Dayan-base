@@ -9,7 +9,7 @@ struct npu_hal_data_plane {
 };
 
 static const struct npu_hal_data_plane_ops *const providers[] = {
-    &npu_hal_xdma_data_plane_ops,
+    &npu_hal_xilinx_dma_data_plane_ops,
 };
 
 static const struct npu_hal_data_plane_ops *find_provider(uint32_t provider)

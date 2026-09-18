@@ -20,7 +20,8 @@ extern "C" {
 #define NPU_HAL_DATA_TOKEN_VERSION   1U
 #define NPU_HAL_DATA_MAX_HANDLES     64U
 
-#define NPU_HAL_DATA_PROVIDER_XDMA     1U
+#define NPU_HAL_DATA_PROVIDER_XILINX_DMA 1U
+#define NPU_HAL_DATA_PROVIDER_XDMA NPU_HAL_DATA_PROVIDER_XILINX_DMA
 
 typedef struct npu_hal_data_plane npu_hal_data_plane_t;
 

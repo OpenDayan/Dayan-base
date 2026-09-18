@@ -39,6 +39,7 @@ RPC 是 BL1 与 Host Service 之间基于邮箱的二进制协议，也是 Devic
   请求 / 响应 & 请求 \\
   \code{RPC_PROC_CREATE} / \code{RPC_PROC_CREATE_RESPONSE} & 在指定 Hart 创建一个由 Host 管理的根 Proc。 \\
   \code{RPC_FENCEI} / \code{RPC_FENCEI_RESPONSE} & 执行一次 \code{fence.i}；原 \code{RPC_ICACHE_FLUSH} 名称保留为别名。 \\
+  \code{RPC_ICACHE_FLUSH_RESPONSE} & \code{RPC_FENCEI_RESPONSE} 的兼容别名。 \\
   \code{RPC_DCACHE_FLUSH} / \code{RPC_DCACHE_FLUSH_RESPONSE} & 失效指定普通内存范围的本 Hart 数据缓存。 \\
   \code{RPC_PROC_PS} / \code{RPC_PROC_PS_RESPONSE} & 获取该 Hart 的管理/诊断快照，不参与普通 launch 完成。 \\
   \code{RPC_PROC_KILL_ALL} / \code{RPC_PROC_KILL_ALL_RESPONSE} & 终止该 Hart 上全部非系统 Proc。 \\
@@ -102,7 +103,8 @@ Proc 家族结束时写入结果并写回缓存。Host 确认结果可见后才�
 
 \begin{dayantable}{Proc 传输类型}{tab:api-rpc-proc-wire}{X[42,l] X[58,l]}
   类型 & ABI / 用途 \\
-  \code{rpc_proc_create_request} & 416 字节的 Host 描述符；包含入口、栈、共享区、输出缓冲区、32 个参数、任务网格和模式、子 Thread 槽上限、URAM、Context1/Context2、调用方标识和名称。Host 保持请求字段不变，BL1 只更新状态和结果。 \\
+  \code{rpc_proc_create_request} & 按 64 字节对齐的启动描述符；参数区之前为 88 字节，最多携带 32 个 64-bit 参数，实际传输长度按参数个数取整到完整缓存行。包含入口、cookie、shared、启动配置、Tensor/Resource Context、任务网格和名称；BL1 的回复覆盖首个 word。 \\
+  \code{rpc_proc_create_size} & 根据 argc 计算描述符实际大小，即将 \code{88 + argc * 8} 向上取整到 \code{RPC_DESCRIPTOR_GRANULE}（64 字节）。调用方先校验参数个数。 \\
   \code{rpc_proc_exit_request} & 32 字节；包含根 Proc 的 Hart 和 Proc ID、返回值、调用方标识及标志。 \\
   \code{rpc_proc_info} & 96 字节；包含一个 Proc 的父子关系、状态、资源槽、任务坐标、结果、PC 和名称。 \\
   \code{rpc_proc_ps_snapshot} & 1864 字节；由快照头和最多 19 条 \code{rpc_proc_info} 组成。 \\
@@ -152,6 +154,9 @@ Cluster/Core 的选择属于 Service 调度，不编码进 Runtime 的用户 API
   API & 含义 \\
   \code{RPC_PROFILE_PROC_RUNNING} / \code{RPC_PROFILE_PROC_READY} & Proc 正在执行，或已提交硬件 Wait 并等待调度 token。 \\
   \code{RPC_PROFILE_PROC_POLLING} & 轮询状态；barrier 连续轮询 64 次后以最低调度优先级让出。 \\
+  \code{RPC_PROFILE_PROC_WAIT_POLL} & \code{RPC_PROFILE_PROC_POLLING} 的兼容别名。 \\
+  \code{RPC_PROFILE_PROC_WAIT_PRODUCE} & 值为 6，兼容的通用异步等待状态。 \\
+  \code{RPC_PROFILE_PROC_STATE_MAX} & 当前普通状态上限，等于 \code{RPC_PROFILE_PROC_WAIT_RESOURCE}。 \\
   \code{RPC_PROFILE_PROC_WAIT_EVENT} / \code{RPC_PROFILE_PROC_WAIT_JOIN} & 等待 RPC/profile 事件，或等待子 Thread 退出。 \\
   \code{RPC_PROFILE_PROC_WAIT_LSU} / \code{RPC_PROFILE_PROC_WAIT_MAT} / \code{RPC_PROFILE_PROC_WAIT_VEC} / \code{RPC_PROFILE_PROC_WAIT_MACRO} & 等待对应异步执行单元完成。 \\
   \code{RPC_PROFILE_PROC_WAIT_RESOURCE} & 等待 Named Resource；\code{WAIT_PRODUCE} 保留为兼容的通用异步等待状态。 \\

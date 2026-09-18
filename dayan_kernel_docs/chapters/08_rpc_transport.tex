@@ -57,7 +57,10 @@ send queue 的 transaction。发送期间不会切到 receive Thread，因此 ki
 
 Service 启动独立后台 worker，调用 \code{npu_hal_irq_wait} 等待 outbound IRQ。HAL 在
 超时时返回 \code{-ETIMEDOUT}；收到中断时返回 Cluster 编号和 IRQ status。具体后端可
-等待事件，也可在 HAL 内部兼容轮询，Service 不区分两种实现。每个置位 Core 的处理顺序为：
+等待事件，也可在 HAL 内部轮询，Service 不区分两种实现。当前 Xilinx DMA 后端通过
+\code{--dma-completion irq|polling} 显式选择：IRQ 模式必须打开事件节点，polling 模式
+轮询 NPU IRQ status 并在每轮请求休眠 1 微秒，实际间隔还受 I/O 与系统调度影响。
+只有旧命令行入口保留事件缺失时的兼容回退。每个置位 Core 的处理顺序为：
 
 \begin{enumerate}
   \item 读取 Device--Host mailbox；

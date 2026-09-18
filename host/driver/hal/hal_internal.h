@@ -66,7 +66,7 @@ struct npu_hal {
     uint32_t arena_count;
 };
 
-extern const struct npu_hal_backend_ops npu_hal_xdma_backend_ops;
+extern const struct npu_hal_backend_ops npu_hal_xilinx_dma_backend_ops;
 int npu_hal_memory_manager_init(npu_hal_t *hal,
                                 const npu_hal_options_t *options);
 void npu_hal_memory_manager_destroy(npu_hal_t *hal);

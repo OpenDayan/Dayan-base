@@ -13,7 +13,9 @@ extern "C" {
 #define NPU_HAL_MAX_CLUSTERS            32U
 #define NPU_HAL_MAX_CORES_PER_CLUSTER   32U
 
-#define NPU_HAL_BACKEND_XDMA            1U
+#define NPU_HAL_BACKEND_XILINX_DMA      1U
+/* Source compatibility for existing simulator/HAL callers. */
+#define NPU_HAL_BACKEND_XDMA            NPU_HAL_BACKEND_XILINX_DMA
 #define NPU_HAL_ANY_CLUSTER             UINT32_MAX
 #define NPU_HAL_ANY_CORE                UINT32_MAX
 

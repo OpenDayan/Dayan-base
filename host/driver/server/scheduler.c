@@ -809,11 +809,12 @@ static int initialize_shared(dayan_server_t *server,
                                           shared_size, allocation_out);
     if (status < 0)
         return status;
-    image = calloc(1, (size_t)shared_size);
+    image = aligned_alloc((size_t)SERVER_SHARED_ALIGNMENT, (size_t)shared_size);
     if (!image) {
         status = -ENOMEM;
         goto fail;
     }
+    memset(image, 0, (size_t)shared_size);
     for (index = 0; index < metadata->sync_count; ++index) {
         const npu_package_sync_t *sync =
             &view->sync_resources[metadata->first_sync + index];

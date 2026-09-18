@@ -196,12 +196,29 @@ make demo-check
 make -C demo run
 ```
 
-后端已经单独启动时，可用通用脚本启动 Runtime server。它只等待 XDMA 兼容设备文件，
+模拟器或 XDMA 硬件已经单独启动时，可用现有脚本启动 Runtime server。它只等待 XDMA 兼容设备文件，
 不关心设备来自 cmodel、`npu-cluster-sim` 的 RTL 模拟器还是硬件：
 
 ```sh
 NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 ```
+
+HAL 已统一为 Xilinx DMA backend，通过 `driver` 选择 XDMA/QDMA，通过独立的
+`profile` 选择 simulator/fpga。上面的脚本仍构造旧 XDMA 参数和节点检查，QDMA 应直接
+启动 Server（先加载驱动并启动双向 MM queue）：
+
+```sh
+build/host/driver/dayan_server \
+  --firmware build/device/npu-os.elf --api-elf build/device/npu-os-api.elf \
+  --backend xilinx-dma --dma-driver qdma --dma-profile fpga \
+  --dma-device-name qdma01000 --dma-queue 0 --dma-user-irq 0 \
+  --dma-completion irq --cluster-count 1 --core-mask 0xf
+```
+
+QDMA IRQ 模式需要本地驱动扩展的 `/dev/qdma01000-user_irq0`；若没有此节点，显式
+使用 `--dma-completion polling`，HAL 将读取 NPU IRQ status，并在每轮请求休眠 1 微秒。
+无需创建 XDMA 名称的符号链接。完整配置与限制见
+[`Xilinx DMA 说明`](host/driver/hal/backend/xilinx_dma/README.md)。
 
 需要由一个脚本同时启动 cmodel 与 Runtime server 时运行：
 
@@ -478,8 +495,8 @@ RPC 发送，未填满的内容跨调用保留，直到 `fflush(stdout)` 或 `ff
 
 ## Host 用户态驱动
 
-`host/driver/` 参考旧 `npu-runtime` 的 XDMA 文件访问方式，并按 `hal`、`server`、
-`runtime` 分层。HAL 显式使用 `(cluster, core)` 访问 register/mailbox、管理普通与
+`host/driver/` 按 `hal`、`server`、`runtime` 分层，统一 Xilinx DMA backend 支持
+XDMA/QDMA 驱动的设备文件访问。HAL 显式使用 `(cluster, core)` 访问 register/mailbox、管理普通与
 coherent 物理 region；Server 为每个 Cluster 加载 BL1、服务反向 RPC，并把 Runtime
 提交的 logical task 调度到物理 Core。公开 Runtime 只提供 Context、Buffer、Stream、
 Module、Kernel 和 Event，不展示 Cluster/Core 或物理地址，动态库只导出 `npu_`

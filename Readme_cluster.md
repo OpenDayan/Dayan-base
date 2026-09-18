@@ -19,7 +19,8 @@ Host demo / dycc wrapper
 dayan_server
         |
         | Service：加载 BL1、配置 Atomic Cache、处理 RPC、调度 logical task
-        | HAL：寄存器、IRQ、物理内存和 memcpy token
+        | Xilinx DMA HAL：XDMA driver / simulator profile
+        | 寄存器、IRQ、物理内存和 memcpy token
         v
 TestCluster FUSE/XDMA endpoints
         |
@@ -34,6 +35,12 @@ mailbox、IRQ、Atomic Cache backing 地址和 URAM allocation 都由 Server/HAL
 Runtime 与 Server 使用两条 Unix `SOCK_STREAM` 连接：control socket 传递对象和命令，
 data socket 申请并完成 memcpy token。实际 H2D/D2H payload 通过 HAL 导出的 XDMA/FUSE
 handle 直接搬运，不经过 Server 的中间缓冲区。
+
+本指南针对 TestCluster 的 FUSE/XDMA 节点。统一后端也支持 QDMA，但本页的
+`xdma0_*` 检查、FUSE 操作和 `run_server.sh` 启动入口仍属于 XDMA 模拟器链路，
+不能直接替换为 QDMA。QDMA 硬件请使用
+[`host/driver/README.md`](host/driver/README.md) 中的 `dayan_server --backend xilinx-dma`
+直接启动示例。
 
 一个 `dayan_server` 可以同时接受多个 Runtime Session；每个 Session 都有自己的
 control/data socket，已接受的连接由独立线程处理。不同 Session 可以分别运行 `dyperf`
@@ -346,7 +353,7 @@ ls -l "$NPU_DEVICE_PREFIX"/xdma0_h2c_0 \
       "$NPU_DEVICE_PREFIX"/xdma0_events_0
 ```
 
-当前 TestCluster 不提供 `xdma0_user`。Dayan FUSE HAL 会通过 H2C/C2H 的物理控制窗口
+当前 TestCluster 不提供 `xdma0_user`。Xilinx DMA HAL 的 XDMA 模式会通过 H2C/C2H 的物理控制窗口
 访问寄存器，因此缺少 `_user` 文件不是错误。
 
 ### 5.3 终端 B：启动 dayan_server

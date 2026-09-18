@@ -7,7 +7,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-int npu_hal_xdma_pread(int fd, uint64_t offset, void *data, size_t size)
+int npu_hal_xilinx_dma_pread(int fd, uint64_t offset, void *data, size_t size)
 {
     unsigned char *cursor = data;
     size_t done = 0;
@@ -28,7 +28,7 @@ int npu_hal_xdma_pread(int fd, uint64_t offset, void *data, size_t size)
     return 0;
 }
 
-int npu_hal_xdma_pwrite(int fd, uint64_t offset, const void *data, size_t size)
+int npu_hal_xilinx_dma_pwrite(int fd, uint64_t offset, const void *data, size_t size)
 {
     const unsigned char *cursor = data;
     size_t done = 0;

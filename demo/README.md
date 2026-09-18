@@ -44,6 +44,30 @@ make -C demo
 并保留 LSU/MAT TCSR 编号和 `set_lsu_matrix` 等 Dayan 辅助接口。dycc 会启用 TX
 扩展并把 Clang resource dir 加入 Device 编译，构建 demo 不需要 npu-kernels。
 
+## 选择设备后端
+
+demo 通过 `DAYAN_SERVER_SOCKET` 连接已经启动的 Server，不接收 DMA driver/profile 参数。
+Server 的统一后端使用 `--backend xilinx-dma`，`--dma-driver xdma|qdma` 选择驱动，
+`--dma-profile simulator|fpga` 选择默认目录与 MMIO 偏移。
+
+例如，在已启动双向 MM queue 0 的 QDMA FPGA 上：
+
+```sh
+build/host/driver/dayan_server \
+  --firmware build/device/npu-os.elf --api-elf build/device/npu-os-api.elf \
+  --backend xilinx-dma --dma-driver qdma --dma-profile fpga \
+  --dma-device-name qdma01000 --dma-queue 0 --dma-user-irq 0 \
+  --dma-completion irq --cluster-count 1 --core-mask 0xf
+# 在另一个终端中执行：
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/add_fp32_vec
+```
+
+IRQ 模式要求 QDMA 驱动提供扩展的 `user_irq0` 节点；没有该扩展时使用
+`--dma-completion polling`（每轮请求休眠 1 微秒）。现有 `run_server.sh` 仍只检查
+XDMA 节点，QDMA 使用上述直接命令。demo 静态链接 Runtime，Runtime 更新后需要重新链接。
+设备端构建需要支持 Dayan 自定义指令的 LLVM 工具链，配置方式见
+[`host/dycc/README.md`](../host/dycc/README.md)。
+
 ## 性能采集
 
 普通算子只执行计算并校验结果，耗时和吞吐分析统一使用 `dyperf`。连接已启动的 Server

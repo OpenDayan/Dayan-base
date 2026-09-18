@@ -13,7 +13,7 @@
 #include <unistd.h>
 
 #include "hal.h"
-#include "backend/xdma/npu_hal_xdma.h"
+#include "backend/xilinx_dma/npu_hal_xilinx_dma.h"
 #include "platform_regs.h"
 #include "rpc.h"
 
@@ -112,7 +112,7 @@ int main(void)
     int handles[NPU_HAL_DATA_MAX_HANDLES];
     npu_hal_data_token_t token;
     npu_hal_options_t options;
-    npu_hal_xdma_options_t xdma_options;
+    npu_hal_xilinx_dma_options_t xdma_options;
     npu_hal_data_plane_t *data_plane = 0;
     npu_hal_info_t info;
     npu_hal_t *hal = 0;
@@ -127,20 +127,21 @@ int main(void)
     uint32_t pending = 0;
     int fd;
 
-    assert(npu_hal_xdma_options_init(
-               &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) == 0);
+    assert(npu_hal_xilinx_dma_options_init(
+               &xdma_options, NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR) == 0);
     assert(strcmp(xdma_options.device_directory,
-                  NPU_HAL_XDMA_SIMULATOR_DEVICE_DIRECTORY) == 0);
+                  "/tmp/virtual_npu") == 0);
     assert(xdma_options.mmio_address_offset == 0);
-    assert(npu_hal_xdma_options_init(
-               &xdma_options, NPU_HAL_XDMA_PROFILE_FPGA) == 0);
+    assert(npu_hal_xilinx_dma_options_init(
+               &xdma_options, NPU_HAL_XILINX_DMA_PROFILE_FPGA) == 0);
     assert(strcmp(xdma_options.device_directory,
-                  NPU_HAL_XDMA_FPGA_DEVICE_DIRECTORY) == 0);
+                  "/dev") == 0);
     assert(xdma_options.mmio_address_offset ==
-           NPU_HAL_XDMA_FPGA_MMIO_OFFSET);
-    assert(npu_hal_xdma_options_init(&xdma_options, 0) == -EINVAL);
-    assert(npu_hal_xdma_options_init(
-               &xdma_options, NPU_HAL_XDMA_PROFILE_SIMULATOR) == 0);
+           UINT64_C(0x4000000000));
+    assert(npu_hal_xilinx_dma_options_init(&xdma_options, 0) == -EINVAL);
+    assert(npu_hal_xilinx_dma_options_init(
+               &xdma_options, NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR) == 0);
+    xdma_options.completion = NPU_HAL_XILINX_DMA_COMPLETION_POLLING;
 
     assert(mkdtemp(directory));
     create_endpoint(directory, 0);
@@ -450,6 +451,7 @@ int main(void)
     hal = 0;
     create_event_endpoint(directory, 0);
     create_event_endpoint(directory, 2);
+    xdma_options.completion = NPU_HAL_XILINX_DMA_COMPLETION_IRQ;
     options.memory_regions = regions;
     options.memory_region_count = sizeof(regions) / sizeof(regions[0]);
     assert(npu_hal_open(&hal, &options) == 0);
