@@ -1780,6 +1780,9 @@ static int kernel_launch_locked(dayan_server_t *server,
     command->data.launch.config.task_dim.z = request->task_z;
     command->data.launch.config.task_mode = (NPUTaskMode)request->task_mode;
     command->data.launch.total_units = total_units;
+    fprintf(stderr,
+            "dayan_server: [kernel] %s started\n",
+            request->task_name);
     memcpy(command->data.launch.task_name, request->task_name,
            sizeof(command->data.launch.task_name));
     for (index = 0; index < request->argument_count; ++index) {

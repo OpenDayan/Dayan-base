@@ -189,8 +189,9 @@ tensor_interrupt_raw=$($objdump --disassemble \
     --disassemble-symbols=tensor_interrupt_handle \
     "$build/platform/tensor_interrupt.o")
 for encoding in 0x0000300b 0x0000500b 0x0000700b 0x0000900b; do
-    has_tcsr "$encoding" <<<"$tensor_interrupt_raw" ||
-        fail "tensor interrupt Barrier $encoding is missing"
+    if has_tcsr "$encoding" <<<"$tensor_interrupt_raw"; then
+        fail "tensor interrupt handler must not wait for unit Barrier $encoding"
+    fi
 done
 
 rpc_halt_dump=$($objdump --disassemble --no-show-raw-insn \

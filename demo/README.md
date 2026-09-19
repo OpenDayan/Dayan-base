@@ -213,6 +213,11 @@ build/demo/shared_notify_latency
 build/demo/shared_notify_latency 512
 ```
 
+core 2/3 完成初始化 barrier 后直接退出，Host 等四个 Proc 全部退出后才完成 launch。
+core 0 在最后一次 ACK 消费后等待 ACK 变为 FREE，确认 Shared Resource 更新已经提交；
+这个等待会将 ACK 预留为 BUSY，留给 Runtime 在下次分配时重新初始化。
+该收尾不计入样本时间戳，也不依赖结束 barrier。
+
 主指标包含 producer API、Cluster 级 Shared Resource 仲裁和接收 Thread 恢复；不包含
 kernel 启动、初始化 barrier 和结果回传。为 TestCluster 的
 `nd` 波形窗口定位时，可传入第二个参数让 core 0 在初始化后打印 marker 并延迟指定
@@ -385,6 +390,11 @@ A/B 的 URAM 行跨度为 512 字节，A 共享路径使用 1,472 KiB，B 共享
 共享输入双缓冲占 320 KiB，2 份专有输入各占 80 KiB，共 160 KiB。
 两条路径均使用 1,504 KiB，剩余 32 KiB；申请 6 个 Local、8 个 Shared Resource。
 两种格式均直接执行 MAT MM/MMA，不使用分块 scale。
+
+FP4 收尾时，各核在 join worker 后等待全部 Local Resource 变为 FREE；四核汇合后，
+由 core 0 等待全部 Shared Resource 变为 FREE，再通过一次 barrier 共同退出。
+这些最终等待会将资源预留为 BUSY，直到 Runtime 重新初始化；它们用于确认消费已提交，
+避免仅等待执行单元完成就释放 Resource 窗口和远端仍可能读取的 URAM。
 
 FP4 Host 的 C 使用 `N*4+64` 字节 DRAM 行跨度，默认 N=2048 时为 8256 字节。
 在当前模拟器按物理地址 `[13:12]` 选择四个 DRAM 通道的配置下，这使每轮写回

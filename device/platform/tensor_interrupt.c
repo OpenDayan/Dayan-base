@@ -14,10 +14,8 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     uint64_t control;
     size_t i;
 
-    __builtin_riscv_tx_base_tcsr_read(0, 1);
-    __builtin_riscv_tx_base_tcsr_read(0, 2);
-    __builtin_riscv_tx_base_tcsr_read(0, 3);
-    __builtin_riscv_tx_base_tcsr_read(0, 4);
+    /* A failed unit may never retire its queue. Capture the error without
+     * waiting for unit barriers, so reporting and Host recovery can proceed. */
     state = &cpu_self()->tensor_interrupt;
     control = __builtin_riscv_tx_base_tcsr_read(5, 0);
     if (state->pending) {

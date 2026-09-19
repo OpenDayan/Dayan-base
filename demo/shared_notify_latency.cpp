@@ -47,7 +47,6 @@ struct alignas(64) StatusLine {
 
 struct alignas(64) ClusterShared {
     BarrierLine initialize;
-    BarrierLine finish;
     StatusLine initialize_status;
 };
 
@@ -148,6 +147,9 @@ static void run_sender(uint64_t sample_count,
             results->ack_cycles[sample] = ack_cycle;
         }
     }
+    // The final ACK must be consumed in the Shared table before launch exit.
+    // FREE waits reserve BUSY; leave ACK reserved until Runtime reinitializes it.
+    require_status(dayan_resource_wait_free(kAckResource));
     dayan_wait_lsu();
 }
 
@@ -184,8 +186,8 @@ __kernel__ void shared_notify_latency(uint64_t sample_count,
         run_receiver(sample_count, results);
     }
 
-    require_status(dayan_cluster_barrier(kClusterCores,
-                                         &cluster->finish.barrier));
+    // Host joins all four Procs. Idle lanes can exit after initialization;
+    // they must not remain in a finish barrier if the notification pair stalls.
 }
 
 DAYAN_KERNEL_NAMED_RESOURCE_DESC(

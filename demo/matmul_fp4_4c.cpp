@@ -347,6 +347,17 @@ __kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
     check(dayan_create_thread("post", post, &s, &resources));
     calc(&s);
     check(dayan_thread_join_all());
+    // Unit completion can precede Resource-table commit. Reserve the retired
+    // Local buffers before Runtime can recycle this Proc's physical window.
+    check(dayan_resource_wait((1ULL << LocalResources) - 1, 0, 0, 0));
+    check(dayan_cluster_barrier(4, &cluster.barrier));
+    // All loaders have stopped. One Core retires the Shared lifecycles,
+    // including tail-only consumes, before any peer releases its URAM.
+    // These final FREE waits leave the tokens BUSY until Runtime initializes
+    // the next allocation; no stage uses them again in this launch.
+    if (lane == 0)
+        check(dayan_resource_wait(((1ULL << SharedResources) - 1) << 32,
+                                  0, 0, 0));
     check(dayan_cluster_barrier(4, &cluster.barrier));
 }
 
