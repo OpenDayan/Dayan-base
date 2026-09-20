@@ -49,9 +49,9 @@ void init(void)
     profile_init();
 
     // Set 38-bits full va-range for rts arch
-    if(csr_read(0xF11) == 0 && csr_read(0xF12) == 0) {
-        csr_write(0x7D6, 0x3FFFFFFFFFUL);
-    }
+    // if(csr_read(0xF11) == 0 && csr_read(0xF12) == 0) {
+    //     csr_write(0x7D6, 0x3FFFFFFFFFUL);
+    // }
 }
 
 void boot_ready(void)
