@@ -7,6 +7,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#define NPU_HAL_XILINX_DMA_MAX_IO_SIZE \
+    ((size_t)64U * (size_t)1024U * (size_t)1024U)
+
 int npu_hal_xilinx_dma_pread(int fd, uint64_t offset, void *data, size_t size)
 {
     unsigned char *cursor = data;
@@ -16,8 +19,13 @@ int npu_hal_xilinx_dma_pread(int fd, uint64_t offset, void *data, size_t size)
         size > (uint64_t)INT64_MAX - offset)
         return -EINVAL;
     while (done < size) {
-        ssize_t result = pread(fd, cursor + done, size - done,
-                               (off_t)(offset + done));
+        size_t chunk = size - done;
+        ssize_t result;
+
+        if (chunk > NPU_HAL_XILINX_DMA_MAX_IO_SIZE)
+            chunk = NPU_HAL_XILINX_DMA_MAX_IO_SIZE;
+        result = pread(fd, cursor + done, chunk,
+                       (off_t)(offset + done));
 
         if (result < 0 && errno == EINTR)
             continue;
@@ -37,8 +45,13 @@ int npu_hal_xilinx_dma_pwrite(int fd, uint64_t offset, const void *data, size_t 
         size > (uint64_t)INT64_MAX - offset)
         return -EINVAL;
     while (done < size) {
-        ssize_t result = pwrite(fd, cursor + done, size - done,
-                                (off_t)(offset + done));
+        size_t chunk = size - done;
+        ssize_t result;
+
+        if (chunk > NPU_HAL_XILINX_DMA_MAX_IO_SIZE)
+            chunk = NPU_HAL_XILINX_DMA_MAX_IO_SIZE;
+        result = pwrite(fd, cursor + done, chunk,
+                        (off_t)(offset + done));
 
         if (result < 0 && errno == EINTR)
             continue;
