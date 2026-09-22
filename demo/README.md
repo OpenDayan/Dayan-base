@@ -13,6 +13,7 @@ demo/
 ├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
+├── launch_latency.cpp          # 连续同步启动及设备循环间隔
 ├── matmul_bf16_1c.cpp           # 非协作 BF16：4 个 slice、双缓冲、独立 Task 分片
 ├── matmul_bf16_4c.cpp           # 2x2 Cluster：4 个 slice、共享输入双缓冲、独立 Post
 ├── matmul_fp8_4c.cpp            # 相同四核流水线，E4M3 输入，K tile=512
@@ -35,7 +36,7 @@ make -C demo
 
 产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
 `build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
-`build/demo/shared_notify_latency`、
+`build/demo/shared_notify_latency`、`build/demo/launch_latency`、
 `build/demo/flash_attention_1c`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c`、
 `build/demo/matmul_fp8_4c`、`build/demo/matmul_fp4_4c` 和
@@ -83,6 +84,39 @@ build/host/dyperf/dyperf -o matmul-trace.json -- \
 `uint64_t dayan_get_time(void)`。它通过 `rdcycle` 返回当前 Hart 的周期计数，不做纳秒
 换算，也不等待执行单元完成；跨核相减要求平台的计数器同源且对齐。
 demo 不自行定义 `read_cycle` 或直接读取周期 CSR。
+
+## 连续算子启动性能
+
+`launch_latency` 默认连续同步启动 1000 次，每次四核各执行一个固定 450000 轮的标量循环。
+循环计数保留在寄存器中，编译器不能将循环折叠。支持单核模式，不使用张量计算单元或子线程。
+Runtime、Context、Stream 和结果 buffer 均复用；前 5 次启动作为预热，首次冷启动耗时单独报告。
+每次 kernel 只额外记录循环前后的 cycle、完成轮数和启动编号，并写回一个独占 cache line。
+Host 在全部启动结束后一次性读回和校验结果，启动循环中没有结果回读或逐次打印。
+
+```sh
+make -C demo ../build/demo/launch_latency
+# 已有 Server 使用原来的 IRQ 配置，设备实际频率为 10 MHz：
+build/demo/launch_latency 1000 4 10000000
+# 单核启动：
+build/demo/launch_latency 1000 1 10000000
+# 可选采集，按设备实际频率换算 trace：
+build/host/dyperf/dyperf --clock-hz 10000000 -o launch-trace.json -- \
+  build/demo/launch_latency 1000 4 10000000
+```
+
+参数顺序为 `[LAUNCHES [CORES [CLOCK_HZ]]]`，默认 `1000 4 0`。
+`CLOCK_HZ=0` 只输出原始 device cycles，不假设设备运行在 1 GHz。启动次数上限为 100000。
+报告包含 min、mean、p50、p95、p99、max：
+
+- `host_call`：一次同步 wrapper 调用的耗时，包括提交、设备执行、完成通知和 event 销毁，不能当作纯启动延迟。
+- `host_between_calls`：上一调用返回到下一调用开始之间的 Host 时间。
+- `device_loop`：单个 Hart 执行 450000 轮循环的 cycle 数，不包含结果写回。
+- `device_gap_per_lane`：同一 lane 上一次循环结束到下一次循环开始的 cycle 数，包含结果写回、退出、Host 往返、下一次启动及其他核未完成造成的等待，不等于纯 IRQ 延迟。
+
+测试要求只启用一个 Cluster。四核模式按同一物理 Hart 的相邻样本计算间隔，不进行跨核时间戳相减。
+单核任务可能迁移到其他 Hart；仅当 Server core mask 只有一位时输出 device gap，否则只输出 Host 和循环统计。
+性能采集可在启动 Server 时设置 `DAYAN_RPC_DEBUG=0`，避免额外 RPC 日志；demo 不改变 Server 的 IRQ/polling 模式。
+cmodel 用于验证启动次数和循环结果，性能结论应使用实机或 RTL 数据。
 
 ## 最小 FP32 Add
 

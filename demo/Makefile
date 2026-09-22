@@ -17,6 +17,7 @@ TENSOR_INTERRUPT_PROBE_TARGET := $(BUILD)/tensor_interrupt_probe
 LSU_BANDWIDTH_TARGET := $(BUILD)/lsu_bandwidth
 SCHEDULER_BENCH_TARGET := $(BUILD)/scheduler_yield_bench
 SHARED_NOTIFY_TARGET := $(BUILD)/shared_notify_latency
+LAUNCH_LATENCY_TARGET := $(BUILD)/launch_latency
 MATMUL_1C_TARGET := $(BUILD)/matmul_bf16_1c
 MATMUL_4C_TARGET := $(BUILD)/matmul_bf16_4c
 MATMUL_LOWP_TARGETS := $(BUILD)/matmul_fp8_4c $(BUILD)/matmul_fp4_4c
@@ -30,6 +31,7 @@ TENSOR_INTERRUPT_PROBE_TEMPS := $(BUILD)/tensor_interrupt_probe-temps
 LSU_BANDWIDTH_TEMPS := $(BUILD)/lsu_bandwidth-temps
 SCHEDULER_BENCH_TEMPS := $(BUILD)/scheduler_yield_bench-temps
 SHARED_NOTIFY_TEMPS := $(BUILD)/shared_notify_latency-temps
+LAUNCH_LATENCY_TEMPS := $(BUILD)/launch_latency-temps
 MATMUL_1C_TEMPS := $(BUILD)/matmul_bf16_1c-temps
 MATMUL_4C_TEMPS := $(BUILD)/matmul_bf16_4c-temps
 MATMUL_4C_BROADCAST_TEMPS := $(BUILD)/matmul_bf16_broadcast_4c-temps
@@ -39,7 +41,7 @@ TARGETS := $(PRINT_TARGET) $(ADD_FP32_MACRO_TARGET) $(ADD_FP32_VEC_TARGET) \
 	$(CONTEXT_THREAD_PROBE_TARGET) \
 	$(TENSOR_INTERRUPT_PROBE_TARGET) \
 	$(LSU_BANDWIDTH_TARGET) \
-	$(SCHEDULER_BENCH_TARGET) $(SHARED_NOTIFY_TARGET) \
+	$(SCHEDULER_BENCH_TARGET) $(SHARED_NOTIFY_TARGET) $(LAUNCH_LATENCY_TARGET) \
 	$(MATMUL_1C_TARGET) $(MATMUL_4C_TARGET) \
 	$(MATMUL_LOWP_TARGETS) \
 	$(MATMUL_4C_BROADCAST_TARGET)
@@ -135,6 +137,14 @@ $(SHARED_NOTIFY_TARGET): shared_notify_latency.cpp $(DAYAN_API_HEADERS) \
 	bash $(DEVICE_ISA_CHECK) \
 		$(SHARED_NOTIFY_TEMPS)/shared_notify_latency.cpp.dycc.device.o
 
+$(LAUNCH_LATENCY_TARGET): launch_latency.cpp $(DAYAN_API_HEADERS) \
+		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(LAUNCH_LATENCY_TEMPS) \
+		-O2 -Wall -Wextra -Werror $< -o $@
+	bash $(DEVICE_ISA_CHECK) \
+		$(LAUNCH_LATENCY_TEMPS)/launch_latency.cpp.dycc.device.o
+
 $(MATMUL_1C_TARGET): matmul_bf16_1c.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
@@ -181,6 +191,7 @@ check: all
 	$(LSU_BANDWIDTH_TARGET) --help >/dev/null
 	$(SCHEDULER_BENCH_TARGET) --help >/dev/null
 	$(SHARED_NOTIFY_TARGET) --help >/dev/null
+	$(LAUNCH_LATENCY_TARGET) --help >/dev/null
 	$(MATMUL_1C_TARGET) --help >/dev/null
 	$(MATMUL_4C_TARGET) --help >/dev/null
 	$(BUILD)/matmul_fp8_4c --help >/dev/null
