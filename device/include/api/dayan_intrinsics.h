@@ -40,6 +40,12 @@
 #define __tx_vec_cvt_fp16_fp32 __dayan_builtin_tx_vec_cvt_fp16_fp32
 #define __tx_vec_cvt_bf16_fp32 __dayan_builtin_tx_vec_cvt_bf16_fp32
 #define __tx_vec_cvt_mxfp4_bf16 __dayan_builtin_tx_vec_cvt_mxfp4_bf16
+#define __tx_macro_sfu_log2_fp32 __dayan_builtin___tx_macro_sfu_log2_fp32
+#define __tx_macro_sfu_exp2_fp32 __dayan_builtin___tx_macro_sfu_exp2_fp32
+#define __tx_macro_sfu_sin_fp32 __dayan_builtin___tx_macro_sfu_sin_fp32
+#define __tx_macro_sfu_cos_fp32 __dayan_builtin___tx_macro_sfu_cos_fp32
+#define __tx_macro_sfu_rsqrt_fp32 __dayan_builtin___tx_macro_sfu_rsqrt_fp32
+#define __tx_macro_sfu_recip_fp32 __dayan_builtin___tx_macro_sfu_recip_fp32
 #include <rvt_intrinsics.h>
 #undef __tx_vec_vv_fp32_max
 #undef __tx_vec_s_bitwise
@@ -50,6 +56,12 @@
 #undef __tx_vec_cvt_fp16_fp32
 #undef __tx_vec_cvt_bf16_fp32
 #undef __tx_vec_cvt_mxfp4_bf16
+#undef __tx_macro_sfu_log2_fp32
+#undef __tx_macro_sfu_exp2_fp32
+#undef __tx_macro_sfu_sin_fp32
+#undef __tx_macro_sfu_cos_fp32
+#undef __tx_macro_sfu_rsqrt_fp32
+#undef __tx_macro_sfu_recip_fp32
 #endif
 
 /*
@@ -362,6 +374,60 @@ template <long Vb, long Vrs1, long Rm>
 __attribute__((always_inline)) static inline void __tx_vec_cvt_mxfp4_bf16()
 {
     BaseNPUInstBuilder::detail::emit_vec_cvt<Vb, Vrs1, Rm, 7>();
+}
+
+/*
+ * SFU fp32 wrappers, hand-encoded: the Clang builtins place the SFU op
+ * at bits [46:40] but the decoder reads bits [37:32], so every __builtin
+ * SFU executes log2.  Emit with the legacy (n<<32) encoding instead.
+ */
+template <long GROUP>
+__attribute__((always_inline)) static inline void __tx_macro_sfu_log2_fp32(long rd, long rs1)
+{
+    constexpr long encoding = ((long)BaseNPUInstBuilder::TX_EXT_SFU << 25) |
+        (BaseNPUInstBuilder::TX_SFU_LOG2 << 32) |
+        BaseNPUInstBuilder::OPCODE_CUSTOM_64B | ((GROUP & 7) << 12);
+    BaseNPUInstBuilder::detail::emit_macro_2<encoding>(rd, rs1);
+}
+template <long GROUP>
+__attribute__((always_inline)) static inline void __tx_macro_sfu_exp2_fp32(long rd, long rs1)
+{
+    constexpr long encoding = ((long)BaseNPUInstBuilder::TX_EXT_SFU << 25) |
+        (BaseNPUInstBuilder::TX_SFU_EXP2 << 32) |
+        BaseNPUInstBuilder::OPCODE_CUSTOM_64B | ((GROUP & 7) << 12);
+    BaseNPUInstBuilder::detail::emit_macro_2<encoding>(rd, rs1);
+}
+template <long GROUP>
+__attribute__((always_inline)) static inline void __tx_macro_sfu_sin_fp32(long rd, long rs1)
+{
+    constexpr long encoding = ((long)BaseNPUInstBuilder::TX_EXT_SFU << 25) |
+        (BaseNPUInstBuilder::TX_SFU_SIN << 32) |
+        BaseNPUInstBuilder::OPCODE_CUSTOM_64B | ((GROUP & 7) << 12);
+    BaseNPUInstBuilder::detail::emit_macro_2<encoding>(rd, rs1);
+}
+template <long GROUP>
+__attribute__((always_inline)) static inline void __tx_macro_sfu_cos_fp32(long rd, long rs1)
+{
+    constexpr long encoding = ((long)BaseNPUInstBuilder::TX_EXT_SFU << 25) |
+        (BaseNPUInstBuilder::TX_SFU_COS << 32) |
+        BaseNPUInstBuilder::OPCODE_CUSTOM_64B | ((GROUP & 7) << 12);
+    BaseNPUInstBuilder::detail::emit_macro_2<encoding>(rd, rs1);
+}
+template <long GROUP>
+__attribute__((always_inline)) static inline void __tx_macro_sfu_rsqrt_fp32(long rd, long rs1)
+{
+    constexpr long encoding = ((long)BaseNPUInstBuilder::TX_EXT_SFU << 25) |
+        (BaseNPUInstBuilder::TX_SFU_RSQRT << 32) |
+        BaseNPUInstBuilder::OPCODE_CUSTOM_64B | ((GROUP & 7) << 12);
+    BaseNPUInstBuilder::detail::emit_macro_2<encoding>(rd, rs1);
+}
+template <long GROUP>
+__attribute__((always_inline)) static inline void __tx_macro_sfu_recip_fp32(long rd, long rs1)
+{
+    constexpr long encoding = ((long)BaseNPUInstBuilder::TX_EXT_SFU << 25) |
+        (BaseNPUInstBuilder::TX_SFU_RECIP << 32) |
+        BaseNPUInstBuilder::OPCODE_CUSTOM_64B | ((GROUP & 7) << 12);
+    BaseNPUInstBuilder::detail::emit_macro_2<encoding>(rd, rs1);
 }
 #endif
 
