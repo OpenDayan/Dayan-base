@@ -66,6 +66,7 @@ void sche_init(void);
 struct thread *thread_slot_get(uint8_t slot);
 uint8_t thread_slot_id(const struct thread *thread);
 struct thread *thread_self(void);
+int thread_set_name(const char *name);
 struct task_proc *task_proc_self(void);
 const struct task_descriptor *task_descriptor_self(void);
 void *task_shared_base(const struct task_proc *task);

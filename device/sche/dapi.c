@@ -77,6 +77,11 @@ void dayan_yield(void)
     thread_yield();
 }
 
+int dayan_set_proc_name(const char *name)
+{
+    return thread_set_name(name);
+}
+
 uint64_t dayan_get_time(void)
 {
     uint64_t cycle;

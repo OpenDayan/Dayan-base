@@ -123,6 +123,24 @@ struct thread *thread_self(void)
     return current;
 }
 
+int thread_set_name(const char *name)
+{
+    struct thread *thread = current;
+
+    if (!thread || (thread->type != THREAD_TYPE_TASK_PROC &&
+                    thread->type != THREAD_TYPE_TASK_THREAD))
+        return -EPERM;
+    if (!name || !name[0])
+        return -EINVAL;
+    if (strnlen(name, sizeof(thread->name)) == sizeof(thread->name))
+        return -ENAMETOOLONG;
+    strncpy(thread->name, name, sizeof(thread->name));
+    /* A paused profiler must define the new name when its buffer resumes. */
+    thread->profile_defined = 0;
+    profile_record_thread_start(thread);
+    return 0;
+}
+
 struct task_proc *task_proc_self(void)
 {
     return task_proc_for(current);

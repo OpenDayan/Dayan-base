@@ -1,7 +1,7 @@
 # Dayan kernel demos
 
 该目录放置最小、可独立构建的 Dayan kernel 示例。目前包含 Device `printf`、
-FP32 Add、单 Core BF16 矩阵乘和四 Core 协作 BF16/FP8/FP4 矩阵乘。
+FP32 Add、FP16/BF16 FlashAttention、单 Core BF16 矩阵乘和四 Core 协作 BF16/FP8/FP4 矩阵乘。
 
 ## 目录
 
@@ -11,6 +11,7 @@ demo/
 ├── add_fp32_macro.cpp          # 最小 FP32 Add：LSU + MACRO
 ├── add_fp32_vec.cpp            # 最小 FP32 Add：LSU + VEC
 ├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
+├── flash_attention.cpp         # llama.cpp 优化版：FP16/BF16、1c/4c、Split-KV decode
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── launch_latency.cpp          # 连续同步启动及设备循环间隔
@@ -37,7 +38,7 @@ make -C demo
 产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
 `build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
 `build/demo/shared_notify_latency`、`build/demo/launch_latency`、
-`build/demo/flash_attention_1c`、
+`build/demo/flash_attention_1c`、`build/demo/flash_attention`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c`、
 `build/demo/matmul_fp8_4c`、`build/demo/matmul_fp4_4c` 和
 `build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
@@ -195,6 +196,71 @@ make -C demo ../build/demo/flash_attention_1c
 build/demo/flash_attention_1c
 build/demo/flash_attention_1c --fp8
 ```
+
+## FP16/BF16 FlashAttention 优化流水线
+
+`flash_attention.cpp` 将 llama.cpp 的
+`ggml/src/ggml-dayan/ggml-dayan-flash-attention.h` 移植为单文件 demo，
+包含配置、Device kernel、Host launcher 和 CPU 参考校验，不依赖 llama.cpp 头文件。
+原有 `flash_attention_1c.cpp` 保留固定形状的 FP16 和 FP8 示例。
+
+每个 Core 使用两个 128-row Q slice，共享双缓冲的 128-column K/V tile。
+root 执行 QK，六个子 Thread 分别负责 Q/K/V 加载、softmax、PV 和输出更新，
+通过 26 个 Local Resource 管理缓冲区和状态版本。score 原地转为 FP32 P，
+PV 使用 `TF32 × FP16/BF16 -> FP32`，省去单独的 P16 缓冲区和格式转换。
+alpha、M/L、PV 存在 URAM 中供不同阶段或下一轮使用；O 在最后一块更新时归一化。
+每核申请 1536 KiB URAM，布局实际占用 1489 KiB。
+
+四核 prefill 用四个 Shared Resource 选出 K/V loader，其余 Core 从 loader 的
+URAM 复制；Shared Resource 的消费完成后才允许复用源缓冲区。
+四核 decode 按 KV 维度切分工作，把同一 KV head 对应的 Q heads 打包为 MAT 行，
+最后在 lane 0 根据各核 M/L 合并输出。跨核 barrier 保护归并期间的远端数据。
+
+Q/K/V 接收 FP16 或 BF16 的 `[batch, head, row, D]`，支持 64B 对齐的行、head、
+batch stride；V 转置在 LSU 内完成。输出为连续的 FP32 `[batch, row, q_head, D]`。
+Q 不需要预先缩放，配置中的 `scale_bits` 是普通 attention scale，demo 使用
+`1/sqrt(D)`，Device 再乘 `log2(e)`。支持 `D=64/128/192/256`、GQA、
+因果掩码和 Q/KV 尾块。因果条件为 `key <= causal_offset + query_row`。
+
+使用 VisualSwizzle 对实际基址、stride 和 32-bank 配置重新检查后，保留源实现的映射：
+
+| MAT 数据 | 字节 stride | M/B/S | 线性 / 采用映射的 Bank 峰值 |
+| --- | --- | --- | --- |
+| QK A/B，D=64/192 | 128 / 384 | identity | 1 / 1 |
+| QK A/B，D=128 | 256 | 5/1/5 | 2 / 1 |
+| QK A/B，D=256 | 512 | 5/2/5 | 4 / 1 |
+| PV B，即 Vt | 256 | 5/1/5 | 2 / 1 |
+| QK C / PV A，即 score/P | 512 | identity | 4 / 4 |
+| PV C，D=64/128/192/256 | 256/512/768/1024 | identity | 2/4/2/8，保持不变 |
+
+工具按四块 Bank 覆盖率进一步排序时，256B/512B stride 的候选最优分别为
+`7/1/3`、`7/2/3`；这里保留源实现的更小重排窗口，输入的每拍峰值同样为 1。
+score/P 和 PV 的消费者包括没有 swizzle iterator 的 FlexVec，因此保持 identity。
+这些是地址模型结果；吞吐和调度块周期需要实机或 RTL 测量。
+
+```sh
+make -C demo ../build/demo/flash_attention
+build/demo/flash_attention --help
+
+# 使用已启动的 Dayan Server；默认 FP16、单核、B=1、Hq=4、Hkv=2、Q=256、KV=512、D=128
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention
+
+# 四核 prefill，因果掩码、Q/KV 尾块、带 padding 的 stride，以及两次重复 launch
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention \
+  --bf16 --cores 4 --q-len 529 --kv-len 641 --causal --padded --repeat 2
+
+# 四核 decode；Q=1 且 KV>=512 时自动使用 Split-KV
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention \
+  --cores 4 --q-len 1 --kv-len 769 --q-heads 16 --kv-heads 2
+```
+
+`--split-kv` 可显式选择 decode 路径，要求四核、Q=1、至少四个可见 key。
+`--causal-offset` 指定因果偏移；只给 `--causal` 时默认为 `KV-Q`。
+`--tasks` 在单核模式分配独立 Task，四核模式分配独立 Cluster 工作组。
+Host 使用确定性的可精确表示输入，按输入数据计算双精度完整 attention 参考值，
+逐元素检查输出、每个 Task 的返回状态及输出尾部 guard。
+报告最大绝对/相对误差、RMSE 和 mismatch 数；允许误差为
+`2e-3 + 3e-3 * abs(reference)`。`--repeat` 每轮重置输出和状态再验证。
 
 ## LSU 单核带宽微基准
 

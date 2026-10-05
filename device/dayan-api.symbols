@@ -18,6 +18,7 @@ dayan_cluster_barrier
 dayan_thread_resources_init
 dayan_create_thread
 dayan_get_time
+dayan_set_proc_name
 dayan_thread_join
 dayan_thread_join_all
 dayan_thread_exit

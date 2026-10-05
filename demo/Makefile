@@ -11,6 +11,7 @@ PRINT_TARGET := $(BUILD)/print_demo
 ADD_FP32_MACRO_TARGET := $(BUILD)/add_fp32_macro
 ADD_FP32_VEC_TARGET := $(BUILD)/add_fp32_vec
 FLASH_ATTENTION_1C_TARGET := $(BUILD)/flash_attention_1c
+FLASH_ATTENTION_TARGET := $(BUILD)/flash_attention
 TASK_GRID_PROBE_TARGET := $(BUILD)/task_grid_probe
 CONTEXT_THREAD_PROBE_TARGET := $(BUILD)/context_thread_probe
 TENSOR_INTERRUPT_PROBE_TARGET := $(BUILD)/tensor_interrupt_probe
@@ -36,7 +37,7 @@ MATMUL_1C_TEMPS := $(BUILD)/matmul_bf16_1c-temps
 MATMUL_4C_TEMPS := $(BUILD)/matmul_bf16_4c-temps
 MATMUL_4C_BROADCAST_TEMPS := $(BUILD)/matmul_bf16_broadcast_4c-temps
 TARGETS := $(PRINT_TARGET) $(ADD_FP32_MACRO_TARGET) $(ADD_FP32_VEC_TARGET) \
-	$(FLASH_ATTENTION_1C_TARGET) \
+	$(FLASH_ATTENTION_1C_TARGET) $(FLASH_ATTENTION_TARGET) \
 	$(TASK_GRID_PROBE_TARGET) \
 	$(CONTEXT_THREAD_PROBE_TARGET) \
 	$(TENSOR_INTERRUPT_PROBE_TARGET) \
@@ -85,6 +86,15 @@ $(FLASH_ATTENTION_1C_TARGET): flash_attention_1c.cpp \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(FLASH_ATTENTION_1C_TEMPS)/flash_attention_1c.cpp.dycc.device.o
+
+$(FLASH_ATTENTION_TARGET): flash_attention.cpp \
+		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
+		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(BUILD)/flash_attention-temps \
+		-O2 -Wall -Wextra -Werror $< -o $@
+	bash $(DEVICE_ISA_CHECK) \
+		$(BUILD)/flash_attention-temps/flash_attention.cpp.dycc.device.o
 
 $(TASK_GRID_PROBE_TARGET): task_grid_probe.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
@@ -185,6 +195,7 @@ check: all
 	$(ADD_FP32_MACRO_TARGET) --help >/dev/null
 	$(ADD_FP32_VEC_TARGET) --help >/dev/null
 	$(FLASH_ATTENTION_1C_TARGET) --help >/dev/null
+	$(FLASH_ATTENTION_TARGET) --help >/dev/null
 	$(TASK_GRID_PROBE_TARGET) --help >/dev/null
 	$(CONTEXT_THREAD_PROBE_TARGET) --help >/dev/null
 	$(TENSOR_INTERRUPT_PROBE_TARGET) --help >/dev/null

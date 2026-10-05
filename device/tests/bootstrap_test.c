@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cpu.h"
+#include "errno.h"
 #include "rpc.h"
 #include "sche.h"
 
@@ -167,6 +168,75 @@ static void test_proc_create(void)
     }
 }
 
+static void test_proc_name(void)
+{
+    struct thread *root = thread_slot_get(1);
+    struct thread child = {
+        .slot = 2, .type = THREAD_TYPE_TASK_THREAD, .parent = 1,
+    };
+    uint64_t records[16];
+    struct profile_state profiler = {
+        .buffer = (unsigned char *)records,
+        .next = (unsigned char *)records,
+        .end = (unsigned char *)(records + 16),
+    };
+    uint16_t id = thread_id(root);
+
+    thread_list_init(&profiler.wake);
+    current = 0;
+    assert(thread_set_name("mega") == -EPERM);
+    current = thread_slot_get(RPC_PROFILE_SLOT_RPC_RECEIVE);
+    current->type = THREAD_TYPE_SYSTEM;
+    assert(thread_set_name("mega") == -EPERM);
+    current = root;
+    root->state = THREAD_RUNNING;
+    assert(!thread_set_name("0123456789abcde"));
+    assert(!strcmp(root->name, "0123456789abcde"));
+
+    cpu_self()->profiler = &profiler;
+    assert(!thread_set_name("mega-load"));
+    assert(!strcmp(root->name, "mega-load") && !root->name[15]);
+    assert(root->profile_defined && profiler.next == profiler.buffer + 32);
+    assert(thread_set_name(0) == -EINVAL);
+    assert(thread_set_name("") == -EINVAL);
+    assert(thread_set_name("0123456789abcdef") == -ENAMETOOLONG);
+    assert(!strcmp(root->name, "mega-load") && root->profile_defined);
+    assert(profiler.next == profiler.buffer + 32);
+    assert(!thread_set_name("mega-mat"));
+    assert(thread_id(root) == id && root->state == THREAD_RUNNING);
+    for (unsigned i = 0; i < 8; i += 4) {
+        assert(rpc_profile_record_slot(records[i]) == 1);
+        assert(rpc_profile_record_state(records[i]) ==
+               (RPC_PROFILE_RECORD_SLOT_DEFINE | 1));
+        assert(rpc_profile_record_state(records[i + 3]) == THREAD_RUNNING);
+    }
+    assert(!strcmp((char *)&records[1], "mega-load"));
+    assert(!strcmp((char *)&records[5], "mega-mat"));
+
+    /* A buffer flush resumes with a snapshot of names changed while paused. */
+    cpu_self()->profiler = 0;
+    assert(!thread_set_name("mega-store") && !root->profile_defined);
+    assert(profiler.next == profiler.buffer + 64);
+    for (uint8_t slot = RPC_PROFILE_SLOT_RPC_RECEIVE;
+         slot < RPC_PROFILE_SLOT_COUNT; ++slot)
+        thread_slot_get(slot)->profile_defined = 1;
+    cpu_self()->profiler = &profiler;
+    proc_profile_snapshot(0);
+    assert(root->profile_defined && profiler.next == profiler.buffer + 96);
+    assert(!strcmp((char *)&records[9], "mega-store"));
+
+    current = &child;
+    assert(!thread_set_name("child-stage"));
+    assert(!strcmp(child.name, "child-stage"));
+    assert(!strcmp(root->name, "mega-store"));
+    assert(rpc_profile_record_slot(records[12]) == 2);
+    assert(rpc_profile_record_state(records[12]) ==
+           (RPC_PROFILE_RECORD_SLOT_DEFINE | 1));
+    assert(!strcmp((char *)&records[13], "child-stage"));
+    current = 0;
+    cpu_self()->profiler = 0;
+}
+
 int main(void)
 {
     static const size_t counts[] = {0, 1, 8, 9, 32};
@@ -210,5 +280,6 @@ int main(void)
         assert(stack[0] == 0xa5);
     }
     test_proc_create();
+    test_proc_name();
     return 0;
 }
