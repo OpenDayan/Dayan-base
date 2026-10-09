@@ -300,3 +300,41 @@ DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
     matmul_bf16_1c, 1, MatmulBf16Shape::kWorkers,
     0, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
     2 * MatmulBf16Shape::kSlices + 2, 0);
+
+
+// MAT requires N to be a multiple of 16. The host sends only the remaining
+// 1..15 columns here, so no padded columns are calculated. Logical Tasks split
+// exact output elements; this path is intentionally small and tail-only.
+__kernel__ void rvnpu_gemm_tail_bf16(const uint16_t *a, const uint16_t *bt,
+                                     float *c, uint32_t m, uint32_t n,
+                                     uint32_t k)
+{
+#if defined(__DAYAN_DEVICE__)
+    if (!a || !bt || !c || !m || !n || n >= 16 || !k ||
+        dayan_task_mode() != 1 || !dayan_task_dim(DAYAN_TASK_X) ||
+        dayan_task_dim(DAYAN_TASK_Y) != 1 ||
+        dayan_task_dim(DAYAN_TASK_Z) != 1)
+        dayan_thread_exit(-22);
+    dayan_cache_invalidate(a, (uint64_t)m * k * sizeof(uint16_t));
+    dayan_cache_invalidate(bt, (uint64_t)n * k * sizeof(uint16_t));
+    dayan_cache_invalidate(c, (uint64_t)m * n * sizeof(float));
+    const uint32_t task = dayan_task_id(DAYAN_TASK_X);
+    const uint32_t tasks = dayan_task_dim(DAYAN_TASK_X);
+    const uint64_t outputs = (uint64_t)m * n;
+    for (uint64_t index = task; index < outputs; index += tasks) {
+        const uint32_t row = (uint32_t)(index / n);
+        const uint32_t column = (uint32_t)(index % n);
+        float sum = 0.0f;
+        for (uint32_t inner = 0; inner < k; ++inner) {
+            union { uint32_t u; float f; } av = {
+                (uint32_t)a[(uint64_t)row * k + inner] << 16};
+            union { uint32_t u; float f; } bv = {
+                (uint32_t)bt[(uint64_t)column * k + inner] << 16};
+            sum += av.f * bv.f;
+        }
+        c[index] = sum;
+    }
+#endif
+}
+
+DAYAN_KERNEL_TASK_DESC(rvnpu_gemm_tail_bf16, 4, 0, 0, 0, 1, 0, 0, 0);

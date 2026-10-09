@@ -16,10 +16,87 @@
 #define ELEMENTWISE_TILE_BYTES 4096U
 #define ELEMENTWISE_LANE_BYTES (3U*ELEMENTWISE_TILE_BYTES)
 
+#define LEGACY_REQUEST_ELEMS 16U
+#define LEGACY_TILE_ELEMS 256U
+#define LEGACY_TILE_BYTES (LEGACY_TILE_ELEMS*sizeof(float))
+
 #if defined(__DAYAN_DEVICE__)
 static void invalid_arguments(void){dayan_thread_exit(-22);}
 static inline void check_result(int result){
     if(result<0)dayan_thread_exit(result);
+}
+static inline long fp32_bits(float value){
+    union { float f; uint32_t u; } bits={value};
+    return (long)bits.u;
+}
+static bool task_range(uint64_t elements,uint64_t *begin_out,uint64_t *end_out){
+    const uint64_t task=(uint64_t)dayan_task_id(DAYAN_TASK_X);
+    const uint64_t tasks=(uint64_t)dayan_task_dim(DAYAN_TASK_X);
+    if(!tasks||task>=tasks){
+        *begin_out=0;
+        *end_out=0;
+        return false;
+    }
+    const uint64_t requests=(elements+LEGACY_REQUEST_ELEMS-1U)/LEGACY_REQUEST_ELEMS;
+    const uint64_t requests_per_task=requests/tasks;
+    const uint64_t extra_requests=requests%tasks;
+    const uint64_t task_requests=requests_per_task+(task<extra_requests?1U:0U);
+    const uint64_t first_request=task*requests_per_task+
+        (task<extra_requests?task:extra_requests);
+    const uint64_t begin=first_request*LEGACY_REQUEST_ELEMS;
+    uint64_t end=(first_request+task_requests)*LEGACY_REQUEST_ELEMS;
+    if(end>elements)end=elements;
+    *begin_out=begin;
+    *end_out=end;
+    return task_requests!=0&&begin<end;
+}
+static inline uint64_t tile_len(uint64_t end,uint64_t base){
+    if(base>=end)return 0;
+    const uint64_t remaining=end-base;
+    return remaining<LEGACY_TILE_ELEMS?remaining:LEGACY_TILE_ELEMS;
+}
+static inline uint64_t segment_len(uint64_t remaining){
+    if(remaining<LEGACY_REQUEST_ELEMS)return remaining;
+    return remaining-remaining%LEGACY_REQUEST_ELEMS;
+}
+static inline void configure_macro_1d(uint32_t n);
+static inline void configure_legacy_lsu_macro(uint64_t len){
+    const uint64_t requests=(len+LEGACY_REQUEST_ELEMS-1U)/LEGACY_REQUEST_ELEMS;
+    const uint64_t request_elements=
+        len<LEGACY_REQUEST_ELEMS?len:LEGACY_REQUEST_ELEMS;
+    __tx_lsu_tcsr_write<LSU_BLOCK>(0);
+    __tx_lsu_tcsr_write<LSU_DIM0>(requests-1U);
+    __tx_lsu_tcsr_write<LSU_DIM1>(0);
+    __tx_lsu_tcsr_write<LSU_DIM2>(0);
+    __tx_lsu_tcsr_write<LSU_INBLOCKSTRIDE>(0);
+    __tx_lsu_tcsr_write<LSU_INDIM0STRIDE>(64);
+    __tx_lsu_tcsr_write<LSU_INDIM1STRIDE>(LEGACY_TILE_BYTES);
+    __tx_lsu_tcsr_write<LSU_INDIM2STRIDE>(0);
+    __tx_lsu_tcsr_write<LSU_OUTBLOCKSTRIDE>(0);
+    __tx_lsu_tcsr_write<LSU_OUTDIM0STRIDE>(64);
+    __tx_lsu_tcsr_write<LSU_OUTDIM1STRIDE>(LEGACY_TILE_BYTES);
+    __tx_lsu_tcsr_write<LSU_OUTDIM2STRIDE>(0);
+    __tx_lsu_tcsr_write<LSU_BLOCKTRANSPOSE>(6);
+    __tx_lsu_tcsr_write<LSU_BLOCKPADDING>(0);
+    __tx_lsu_tcsr_write<LSU_REQUESTPADDING>(request_elements*sizeof(float)-1U);
+    __tx_lsu_tcsr_write<LSU_PADDINGVALUE>(0);
+    __tx_lsu_tcsr_write<LSU_URAMWRITESWIZZLEMBS>(0);
+    __tx_lsu_tcsr_write<LSU_URAMREADSWIZZLEMBS>(0);
+    __tx_lsu_tcsr_write<LSU_REQUESTWRITESIZE>(request_elements*sizeof(float)-1U);
+    __tx_lsu_tcsr_write<LSU_TABLESIZE>(0);
+    __tx_lsu_tcsr_write<LSU_TABLESTRIDE>(64);
+    configure_macro_1d((uint32_t)len);
+}
+static inline uint64_t legacy_resources(uint64_t n){
+    const uint64_t uram=(uint64_t)(uintptr_t)dayan_uram_base();
+    if(!uram||!n||dayan_task_mode()!=1U||
+        dayan_task_dim(DAYAN_TASK_Y)!=1U||dayan_task_dim(DAYAN_TASK_Z)!=1U||
+        dayan_uram_size()<32768)invalid_arguments();
+    return uram;
+}
+static inline void store_legacy(long device,long uram){
+    __tx_lsu_dma_u2d<0>(device,uram);
+    dayan_wait_lsu();
 }
 static inline void configure_contiguous_lsu(uint64_t bytes){
     __tx_lsu_tcsr_write<LSU_BLOCK>(0);
@@ -78,6 +155,126 @@ template<ElementwiseOp Op>static inline void elementwise_inst(uint64_t dst,uint6
     else __tx_macro_elemwise_sub_fp32<0,0>((long)dst,(long)lhs,(long)rhs);
 }
 
+template<ElementwiseOp Op>static void legacy_binary_entry(const float *a,const float *b,
+                                                            float *c,uint64_t n){
+    if(!a||!b||!c)invalid_arguments();
+    uint64_t begin=0,end=0;
+    if(!task_range(n,&begin,&end))return;
+    const uint64_t uram=legacy_resources(n);
+    const long a_uram=(long)uram;
+    const long b_uram=(long)(uram+LEGACY_TILE_BYTES);
+    const long c_uram=(long)(uram+2U*LEGACY_TILE_BYTES);
+    for(uint64_t base=begin;base<end;base+=LEGACY_TILE_ELEMS){
+        const uint64_t len=tile_len(end,base);
+        for(uint64_t offset=0;offset<len;){
+            const uint64_t segment=segment_len(len-offset);
+            const uint64_t index=base+offset;
+            configure_legacy_lsu_macro(segment);
+            __tx_lsu_dma_d2u<0>(a_uram,(long)((uintptr_t)a+index*sizeof(float)));
+            dayan_wait_lsu();
+            __tx_lsu_dma_d2u<0>(b_uram,(long)((uintptr_t)b+index*sizeof(float)));
+            dayan_wait_lsu();
+            elementwise_inst<Op>(c_uram,a_uram,b_uram);
+            dayan_wait_macro();
+            store_legacy((long)((uintptr_t)c+index*sizeof(float)),c_uram);
+            offset+=segment;
+        }
+    }
+}
+
+static void legacy_relu_entry(const float *input,float *output,uint64_t n){
+    if(!input||!output)invalid_arguments();
+    uint64_t begin=0,end=0;
+    if(!task_range(n,&begin,&end))return;
+    const uint64_t uram=legacy_resources(n);
+    const long input_uram=(long)uram;
+    const long output_uram=(long)(uram+LEGACY_TILE_BYTES);
+    const long zero_uram=(long)(uram+2U*LEGACY_TILE_BYTES);
+    *(float *)zero_uram=0.0f;
+    for(uint64_t base=begin;base<end;base+=LEGACY_TILE_ELEMS){
+        const uint64_t len=tile_len(end,base);
+        for(uint64_t offset=0;offset<len;){
+            const uint64_t segment=segment_len(len-offset);
+            const uint64_t index=base+offset;
+            configure_legacy_lsu_macro(segment);
+            __tx_lsu_dma_d2u<0>(input_uram,
+                (long)((uintptr_t)input+index*sizeof(float)));
+            dayan_wait_lsu();
+            __tx_macro_elemwise_max_fp32<0,1>(output_uram,zero_uram,input_uram);
+            dayan_wait_macro();
+            store_legacy((long)((uintptr_t)output+index*sizeof(float)),output_uram);
+            offset+=segment;
+        }
+    }
+}
+
+static void legacy_hardsigmoid_entry(const float *input,float *output,uint64_t n,
+                                     uint64_t coeff_bits){
+    if(!input||!output)invalid_arguments();
+    uint64_t begin=0,end=0;
+    if(!task_range(n,&begin,&end))return;
+    const uint64_t uram=legacy_resources(n);
+    const long input_uram=(long)uram;
+    const long middle_uram=(long)(uram+LEGACY_TILE_BYTES);
+    const long output_uram=(long)(uram+2U*LEGACY_TILE_BYTES);
+    const uint32_t alpha_bits=(uint32_t)coeff_bits;
+    const uint32_t beta_bits=(uint32_t)(coeff_bits>>32);
+    for(uint64_t base=begin;base<end;base+=LEGACY_TILE_ELEMS){
+        const uint64_t len=tile_len(end,base);
+        for(uint64_t offset=0;offset<len;){
+            const uint64_t segment=segment_len(len-offset);
+            const uint64_t index=base+offset;
+            configure_legacy_lsu_macro(segment);
+            __tx_lsu_dma_d2u<0>(input_uram,
+                (long)((uintptr_t)input+index*sizeof(float)));
+            dayan_wait_lsu();
+            __tx_macro_elemwise_mul_fp32<0,2>(middle_uram,(long)alpha_bits,input_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_add_fp32<0,2>(middle_uram,(long)beta_bits,middle_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_max_fp32<0,2>(output_uram,fp32_bits(0.0f),middle_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_min_fp32<0,2>(output_uram,fp32_bits(1.0f),output_uram);
+            dayan_wait_macro();
+            store_legacy((long)((uintptr_t)output+index*sizeof(float)),output_uram);
+            offset+=segment;
+        }
+    }
+}
+
+static void legacy_hardswish_entry(const float *input,float *output,uint64_t n){
+    if(!input||!output)invalid_arguments();
+    uint64_t begin=0,end=0;
+    if(!task_range(n,&begin,&end))return;
+    const uint64_t uram=legacy_resources(n);
+    const long input_uram=(long)uram;
+    const long middle_uram=(long)(uram+LEGACY_TILE_BYTES);
+    const long output_uram=(long)(uram+2U*LEGACY_TILE_BYTES);
+    for(uint64_t base=begin;base<end;base+=LEGACY_TILE_ELEMS){
+        const uint64_t len=tile_len(end,base);
+        for(uint64_t offset=0;offset<len;){
+            const uint64_t segment=segment_len(len-offset);
+            const uint64_t index=base+offset;
+            configure_legacy_lsu_macro(segment);
+            __tx_lsu_dma_d2u<0>(input_uram,
+                (long)((uintptr_t)input+index*sizeof(float)));
+            dayan_wait_lsu();
+            __tx_macro_elemwise_add_fp32<0,2>(middle_uram,fp32_bits(3.0f),input_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_max_fp32<0,2>(middle_uram,fp32_bits(0.0f),middle_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_min_fp32<0,2>(middle_uram,fp32_bits(6.0f),middle_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_mul_fp32<0,0>(output_uram,input_uram,middle_uram);
+            dayan_wait_macro();
+            __tx_macro_elemwise_mul_fp32<0,2>(output_uram,fp32_bits(1.0f/6.0f),output_uram);
+            dayan_wait_macro();
+            store_legacy((long)((uintptr_t)output+index*sizeof(float)),output_uram);
+            offset+=segment;
+        }
+    }
+}
+
 struct State {
     const float *a;
     const float *b;
@@ -132,20 +329,20 @@ template<ElementwiseOp Op>static void elementwise_entry(const float *a,const flo
 __kernel__ void rvnpu_add_fp32(const float *a, const float *b, float *c,
     uint64_t n) {
 #if defined(__DAYAN_DEVICE__)
-    elementwise_entry<ElementwiseOp::Add>(a, b, c, n);
+    legacy_binary_entry<ElementwiseOp::Add>(a, b, c, n);
 #endif
 }
 
-DAYAN_VECTOR_PIPELINE_DESC(rvnpu_add_fp32);
+DAYAN_VECTOR_DESC(rvnpu_add_fp32);
 
 
 __kernel__ void rvnpu_mul_fp32(const float *a, const float *b, float *c, uint64_t n) {
 #if defined(__DAYAN_DEVICE__)
-    elementwise_entry<ElementwiseOp::Mul>(a, b, c, n);
+    legacy_binary_entry<ElementwiseOp::Mul>(a, b, c, n);
 #endif
 }
 
-DAYAN_VECTOR_PIPELINE_DESC(rvnpu_mul_fp32);
+DAYAN_VECTOR_DESC(rvnpu_mul_fp32);
 
 
 __kernel__ void rvnpu_sub_fp32(const float *a, const float *b, float *c, uint64_t n) {
@@ -155,6 +352,31 @@ __kernel__ void rvnpu_sub_fp32(const float *a, const float *b, float *c, uint64_
 }
 
 DAYAN_VECTOR_PIPELINE_DESC(rvnpu_sub_fp32);
+
+
+__kernel__ void rvnpu_relu_fp32(const float *input,float *output,uint64_t n) {
+#if defined(__DAYAN_DEVICE__)
+    legacy_relu_entry(input,output,n);
+#endif
+}
+DAYAN_VECTOR_DESC(rvnpu_relu_fp32);
+
+
+__kernel__ void rvnpu_hardsigmoid_fp32(const float *input,float *output,
+    uint64_t n,uint64_t coeff_bits) {
+#if defined(__DAYAN_DEVICE__)
+    legacy_hardsigmoid_entry(input,output,n,coeff_bits);
+#endif
+}
+DAYAN_VECTOR_DESC(rvnpu_hardsigmoid_fp32);
+
+
+__kernel__ void rvnpu_hardswish_fp32(const float *input,float *output,uint64_t n) {
+#if defined(__DAYAN_DEVICE__)
+    legacy_hardswish_entry(input,output,n);
+#endif
+}
+DAYAN_VECTOR_DESC(rvnpu_hardswish_fp32);
 
 
 __kernel__ void rvnpu_div_fp32(const float *a, const float *b, float *c, uint64_t n) {
