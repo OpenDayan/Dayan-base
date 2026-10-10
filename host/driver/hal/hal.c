@@ -19,6 +19,7 @@
 
 static const struct npu_hal_backend_ops *const backends[] = {
     &npu_hal_xilinx_dma_backend_ops,
+    &npu_hal_soc_mmap_backend_ops,
 };
 
 static const struct npu_hal_backend_ops *default_backend(void)
@@ -306,7 +307,21 @@ int npu_hal_copy_address(npu_hal_t *hal, uint32_t cluster,
 
     if (!hal || cluster >= hal->cluster_count)
         return -EINVAL;
-    if (!size || destination == source)
+    if (!size)
+        return 0;
+    if (destination > UINT64_MAX - size || source > UINT64_MAX - size)
+        return -EOVERFLOW;
+    status = npu_hal_device_status(hal);
+    if (status < 0)
+        return status;
+    if (hal->ops->copy_address_check) {
+        status = record_backend_status(
+            hal, hal->ops->copy_address_check(hal->state, cluster,
+                                              destination, source, size));
+        if (status < 0)
+            return status;
+    }
+    if (destination == source)
         return 0;
     buffer = malloc(size < NPU_HAL_COPY_CHUNK ? size : NPU_HAL_COPY_CHUNK);
     if (!buffer)
@@ -548,6 +563,21 @@ int npu_hal_boot_core(npu_hal_t *hal, npu_hal_core_t core, uint64_t entry,
     if (status < 0)
         return status;
     return npu_hal_wait_command_consumed(hal, core, timeout_ms);
+}
+
+int npu_hal_cluster_reset(npu_hal_t *hal, uint32_t cluster)
+{
+    int status;
+
+    if (!hal || cluster >= hal->cluster_count)
+        return -EINVAL;
+    if (!hal->ops->reset_cluster)
+        return -ENOTSUP;
+    status = npu_hal_device_status(hal);
+    if (status < 0)
+        return status;
+    return record_backend_status(
+        hal, hal->ops->reset_cluster(hal->state, cluster));
 }
 
 int npu_hal_data_plane_export(npu_hal_t *hal,

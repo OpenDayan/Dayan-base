@@ -620,6 +620,22 @@ int main(void)
     options.normal_memory_size_mib = 0;
     assert(npu_hal_open(&hal, &options) == 0);
     {
+        /* The default 4 GiB region is far above twice the cap, so the firmware
+         * pool takes the whole 64 MiB cap and Buffers get the rest. */
+        uint64_t pool_base = 0;
+        uint64_t pool_size = 0;
+
+        assert(npu_hal_firmware_pool(hal, &pool_base, &pool_size) == 0);
+        assert(pool_base == UINT64_C(0x80000000));
+        assert(pool_size == UINT64_C(0x04000000));
+    }
+    npu_hal_close(hal);
+    hal = 0;
+    /* Explicit, because the default size has changed before (64 MiB to 4 GiB)
+     * and silently turned this case into the one above. */
+    options.normal_memory_size_mib = 64;
+    assert(npu_hal_open(&hal, &options) == 0);
+    {
         /* A region smaller than twice the cap is halved, so the firmware still
          * gets room and Buffers still get a pool. */
         uint64_t pool_base = 0;
@@ -631,6 +647,7 @@ int main(void)
     }
     npu_hal_close(hal);
     hal = 0;
+    options.normal_memory_size_mib = 0;
     options.memory_regions = overlapping_regions;
     options.memory_region_count =
         sizeof(overlapping_regions) / sizeof(overlapping_regions[0]);

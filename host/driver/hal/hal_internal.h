@@ -29,6 +29,17 @@ struct npu_hal_backend_ops {
     int (*finish_transfer)(void *state,
                            const npu_hal_data_token_t *token,
                            int transfer_status);
+    /*
+     * Optional: validates a whole Device-to-Device copy (both ranges, every
+     * target type) before npu_hal_copy_address() moves its first chunk.
+     * Without it each chunk is checked on its own, as before, and a range
+     * error after the first chunk leaves the earlier chunks written.
+     */
+    int (*copy_address_check)(void *state, uint32_t cluster,
+                              uint64_t destination, uint64_t source,
+                              size_t size);
+    /* Optional; absent means the backend cannot reset a Cluster. */
+    int (*reset_cluster)(void *state, uint32_t cluster);
 };
 
 struct npu_hal_arena;
@@ -67,6 +78,7 @@ struct npu_hal {
 };
 
 extern const struct npu_hal_backend_ops npu_hal_xilinx_dma_backend_ops;
+extern const struct npu_hal_backend_ops npu_hal_soc_mmap_backend_ops;
 int npu_hal_memory_manager_init(npu_hal_t *hal,
                                 const npu_hal_options_t *options);
 void npu_hal_memory_manager_destroy(npu_hal_t *hal);

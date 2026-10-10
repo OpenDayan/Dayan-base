@@ -106,6 +106,12 @@ int npu_hal_copy_to_address(npu_hal_t *hal, uint32_t cluster,
 int npu_hal_copy_from_address(npu_hal_t *hal, uint32_t cluster,
                               void *destination, uint64_t address,
                               size_t size);
+/*
+ * Copies through a Host bounce buffer in 64 KiB chunks.  A backend with a
+ * copy check validates both complete ranges first, so a software range error
+ * changes nothing; otherwise chunks before the failing one stay written.
+ * Overlapping ranges are not supported.
+ */
 int npu_hal_copy_address(npu_hal_t *hal, uint32_t cluster,
                          uint64_t destination, uint64_t source, size_t size);
 
@@ -129,6 +135,14 @@ int npu_hal_wait_command_consumed(npu_hal_t *hal, npu_hal_core_t core,
                                   uint32_t timeout_ms);
 int npu_hal_boot_core(npu_hal_t *hal, npu_hal_core_t core, uint64_t entry,
                       uint32_t timeout_ms);
+
+/*
+ * Hardware reset of one Cluster.  Returns -ENOTSUP while the backend has no
+ * reset sequence, which is every backend today: the Service still restarts
+ * Harts by parking them in the BootROM.  Success has to mean every Hart and
+ * AXI master has stopped, so memory the Cluster could reach may be reused.
+ */
+int npu_hal_cluster_reset(npu_hal_t *hal, uint32_t cluster);
 
 /* Clear only exclusively allocated Shared Resource entries before Proc launch.
  * The selected physical entries must have no outstanding users or transactions. */

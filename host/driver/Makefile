@@ -96,6 +96,11 @@ $(BUILD)/tests/hal_test: hal/tests/hal_test.c $(HAL_IO_OBJECTS) \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+$(BUILD)/tests/soc_mmap_test: hal/tests/soc_mmap_test.c $(HAL_IO_OBJECTS) \
+		$(HAL_CONTROL_OBJECTS) $(HAL_DATA_OBJECTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
 $(BUILD)/tests/package_test: runtime/tests/package_test.c \
 		$(BUILD)/runtime/package.o $(BUILD)/server/package.o
 	@mkdir -p $(dir $@)
@@ -156,10 +161,12 @@ layer-check: $(RUNTIME_STATIC)
 		grep -E ' (dayan_server_|npu_service_|npu_hal_(open|close|get_info|register_|irq_|boot_|memory_))'
 
 check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
+	$(BUILD)/tests/soc_mmap_test \
 	$(BUILD)/tests/pcu_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
 	$(BUILD)/tests/mmu_test $(BUILD)/tests/kernel_cache_test $(BUILD)/tests/profile_parallel_test $(BUILD)/tests/public_headers.o
 	$(BUILD)/tests/hal_test
+	$(BUILD)/tests/soc_mmap_test
 	$(BUILD)/tests/pcu_test
 	$(BUILD)/tests/package_test
 	$(BUILD)/tests/socket_test

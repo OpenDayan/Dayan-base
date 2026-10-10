@@ -34,6 +34,31 @@
     (DAYAN_CLINT_MSIP_BASE + (hart) * 4U)
 
 /*
+ * Cluster IP aperture: the fixed module layout below CONFIG_CONTROL_BASE +
+ * DAYAN_CLUSTER_APERTURE_SIZE, as the NPU sees it and as a Host reaches it
+ * through the Cluster slave port.  A Host that maps the aperture at some
+ * base B reaches IP offset X at B + X.  Values follow the rvtng QEMU model
+ * and the FPGA register list; the SoC integration has not confirmed them.
+ *
+ * DAYAN_DRAM_BASE is not part of the aperture: it is where the NPU master
+ * port sees external memory, and what the firmware is linked against
+ * (device/Makefile RAM_BASE, which must stay equal).
+ */
+#define DAYAN_IRQ_ENABLE                0x002004U
+#define DAYAN_IRQ_CONTROL_SIZE          0x000018U
+#define DAYAN_ATOMIC_CACHE_CONTROL_SIZE 0x000010U
+#define DAYAN_COHERENT_WINDOW_BASE      0x00400000U
+#define DAYAN_URAM_BASE                 0x00800000U
+#define DAYAN_URAM_SIZE                 0x00180000U
+#define DAYAN_URAM_STRIDE               0x00200000U
+#define DAYAN_URAM(hart) \
+    (DAYAN_URAM_BASE + (hart) * DAYAN_URAM_STRIDE)
+/* Harts the fixed layout has room for: mailboxes, MSIP, PCU and URAM. */
+#define DAYAN_CLUSTER_MAX_HARTS         4U
+#define DAYAN_CLUSTER_APERTURE_SIZE     0x01000000U
+#define DAYAN_DRAM_BASE                 0x80000000U
+
+/*
  * ClusterMMU APB4 register page.
  *
  * The integration manual (section 6.1 address map, section 6.6) places

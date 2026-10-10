@@ -4,13 +4,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define NPU_DEFAULT_RAM_BASE      UINT64_C(0x80000000)
+#include "platform_regs.h"
+
+/* Addresses come from the fixed Cluster layout; only the size is a default. */
+#define NPU_DEFAULT_RAM_BASE      ((uint64_t)DAYAN_DRAM_BASE)
 #define NPU_DEFAULT_RAM_SIZE      UINT64_C(0x100000000) // 4 GiB default
-#define NPU_DEFAULT_COHERENT_BASE UINT64_C(0x00400000)
-#define NPU_DEFAULT_COHERENT_SIZE UINT64_C(0x00400000)
-#define NPU_DEFAULT_URAM_BASE     UINT64_C(0x00800000)
-#define NPU_DEFAULT_URAM_SIZE     UINT64_C(0x00180000)
-#define NPU_DEFAULT_URAM_STRIDE   UINT64_C(0x00200000)
+#define NPU_DEFAULT_COHERENT_BASE ((uint64_t)DAYAN_COHERENT_WINDOW_BASE)
+#define NPU_DEFAULT_COHERENT_SIZE ((uint64_t)DAYAN_ATOMIC_CACHE_WINDOW_SIZE)
+#define NPU_DEFAULT_URAM_BASE     ((uint64_t)DAYAN_URAM_BASE)
+#define NPU_DEFAULT_URAM_SIZE     ((uint64_t)DAYAN_URAM_SIZE)
+#define NPU_DEFAULT_URAM_STRIDE   ((uint64_t)DAYAN_URAM_STRIDE)
 #define NPU_URAM_GRANULE          UINT64_C(32768)
 
 /*
