@@ -15,6 +15,7 @@ TASK_GRID_PROBE_TARGET := $(BUILD)/task_grid_probe
 CONTEXT_THREAD_PROBE_TARGET := $(BUILD)/context_thread_probe
 TENSOR_INTERRUPT_PROBE_TARGET := $(BUILD)/tensor_interrupt_probe
 LSU_BANDWIDTH_TARGET := $(BUILD)/lsu_bandwidth
+VEC_PEAK_TARGET := $(BUILD)/vec_peak
 SCHEDULER_BENCH_TARGET := $(BUILD)/scheduler_yield_bench
 SHARED_NOTIFY_TARGET := $(BUILD)/shared_notify_latency
 LAUNCH_LATENCY_TARGET := $(BUILD)/launch_latency
@@ -29,6 +30,7 @@ TASK_GRID_PROBE_TEMPS := $(BUILD)/task_grid_probe-temps
 CONTEXT_THREAD_PROBE_TEMPS := $(BUILD)/context_thread_probe-temps
 TENSOR_INTERRUPT_PROBE_TEMPS := $(BUILD)/tensor_interrupt_probe-temps
 LSU_BANDWIDTH_TEMPS := $(BUILD)/lsu_bandwidth-temps
+VEC_PEAK_TEMPS := $(BUILD)/vec_peak-temps
 SCHEDULER_BENCH_TEMPS := $(BUILD)/scheduler_yield_bench-temps
 SHARED_NOTIFY_TEMPS := $(BUILD)/shared_notify_latency-temps
 LAUNCH_LATENCY_TEMPS := $(BUILD)/launch_latency-temps
@@ -40,7 +42,7 @@ TARGETS := $(PRINT_TARGET) $(ADD_FP32_MACRO_TARGET) $(ADD_FP32_VEC_TARGET) \
 	$(TASK_GRID_PROBE_TARGET) \
 	$(CONTEXT_THREAD_PROBE_TARGET) \
 	$(TENSOR_INTERRUPT_PROBE_TARGET) \
-	$(LSU_BANDWIDTH_TARGET) \
+	$(LSU_BANDWIDTH_TARGET) $(VEC_PEAK_TARGET) \
 	$(SCHEDULER_BENCH_TARGET) $(SHARED_NOTIFY_TARGET) $(LAUNCH_LATENCY_TARGET) \
 	$(MATMUL_1C_TARGET) $(MATMUL_4C_TARGET) \
 	$(MATMUL_LOWP_TARGETS) \
@@ -121,6 +123,13 @@ $(LSU_BANDWIDTH_TARGET): lsu_bandwidth.cpp \
 	bash $(DEVICE_ISA_CHECK) \
 		$(LSU_BANDWIDTH_TEMPS)/lsu_bandwidth.cpp.dycc.device.o
 
+$(VEC_PEAK_TARGET): vec_peak.cpp $(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
+		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
+	@mkdir -p $(dir $@)
+	$(DYCC) --save-temps=$(VEC_PEAK_TEMPS) -O2 -Wall -Wextra -Werror \
+		$< -o $@
+	bash $(DEVICE_ISA_CHECK) $(VEC_PEAK_TEMPS)/vec_peak.cpp.dycc.device.o
+
 $(SCHEDULER_BENCH_TARGET): scheduler_yield_bench.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
@@ -189,6 +198,7 @@ check: all
 	$(CONTEXT_THREAD_PROBE_TARGET) --help >/dev/null
 	$(TENSOR_INTERRUPT_PROBE_TARGET) --help >/dev/null
 	$(LSU_BANDWIDTH_TARGET) --help >/dev/null
+	$(VEC_PEAK_TARGET) --help >/dev/null
 	$(SCHEDULER_BENCH_TARGET) --help >/dev/null
 	$(SHARED_NOTIFY_TARGET) --help >/dev/null
 	$(LAUNCH_LATENCY_TARGET) --help >/dev/null

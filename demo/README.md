@@ -12,6 +12,7 @@ demo/
 ├── add_fp32_vec.cpp            # 最小 FP32 Add：LSU + VEC
 ├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
+├── vec_peak.cpp                 # VEC 稳态吞吐微基准：实测值对比 128 FLOP/cycle 设计峰值
 ├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
 ├── launch_latency.cpp          # 连续同步启动及设备循环间隔
 ├── matmul_bf16_1c.cpp           # 非协作 BF16：4 个 slice、双缓冲、独立 Task 分片
@@ -35,7 +36,7 @@ make -C demo
 ```
 
 产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
-`build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
+`build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、`build/demo/vec_peak`、
 `build/demo/shared_notify_latency`、`build/demo/launch_latency`、
 `build/demo/flash_attention_1c`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c`、
@@ -208,6 +209,77 @@ URAM 地址窗的 U2D。四个 Core 仅用于建立 Cluster URAM 映射；测量
 build/demo/lsu_bandwidth       # 依次测试 D2U 和远端 U2D
 build/demo/lsu_bandwidth d2u
 build/demo/lsu_bandwidth u2d
+```
+
+## VEC 吞吐微基准
+
+`vec_peak` 测量 FlexVec 的稳态吞吐，并与设计峰值 128 FLOP/cycle（每周期 2 条 64-lane
+ALU 指令，1 lane-op 记 1 FLOP）对比。每个配置是一个只使用寄存器的 VFork：prologue 用
+30 条 broadcast 填满两个寄存器队列，循环体是 `BODY` 条 ALU 指令，由硬件循环
+`DIM0 × DIM1` 在 `TASKS`（`DIM2`）个 task 中重放，epilogue 每个 task 写回一个 256B
+槽位。循环体不访问 URAM（`ld-*` 模式除外），因此结果只反映发射、寄存器堆和 ALU。
+
+每个配置运行两次，仅外层循环次数不同（`DIM0` = 1 和 2；`flat` 为 VFork 个数），并用
+`dayan_get_time()` 记录“发射指令块 → VFork → `dayan_wait_vec()`”的周期。Host 报告两次的
+差值：
+
+```text
+ALU/cycle  = 长短两次相差的 ALU 指令数 / (long - short)
+FLOP/cycle = ALU/cycle × 64        peak = FLOP/cycle / 128
+```
+
+指令块发射、VFork、prologue、task 的爬升与排空以及单元等待在两次运行中各出现一次，相减后
+抵消，剩下的是稳态吞吐。测量开始前先执行一个不计时的小 VFork 吸收冷启动开销。操作数
+取值保证每个 task 的最终结果是已知常数（`x+0`、`x*1`、`recip(1)` 恒为 1.0，`0+0`、
+`0*0` 恒为 0.0）；kernel 在每次运行前用 poison 覆盖结果槽位，结束后检查每个 task 的
+lane 0 和 lane 63。被静默丢弃的 VFork 会报告为 `BAD`，而不是一个快得不合理的周期数。
+
+```sh
+make -C demo ../build/demo/vec_peak
+build/demo/vec_peak                     # 默认 summary sweep
+build/demo/vec_peak threads mix         # 指定 sweep，一次 launch 内顺序执行
+build/demo/vec_peak am-1r:16:15         # 单个配置：MODE[:TASKS[:DISTANCE[:BODY]]]
+build/demo/vec_peak --cores 4 mix       # 四核：每个 Core 在自己的 VEC 上各跑一遍
+build/demo/vec_peak --work 1024 all     # cmodel 功能验证时缩小每次运行的规模
+```
+
+`--help` 列出全部 sweep 和模式。sweep 包括 `summary`（默认，各结论的代表点）、
+`threads`（task 数 1..64）、`depend`（依赖距离与延迟）、`ops`（add/mul/sfu/load）、
+`body`（循环体长度）、`flat`（不使用硬件循环，标量核逐块发射）、`mix`（add 与 mul
+交错）、`reads`（add+mul 的操作数模式）和 `all`。`DISTANCE` 是以 push 计的依赖距离：
+1 为串行链，15 是 16 项队列允许的最大独立度；取值限 1、2、4、8、15，因为寄存器 age
+是指令的立即数字段，kernel 为每个取值各实例化一份发射代码。`--work N` 是长短两次运行
+相差的循环体指令总数，默认 16384。
+
+`--cores 4` 以 `NPUTaskMode::kFourCore`、`task_dim={4,1,1}` 启动，要求 Server 启用同一
+Cluster 的 4 个 Core。task X 在 Core X 上执行整张配置表并写入 `results[X]`，Host 逐核
+输出结果，并按“各核 ALU 指令之和 / 最慢一核的周期”给出 Cluster 吞吐，对比 4 × 128。
+各核的 `sweep cycles` 窗口用于确认四份 sweep 确实同时运行；跨核比较要求计数器同源。
+
+Device 部分只有一个 kernel，不创建子 Thread，使用 1 个 LSU 和 1 个 VEC TCSR 组、
+32 KiB URAM（16 KiB 的 1.0f load 源和 16 KiB 结果槽位）。descriptor 为
+`DAYAN_KERNEL_TASK_DESC(vec_peak, 1, ...)`：同一个 kernel 还要以四核模式启动，因此不能
+声明为 locked Task，测量时 Server 上不应同时运行其它算子。Vec 指令队列在 Proc 退出后
+仍然存在，kernel 退出前比较队列空闲项数，有指令未被 VFork 时以 `-5` 结束。
+
+周期数只在 RTL 或实机上有意义；cmodel 没有时序模型，长短两次的差值可能为负，此时该行
+输出 `timing unusable`，PASS 只表示数据校验通过。使用 TestCluster 时按
+[`Readme_cluster.md`](../Readme_cluster.md) 的方式运行，例如：
+
+```sh
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . --sim-dir "$NPU_TC_ROOT" --sim-bin "$NPU_TC_BIN" \
+  --dram-config "$NPU_TC_DRAM" --startup-timeout 300 \
+  --server-timeout-ms 36000000 --core-mask 0x1 --expect '[host] PASS:' \
+  -- ./build/demo/vec_peak
+```
+
+四核 sweep 使用 `--core-mask 0xf` 并在 `vec_peak` 后追加 `--cores 4`。单个配置适合配合
+`dyperf` 观察 Proc 状态时间线，trace 中只有该配置的一短一长两次运行：
+
+```sh
+build/host/dyperf/dyperf -o vec-peak-trace.json -- \
+  build/demo/vec_peak am-1r:16:15
 ```
 
 ## 用 dyperf 测量跨 Hart 调度通知
