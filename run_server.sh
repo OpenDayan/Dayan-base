@@ -12,6 +12,7 @@ device_index=${NPU_DEVICE_INDEX:-0}
 cluster_count=${NPU_CLUSTER_COUNT:-1}
 cluster_stride=${NPU_CLUSTER_STRIDE:-1}
 cluster_mask=${NPU_CLUSTER_MASK:-}
+enable_mmu=${NPU_ENABLE_MMU:-0}
 core_mask=${NPU_CORE_MASK:-0xf}
 socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-server.sock}
 wait_seconds=${DAYAN_DEVICE_WAIT_SECONDS:-30}
@@ -81,6 +82,7 @@ for ((arg_index = 0; arg_index < ${#forwarded_args[@]}; ++arg_index)); do
                 --xdma-device-dir|--device-prefix) xdma_device_dir=$value ;;
                 --xdma-mmio-offset) xdma_mmio_offset=$value ;;
                 --device-index) device_index=$value ;;
+                --enable-mmu) enable_mmu=$value ;;
                 --cluster-count) cluster_count=$value ;;
                 --cluster-stride) cluster_stride=$value ;;
                 --cluster-mask) cluster_mask=$value ;;
@@ -153,6 +155,7 @@ esac
 cluster_count=$((10#$cluster_count))
 cluster_stride=$((10#$cluster_stride))
 device_index=$((10#$device_index))
+enable_mmu=$((10#$enable_mmu))
 wait_seconds=$((10#$wait_seconds))
 build_jobs=$((10#$build_jobs))
 if [ "$cluster_count" -gt 32 ]; then
@@ -218,6 +221,7 @@ server_args=(
     --xdma-profile "$xdma_profile"
     --xdma-device-dir "$xdma_device_dir"
     --device-index "$device_index"
+    --enable-mmu "$enable_mmu"
     --cluster-count "$cluster_count"
     --cluster-stride "$cluster_stride"
     --core-mask "$core_mask"
