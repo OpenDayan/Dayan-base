@@ -13,6 +13,7 @@ cluster_count=${NPU_CLUSTER_COUNT:-1}
 cluster_stride=${NPU_CLUSTER_STRIDE:-1}
 cluster_mask=${NPU_CLUSTER_MASK:-}
 core_mask=${NPU_CORE_MASK:-0xf}
+cores_per_cluster=${NPU_CORES_PER_CLUSTER:-}
 socket_path=${DAYAN_SERVER_SOCKET:-/tmp/dayan-server.sock}
 wait_seconds=${DAYAN_DEVICE_WAIT_SECONDS:-30}
 build_jobs=${DAYAN_BUILD_JOBS:-4}
@@ -40,6 +41,9 @@ Environment:
   NPU_CLUSTER_COUNT          number of Clusters (default: 1)
   NPU_CLUSTER_STRIDE         XDMA index stride (default: 1)
   NPU_CLUSTER_MASK           optional enabled Cluster mask
+  NPU_CORES_PER_CLUSTER      Cores the hardware has per Cluster (default: the
+                             server's 4; use 1 for a 1c RTL). NPU_CORE_MASK
+                             is clipped to this many low bits.
   NPU_CORE_MASK              enabled Core mask (default: 0xf)
   DAYAN_SERVER_SOCKET        Runtime socket (default: /tmp/dayan-server.sock)
   DAYAN_FIRMWARE             BL1 ELF path
@@ -67,7 +71,7 @@ for ((arg_index = 0; arg_index < ${#forwarded_args[@]}; ++arg_index)); do
     case "$option" in
         --socket|--firmware|--api-elf|--xdma-profile|--xdma-device-dir|\
         --xdma-mmio-offset|--device-prefix|--device-index|--cluster-count|\
-        --cluster-stride|--cluster-mask|--core-mask)
+        --cluster-stride|--cluster-mask|--core-mask|--cores-per-cluster)
             if [ "$((arg_index + 1))" -ge "${#forwarded_args[@]}" ]; then
                 echo "missing value after $option" >&2
                 exit 2
@@ -85,6 +89,7 @@ for ((arg_index = 0; arg_index < ${#forwarded_args[@]}; ++arg_index)); do
                 --cluster-stride) cluster_stride=$value ;;
                 --cluster-mask) cluster_mask=$value ;;
                 --core-mask) core_mask=$value ;;
+                --cores-per-cluster) cores_per_cluster=$value ;;
             esac
             ;;
         *) extra_args+=("$option") ;;
@@ -128,6 +133,10 @@ if ! positive_decimal "$cluster_stride"; then
     echo "NPU_CLUSTER_STRIDE must be a positive decimal integer" >&2
     exit 2
 fi
+if [ -n "$cores_per_cluster" ] && ! positive_decimal "$cores_per_cluster"; then
+    echo "NPU_CORES_PER_CLUSTER must be a positive decimal integer" >&2
+    exit 2
+fi
 if ! nonnegative_decimal "$device_index"; then
     echo "NPU_DEVICE_INDEX must be a non-negative decimal integer" >&2
     exit 2
@@ -153,6 +162,13 @@ esac
 cluster_count=$((10#$cluster_count))
 cluster_stride=$((10#$cluster_stride))
 device_index=$((10#$device_index))
+if [ -n "$cores_per_cluster" ]; then
+    cores_per_cluster=$((10#$cores_per_cluster))
+    if [ "$cores_per_cluster" -gt 32 ]; then
+        echo "NPU_CORES_PER_CLUSTER must be between 1 and 32" >&2
+        exit 2
+    fi
+fi
 wait_seconds=$((10#$wait_seconds))
 build_jobs=$((10#$build_jobs))
 if [ "$cluster_count" -gt 32 ]; then
@@ -228,9 +244,12 @@ fi
 if [ -n "$cluster_mask" ]; then
     server_args+=(--cluster-mask "$cluster_mask")
 fi
+if [ -n "$cores_per_cluster" ]; then
+    server_args+=(--cores-per-cluster "$cores_per_cluster")
+fi
 server_args+=("${extra_args[@]}")
 
-status "starting dayan_server: socket=$socket_path clusters=$cluster_count core_mask=$core_mask"
+status "starting dayan_server: socket=$socket_path clusters=$cluster_count cores_per_cluster=${cores_per_cluster:-default} core_mask=$core_mask"
 status "firmware=$firmware api_elf=$api_elf"
 status "Host RPC debug output: $rpc_debug_state"
 export DAYAN_RPC_DEBUG="$rpc_debug"

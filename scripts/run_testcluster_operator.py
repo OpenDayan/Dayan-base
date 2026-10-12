@@ -106,6 +106,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--api-elf", type=Path)
     result.add_argument("--cluster-count", type=int, default=1)
     result.add_argument("--core-mask", type=parse_int, default=1)
+    result.add_argument(
+        "--cores-per-cluster",
+        type=int,
+        help="Cores the simulated hardware has (1 for a 1c build); default: the server's 4",
+    )
     result.add_argument("--socket", type=Path)
     result.add_argument("--log-dir", type=Path)
     result.add_argument("--startup-timeout", type=float, default=30.0)
@@ -306,6 +311,8 @@ def main() -> int:
         raise RunnerError("--cluster-count must be between 1 and 4")
     if arguments.core_mask <= 0 or arguments.core_mask > 0xF:
         raise RunnerError("--core-mask must be between 1 and 0xf")
+    if arguments.cores_per_cluster is not None and not 1 <= arguments.cores_per_cluster <= 4:
+        raise RunnerError("--cores-per-cluster must be between 1 and 4")
     if arguments.startup_timeout <= 0:
         raise RunnerError("--startup-timeout must be positive")
     if arguments.server_timeout_ms <= 0:
@@ -423,6 +430,11 @@ def main() -> int:
                 str(arguments.cluster_count),
                 "--core-mask",
                 hex(arguments.core_mask),
+                *(
+                    ["--cores-per-cluster", str(arguments.cores_per_cluster)]
+                    if arguments.cores_per_cluster is not None
+                    else []
+                ),
                 "--timeout-ms",
                 str(arguments.server_timeout_ms),
             ],
