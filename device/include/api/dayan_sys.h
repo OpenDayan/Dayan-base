@@ -90,6 +90,10 @@ extern "C" {
 #endif
 
 DAYAN_API void dayan_yield(void);
+/* Rename the current Proc or child Thread and record a new trace segment.
+ * Name must be nonempty and fit in DAYAN_THREAD_NAME_SIZE including NUL.
+ * Returns 0, or -EPERM / -EINVAL / -ENAMETOOLONG on failure. */
+DAYAN_API int dayan_set_proc_name(const char *name);
 /* Current Hart cycle timestamp from rdcycle, not wall-clock time.
  * Does not wait for execution units or synchronize Harts. Use dyperf for profiling. */
 DAYAN_API uint64_t dayan_get_time(void);
