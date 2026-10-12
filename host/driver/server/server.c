@@ -729,14 +729,19 @@ static int initialize_slots(dayan_server_t *server)
 {
     uint32_t cluster_mask = server->options.enabled_cluster_mask;
     uint32_t core_mask = server->options.enabled_core_mask;
+    uint32_t core_all = all_mask(server->hal_info.cores_per_cluster);
     size_t index;
 
     if (!cluster_mask)
         cluster_mask = all_mask(server->hal_info.cluster_count);
+    /* Cores beyond cores_per_cluster do not exist (a 1c RTL has no Core 1-3),
+     * so the mask is clipped to them. A request that names only absent Cores
+     * is an error, not "all Cores". */
     if (!core_mask)
-        core_mask = all_mask(server->hal_info.cores_per_cluster);
-    if ((cluster_mask & ~all_mask(server->hal_info.cluster_count)) ||
-        (core_mask & ~all_mask(server->hal_info.cores_per_cluster)))
+        core_mask = core_all;
+    else if (!(core_mask &= core_all))
+        return -EINVAL;
+    if (cluster_mask & ~all_mask(server->hal_info.cluster_count))
         return -EINVAL;
     server->options.enabled_cluster_mask = cluster_mask;
     server->options.enabled_core_mask = core_mask;
@@ -899,8 +904,10 @@ int dayan_server_create(dayan_server_t **server_out,
                server->hal_info.cores_per_cluster,
                server->hal_info.memory_region_count,
                (unsigned long long)server->hal_info.max_transfer_size);
-    /* NPUTaskMode::kFourCore is defined by the current 4-core Cluster ABI. */
-    if (server->hal_info.cores_per_cluster != 4U) {
+    /* NPUTaskMode::kFourCore is defined by the current 4-core Cluster ABI, so
+     * a Cluster cannot have more Cores; with fewer, only kSingleCore launches
+     * are accepted. */
+    if (server->hal_info.cores_per_cluster > 4U) {
         status = -ENOTSUP;
         goto fail;
     }

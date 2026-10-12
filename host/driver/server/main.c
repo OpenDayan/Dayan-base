@@ -89,7 +89,9 @@ static void usage(FILE *stream, const char *program)
             "  --cluster-count N       number of Clusters\n"
             "  --cluster-stride N      XDMA index stride per Cluster\n"
             "  --cluster-mask MASK     enabled Cluster mask\n"
-            "  --core-mask MASK        enabled Core mask within Cluster\n"
+            "  --cores-per-cluster N   Cores in each Cluster (default 4; 1 for a 1c RTL)\n"
+            "  --core-mask MASK        enabled Core mask within Cluster, clipped to\n"
+            "                          the low --cores-per-cluster bits\n"
             "  --timeout-ms N          Device operation timeout in milliseconds\n"
             "  --normal-memory-size-mib N  default Normal memory size in MiB\n"
             "  --enable-mmu 0|1        route Device addresses through the ClusterMMU\n"
@@ -272,6 +274,14 @@ int main(int argc, char **argv)
                                &dma.cluster_device_stride);
         else if (strcmp(argument, "--cluster-mask") == 0)
             status = parse_u32(value, &options.enabled_cluster_mask);
+        else if (strcmp(argument, "--cores-per-cluster") == 0) {
+            status = parse_u32(value, &options.hal.cores_per_cluster);
+            if (status == 0 &&
+                (!options.hal.cores_per_cluster ||
+                 options.hal.cores_per_cluster >
+                     NPU_HAL_MAX_CORES_PER_CLUSTER))
+                status = -EINVAL;
+        }
         else if (strcmp(argument, "--core-mask") == 0)
             status = parse_u32(value, &options.enabled_core_mask);
         else if (strcmp(argument, "--timeout-ms") == 0) {

@@ -316,6 +316,20 @@ int main(void)
     server_options.hal.memory_regions = regions;
     server_options.hal.memory_region_count =
         sizeof(regions) / sizeof(regions[0]);
+    /* The Core mask is clipped to the Cores a Cluster has. */
+    server_options.hal.cores_per_cluster = 1;
+    server_options.enabled_core_mask = 0xf;
+    assert(dayan_server_create(&server, &server_options) == 0);
+    assert(server->hal_info.cores_per_cluster == 1U);
+    assert(server->options.enabled_core_mask == 0x1U);
+    assert(server->slot_count == 1U && server->slots[0].enabled);
+    dayan_server_destroy(server);
+    server = 0;
+    server_options.enabled_core_mask = 0xe;
+    assert(dayan_server_create(&server, &server_options) == -EINVAL);
+    assert(!server);
+    server_options.hal.cores_per_cluster = 4;
+    server_options.enabled_core_mask = 0;
     assert(dayan_server_create(&server, &server_options) == 0);
     run.server = server;
     run.status = -1;
