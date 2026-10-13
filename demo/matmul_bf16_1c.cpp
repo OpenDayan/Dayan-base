@@ -233,6 +233,9 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
                               const uint16_t *a, const uint16_t *bt, float *c)
 {
     using namespace matmul_bf16_1c_detail;
+    // Host DMA may reuse a config address still cached by this Hart.
+    if (config)
+        dayan_cache_invalidate(config, sizeof(*config));
     if (!config_valid(config) || !a || !bt || !c ||
         ((uintptr_t)a & 1) || ((uintptr_t)bt & 1) || ((uintptr_t)c & 63) ||
         dayan_task_mode() != 1 || !dayan_task_dim(DAYAN_TASK_X) ||

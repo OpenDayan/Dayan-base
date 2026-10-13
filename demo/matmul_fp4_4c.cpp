@@ -291,6 +291,9 @@ __kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
                               const uint8_t *a, const uint8_t *bt, float *c)
 {
     using namespace matmul_fp4_4c_detail;
+    // Every Hart reads Host-written config through its own noncoherent cache.
+    if (config)
+        dayan_cache_invalidate(config, sizeof(*config));
     const int lane = dayan_task_id(DAYAN_TASK_X);
     if (!config_valid(config) || !a || !bt || !c || !shared ||
         ((uintptr_t)c & 63) ||

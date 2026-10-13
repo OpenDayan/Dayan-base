@@ -612,6 +612,26 @@ build/demo/matmul_fp4_4c
 也可使用 `[M N K]` 参数指定尺寸；Host 根据对应格式生成确定性输入，解码后
 计算 FP32 参考结果，报告最大绝对/相对误差及 PASS/FAIL。
 
+BF16（1c/4c）和 FP4 的配置通过 Host DMA 上传到 DRAM。Device CPU 的数据缓存
+与 DMA 不保持一致，buffer 地址复用后可能仍缓存上一个算子的尺寸和步长，因此每个
+Hart 在 kernel 入口、第一次解引用 `config` 之前执行
+`dayan_cache_invalidate(config, sizeof(*config))`。FP8 直接传递尺寸和步长标量，
+不会替其他算子刷新配置缓存；重复运行 FP8 不能修复旧 FP4 入口读到的缓存配置。
+
+切换回归应连接同一个四核 Server，期间不重启设备。在板子或 TestCluster 上执行：
+
+```sh
+make -C demo ../build/demo/matmul_bf16_1c ../build/demo/matmul_bf16_4c \
+  ../build/demo/matmul_fp8_4c ../build/demo/matmul_fp4_4c
+for op in matmul_bf16_4c matmul_fp4_4c matmul_fp4_4c matmul_fp8_4c \
+          matmul_fp4_4c matmul_bf16_1c matmul_fp4_4c; do
+  build/demo/"$op" 16 1024 640 || break
+done
+```
+
+每轮应通过数值校验，FP4 的行尾 padding 也应保持完整。cmodel 可验证数值和
+执行顺序，但其 QEMU CPU 不模拟这类数据缓存残留，不能单独验证此问题。
+
 ## 四 Core 直接广播性能模型
 
 `matmul_bf16_broadcast_4c` 建模更完整的未来广播指令：源端 Loader 的一次 D2U
