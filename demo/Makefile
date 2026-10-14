@@ -10,7 +10,6 @@ DEVICE_ISA_CHECK := ./check_device_isa.sh
 PRINT_TARGET := $(BUILD)/print_demo
 ADD_FP32_MACRO_TARGET := $(BUILD)/add_fp32_macro
 ADD_FP32_VEC_TARGET := $(BUILD)/add_fp32_vec
-FLASH_ATTENTION_1C_TARGET := $(BUILD)/flash_attention_1c
 FLASH_ATTENTION_TARGET := $(BUILD)/flash_attention
 TASK_GRID_PROBE_TARGET := $(BUILD)/task_grid_probe
 CONTEXT_THREAD_PROBE_TARGET := $(BUILD)/context_thread_probe
@@ -26,7 +25,6 @@ MATMUL_LOWP_TARGETS := $(BUILD)/matmul_fp8_4c $(BUILD)/matmul_fp4_4c
 PRINT_TEMPS := $(BUILD)/print_demo-temps
 ADD_FP32_MACRO_TEMPS := $(BUILD)/add_fp32_macro-temps
 ADD_FP32_VEC_TEMPS := $(BUILD)/add_fp32_vec-temps
-FLASH_ATTENTION_1C_TEMPS := $(BUILD)/flash_attention_1c-temps
 TASK_GRID_PROBE_TEMPS := $(BUILD)/task_grid_probe-temps
 CONTEXT_THREAD_PROBE_TEMPS := $(BUILD)/context_thread_probe-temps
 TENSOR_INTERRUPT_PROBE_TEMPS := $(BUILD)/tensor_interrupt_probe-temps
@@ -39,7 +37,7 @@ MATMUL_1C_TEMPS := $(BUILD)/matmul_bf16_1c-temps
 MATMUL_4C_TEMPS := $(BUILD)/matmul_bf16_4c-temps
 MATMUL_4C_BROADCAST_TEMPS := $(BUILD)/matmul_bf16_broadcast_4c-temps
 TARGETS := $(PRINT_TARGET) $(ADD_FP32_MACRO_TARGET) $(ADD_FP32_VEC_TARGET) \
-	$(FLASH_ATTENTION_1C_TARGET) $(FLASH_ATTENTION_TARGET) \
+	$(FLASH_ATTENTION_TARGET) \
 	$(TASK_GRID_PROBE_TARGET) \
 	$(CONTEXT_THREAD_PROBE_TARGET) \
 	$(TENSOR_INTERRUPT_PROBE_TARGET) \
@@ -79,15 +77,6 @@ $(ADD_FP32_VEC_TARGET): add_fp32_vec.cpp $(DAYAN_API_HEADERS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(ADD_FP32_VEC_TEMPS)/add_fp32_vec.cpp.dycc.device.o
-
-$(FLASH_ATTENTION_1C_TARGET): flash_attention_1c.cpp \
-		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
-		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
-	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(FLASH_ATTENTION_1C_TEMPS) \
-		-O2 -Wall -Wextra -Werror $< -o $@
-	bash $(DEVICE_ISA_CHECK) \
-		$(FLASH_ATTENTION_1C_TEMPS)/flash_attention_1c.cpp.dycc.device.o
 
 $(FLASH_ATTENTION_TARGET): flash_attention.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
@@ -203,7 +192,6 @@ check: all
 	$(PRINT_TARGET) --help >/dev/null
 	$(ADD_FP32_MACRO_TARGET) --help >/dev/null
 	$(ADD_FP32_VEC_TARGET) --help >/dev/null
-	$(FLASH_ATTENTION_1C_TARGET) --help >/dev/null
 	$(FLASH_ATTENTION_TARGET) --help >/dev/null
 	$(TASK_GRID_PROBE_TARGET) --help >/dev/null
 	$(CONTEXT_THREAD_PROBE_TARGET) --help >/dev/null

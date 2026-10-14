@@ -141,7 +141,7 @@ __device__ constexpr long kBr = 128;
 __device__ constexpr long kBc = 128;
 __device__ constexpr long kMaxHeadDim = 256;
 __device__ constexpr long kVecBytes = 256;
-__device__ constexpr long kLocalResources = kSlices + 5 * kSlices * kSlots + 4;
+__device__ constexpr long kLocalResources = kSlices + 6 * kSlices * kSlots + 4;
 __device__ constexpr long kSharedResources = 4;
 __device__ constexpr long kMatQK = 1;
 __device__ constexpr long kAtomicBytes = 128;
@@ -186,9 +186,10 @@ static inline dayan_resource_t q_resource(long slice) { return DAYAN_LOCAL_RESOU
 static inline dayan_resource_t score_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + slice * kSlots + slot); }
 static inline dayan_resource_t p_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + kSlices * kSlots + slice * kSlots + slot); }
 static inline dayan_resource_t pv_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + 2 * kSlices * kSlots + slice * kSlots + slot); }
-static inline dayan_resource_t state_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + 3 * kSlices * kSlots + slice * kSlots + slot); }
+static inline dayan_resource_t softmax_state_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + 3 * kSlices * kSlots + slice * kSlots + slot); }
 static inline dayan_resource_t o_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + 4 * kSlices * kSlots + slice * kSlots + slot); }
-static inline dayan_resource_t kv_resource(bool v, long slot) { return DAYAN_LOCAL_RESOURCE(kLocalResources - 4 + 2 * v + slot); }
+static inline dayan_resource_t kv_resource(bool v, long slot) { return DAYAN_LOCAL_RESOURCE(kSlices + 5 * kSlices * kSlots + 2 * v + slot); }
+static inline dayan_resource_t output_state_resource(long slice, long slot) { return DAYAN_LOCAL_RESOURCE(kLocalResources - kSlices * kSlots + slice * kSlots + slot); }
 static inline long tile_offset(long slice, long slot) {
     return slice * kContextBytes + kCtxTiles + slot * kTileBytes;
 }
@@ -706,7 +707,6 @@ static void softmax(void * argument) {
     const State & s = *(State *) argument;
     const long uram = (long) dayan_uram_base();
     uint64_t phases = 0;
-    uint64_t state_phases = 0;
     initialize_vec();
     for (uint64_t block = 0; block < s.blocks; ++block) {
         for (long ki = 0; ki < s.shared_keys(block); ++ki) {
@@ -716,10 +716,12 @@ static void softmax(void * argument) {
                 }
                 const long slot = ki & 1;
                 const uint64_t score = DAYAN_RESOURCE_MASK(score_resource(slice, slot));
-                const uint64_t state = DAYAN_RESOURCE_MASK(state_resource(slice, slot));
-                const uint64_t previous_state = ki == 0 ? 0 : DAYAN_RESOURCE_MASK(state_resource(slice, slot ^ 1));
-                // Publication phases also advance for the final state, which has no softmax reader.
-                check(dayan_resource_wait(state, score | previous_state, phases | (previous_state & ~state_phases), 0));
+                const auto state = softmax_state_resource(slice, slot);
+                const uint64_t current_state = DAYAN_RESOURCE_MASK(state);
+                const auto output_state = output_state_resource(slice, slot);
+                const uint64_t previous_state = ki == 0 ? 0 : DAYAN_RESOURCE_MASK(softmax_state_resource(slice, slot ^ 1));
+                // Both readers must release M/L/Alpha before this storage is reused.
+                check(dayan_resource_wait(current_state | DAYAN_RESOURCE_MASK(output_state), score | previous_state, phases, 0));
                 const bool masked = prepare_mask(s, uram, block, slice, ki);
                 const long base = uram + tile_offset(slice, slot);
                 const long previous = uram + tile_offset(slice, slot ^ 1);
@@ -733,9 +735,15 @@ static void softmax(void * argument) {
                 }
                 const bool last = ki + 1 == s.keys(block, slice, s.lane);
                 check(dayan_resource_produce_vec(p_resource(slice, slot), 1, score));
-                check(dayan_resource_produce_vec(state_resource(slice, slot), last ? 1 : 2, previous_state));
-                phases ^= score;
-                state_phases ^= state;
+                check(dayan_resource_produce_vec(state, 1, previous_state));
+                check(dayan_resource_produce_vec(output_state, 1, 0));
+                phases ^= score | previous_state;
+                if (last) {
+                    // Consume every softmax generation, including the tail with no next tile.
+                    check(dayan_resource_wait_ready(state, (phases & current_state) ? 1 : 0));
+                    check(dayan_resource_consume_vec(current_state));
+                    phases ^= current_state;
+                }
             }
         }
     }
@@ -889,7 +897,7 @@ static void output(void * argument) {
                 const auto o = o_resource(slice, slot);
                 const uint64_t current_o = DAYAN_RESOURCE_MASK(o);
                 const uint64_t previous_o = ki == 0 ? 0 : DAYAN_RESOURCE_MASK(o_resource(slice, slot ^ 1));
-                const uint64_t inputs = DAYAN_RESOURCE_MASK(pv_resource(slice, slot)) | DAYAN_RESOURCE_MASK(state_resource(slice, slot));
+                const uint64_t inputs = DAYAN_RESOURCE_MASK(pv_resource(slice, slot)) | DAYAN_RESOURCE_MASK(output_state_resource(slice, slot));
                 // Two version tokens serialize updates to the single O allocation.
                 check(dayan_resource_wait(current_o, inputs | previous_o, phases | (previous_o & ~o_phases), 0));
                 const long rows = s.rows(block, slice);
@@ -905,7 +913,7 @@ static void output(void * argument) {
                     if (normalize) update_output<false, true>(base, out);
                     else update_output<false, false>(base, out);
                 }
-                const uint64_t merge_state = last && s.split_kv ? DAYAN_RESOURCE_MASK(state_resource(slice, slot)) : 0;
+                const uint64_t merge_state = last && s.split_kv ? DAYAN_RESOURCE_MASK(output_state_resource(slice, slot)) : 0;
                 check(dayan_resource_produce_vec(o, 1, (inputs & ~merge_state) | previous_o));
                 phases ^= inputs;
                 o_phases ^= current_o;
@@ -1211,17 +1219,17 @@ __kernel__ void flash_attention_bf16_decode_4c(const FlashAttentionConfig * conf
 }
 
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_1c, 1, 6,
-    0, 1536U * 1024U, 6, 2, 2, 0, 26, 0);
+    0, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_1c, 1, 6,
-    0, 1536U * 1024U, 6, 2, 2, 0, 26, 0);
+    0, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_4c, 1, 6,
-    128, 1536U * 1024U, 6, 2, 2, 0, 26, 4);
+    128, 1536U * 1024U, 6, 2, 2, 0, 30, 4);
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_4c, 1, 6,
-    128, 1536U * 1024U, 6, 2, 2, 0, 26, 4);
+    128, 1536U * 1024U, 6, 2, 2, 0, 30, 4);
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_decode_4c, 1, 6,
-    128, 1536U * 1024U, 6, 2, 2, 0, 26, 0);
+    128, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_decode_4c, 1, 6,
-    128, 1536U * 1024U, 6, 2, 2, 0, 26, 0);
+    128, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 

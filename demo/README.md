@@ -10,7 +10,6 @@ demo/
 ├── Makefile
 ├── add_fp32_macro.cpp          # 最小 FP32 Add：LSU + MACRO
 ├── add_fp32_vec.cpp            # 最小 FP32 Add：LSU + VEC
-├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
 ├── flash_attention.cpp         # llama.cpp 优化版：FP16/BF16、1c/4c、Split-KV decode
 ├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
 ├── vec_peak.cpp                 # VEC 稳态吞吐微基准：实测值对比 128 FLOP/cycle 设计峰值
@@ -39,7 +38,7 @@ make -C demo
 产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
 `build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、`build/demo/vec_peak`、
 `build/demo/shared_notify_latency`、`build/demo/launch_latency`、
-`build/demo/flash_attention_1c`、`build/demo/flash_attention`、
+`build/demo/flash_attention`、
 `build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c`、
 `build/demo/matmul_fp8_4c`、`build/demo/matmul_fp4_4c` 和
 `build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
@@ -145,71 +144,24 @@ DAYAN_SERVER_SOCKET=/tmp/my-dayan.sock \
   build/demo/print_demo 1 2 3 4 5 6 7
 ```
 
-## 单 Core FP8/FP16 FlashAttention tile
-
-`flash_attention_1c` 固定处理 128 行、`D=128` 和 4 个 256-column KV tile。同一份 Device
-object 同时提供 `flash_attention_fp16_1c` 和 `flash_attention_fp8_1c` 两个 kernel，
-共享 tile、Resource 和 online-softmax 实现，不再通过编译宏二选一：
-
-```text
-S       = Q[128][128] FP16 x KT[4][256][128] FP16
-P       = exp2(S - M_new)
-L_new   = alpha * L_old + rowsum(P)
-O_acc   = alpha * O_acc + FP16(P) x VT[4][128][256] FP16
-O       = O_acc / L
-```
-
-Device 创建 LSU、MAT、VEC 三个 DAPI worker，并用 Resource 串联数据生命周期。
-KT/VT 双缓冲，score/P 三缓冲。MAT worker 使用两个常驻配置组，按
-`QK(0), QK(1), PV(0), QK(2), PV(1), ...` 交错执行，QK 和 PV 都各用一条覆盖
-128 row 的大 MAT 指令。Vec worker 在 softmax 流中原地计算 `alpha * O_acc`，随后
-在同一个 VFork 尾部用 VEC 将 P 从 FP32 转成连续 FP16；PV 直接以 `mma`
-累加到 URAM 中的 FP32 O_acc。
-LSU 的通用配置只写一次，循环中没有重复刷新整组 TCSR。
-
-唯一的 Vec worker 每个 KV tile 发射一次 `DIM2=15` 的 VFork，生成 16 个
-FlexVec task。硬件将 task 分配到两个 Vec Group，每组最多同时运行 8 个 thread，
-因此一次覆盖 `16 x 8 = 128` 行。每个 task 执行与 RVTNG
-`FlashAttentionVecFlowSpec` 的 online-softmax 流，并追加 O_acc 缩放及逐行
-FP32-to-FP16 convert/compress，共 421 条 FlexVec 指令；最终 normalization 使用
-另一个 50 条指令的 VFork。`KT` 和 `VT`
-分别按 key row 与 output-channel row 转置存储。Q 必须预先折叠 attention scale
-和 `log2(e)`，因为向量阶段直接计算 `exp2(score - newM)`。M/L 使用 Vec 的物理
-布局，每行标量复制 8 份。
-
-FP16 URAM 实际使用 936 KiB，descriptor 申请 960 KiB：Q 32 KiB、KT/VT 双缓冲
-256 KiB、score/P 三缓冲 576 KiB、O_acc 64 KiB、M/L 8 KiB，低于单 Core
-1.5 MiB 容量。
-
-Q/KT 的 swizzle 由 `host/visual_swizzle` 穷举选择，并在 LSU 写入和 MAT A/B
-读取两端配置相同的 M/B/S。FP8 的 128B stride 在线性布局下已经无冲突，采用显式
-identity `M=5,B=0,S=1`；FP16 Q/KT 的 256B stride 采用 `M=7,B=1,S=3`，VT 的
-512B stride 采用 `M=7,B=2,S=3`，模型中的每拍 Bank 峰值降为 1x。score/P
-目前保持 identity，因为 FlexVec TCSR
-尚未提供 swizzle 字段；MAT C、FlexVec 和 LSU 回写必须保持一致。
-
-`flash_attention_fp8_1c` kernel 暂时保留原来的 QK + online-softmax 路径，只校验
-P/M/L，不执行低精度 P 转换、PV 和 O normalization。Host 使用确定性输入并逐元素
-校验 FP16 O 或 FP8 P/M/L；可执行文件默认运行 FP16，`--fp8` 选择 FP8：
-
-```sh
-make -C demo ../build/demo/flash_attention_1c
-build/demo/flash_attention_1c
-build/demo/flash_attention_1c --fp8
-```
-
 ## FP16/BF16 FlashAttention 优化流水线
 
 `flash_attention.cpp` 将 llama.cpp 的
 `ggml/src/ggml-dayan/ggml-dayan-flash-attention.h` 移植为单文件 demo，
 包含配置、Device kernel、Host launcher 和 CPU 参考校验，不依赖 llama.cpp 头文件。
-原有 `flash_attention_1c.cpp` 保留固定形状的 FP16 和 FP8 示例。
+同一模块支持单核和四核，默认使用单核 FP16；`--cores 1 --bf16` 选择单核 BF16。
+单核入口实例化 `run<Format, 1, false>`，使用 30 个 Local Resource、0 个 Shared
+Resource，不执行跨核 barrier 或远端 K/V 复制。单核指每个 Task 使用一颗 Core，
+不绑定物理 Core 0；`--tasks` 可配置多个独立单核 Task。Split-KV 仅支持四核。
 
 每个 Core 使用两个 128-row Q slice，共享双缓冲的 128-column K/V tile。
 root 执行 QK，六个子 Thread 分别负责 Q/K/V 加载、softmax、PV 和输出更新，
-通过 26 个 Local Resource 管理缓冲区和状态版本。score 原地转为 FP32 P，
+通过 30 个 Local Resource 管理缓冲区和状态版本。score 原地转为 FP32 P，
 PV 使用 `TF32 × FP16/BF16 -> FP32`，省去单独的 P16 缓冲区和格式转换。
 alpha、M/L、PV 存在 URAM 中供不同阶段或下一轮使用；O 在最后一块更新时归一化。
+softmax 和 output 各用一组单消费者 State Resource；复用 M/L/alpha 存储前，
+两组都必须 FREE。softmax 自己消费末 tile 的 State，每个 Resource 都逐代消费，
+不再与 output 共用消费计数或跳过尾代。Split-KV 的 output State 保留到合并结束。
 每核申请 1536 KiB URAM，布局实际占用 1489 KiB。
 
 四核 prefill 用四个 Shared Resource 选出 K/V loader，其余 Core 从 loader 的
@@ -245,6 +197,9 @@ build/demo/flash_attention --help
 
 # 使用已启动的 Dayan Server；默认 FP16、单核、B=1、Hq=4、Hkv=2、Q=256、KV=512、D=128
 DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention
+
+# 单核 BF16
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention --cores 1 --bf16
 
 # 四核 prefill，因果掩码、Q/KV 尾块、带 padding 的 stride，以及两次重复 launch
 DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention \
