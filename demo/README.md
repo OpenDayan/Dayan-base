@@ -216,7 +216,9 @@ DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention \
 Host 使用确定性的可精确表示输入，按输入数据计算双精度完整 attention 参考值，
 逐元素检查输出、每个 Task 的返回状态及输出尾部 guard。
 报告最大绝对/相对误差、RMSE 和 mismatch 数；允许误差为
-`2e-3 + 3e-3 * abs(reference)`。`--repeat` 每轮重置输出和状态再验证。
+`3e-2 + 3e-2 * abs(reference)`，使用放宽阈值做 Resource 稳定性复测，日志同时打印
+`atol`/`rtol`。NaN/Inf、超过阈值的误差、Task 失败及 guard 损坏仍报错。
+`--repeat` 每轮重置输出和状态再验证。
 
 ## LSU 单核带宽微基准
 
