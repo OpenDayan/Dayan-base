@@ -231,15 +231,15 @@ const npu_service_options_t *npu_service_get_options(
  * returns -ENOTSUP because there is no virtual address to hand out and the
  * caller must keep using the physical one.
  */
-#define NPU_SERVICE_MMU_READ        (1U << 0)
-#define NPU_SERVICE_MMU_WRITE       (1U << 1)
-#define NPU_SERVICE_MMU_EXEC        (1U << 2)
+#define NPU_SERVICE_MMU_READ        NPU_HAL_MMU_READ
+#define NPU_SERVICE_MMU_WRITE       NPU_HAL_MMU_WRITE
+#define NPU_SERVICE_MMU_EXEC        NPU_HAL_MMU_EXEC
 
-/* Buffer mapping granularity: one Sv39 level-1 leaf.  Everything mapped
- * through this API - like the firmware window - is 2 MiB, so va, pa and size
- * must all be 2 MiB multiples. */
-#define NPU_SERVICE_MMU_PAGE_SIZE   UINT64_C(0x200000)
-#define NPU_SERVICE_MMU_PAGE_MASK   UINT64_C(0x1fffff)
+/* Buffer mapping granularity: one Sv39 level-1 leaf, as the HAL page tables
+ * map.  Everything mapped through this API - like the firmware window - is
+ * 2 MiB, so va, pa and size must all be 2 MiB multiples. */
+#define NPU_SERVICE_MMU_PAGE_SIZE   NPU_HAL_MMU_LEAF_SIZE
+#define NPU_SERVICE_MMU_PAGE_MASK   NPU_HAL_MMU_LEAF_MASK
 
 /*
  * Physical address behind a firmware virtual address.  The firmware's

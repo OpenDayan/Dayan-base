@@ -50,7 +50,7 @@ dayan_server --backend soc-mmap \
 | Host PA | `/dev/mem` 的 mmap 偏移 | `--soc-base`、`--soc-ddr-base` |
 | IP offset | 模块在 Cluster IP 地址窗口中的位置。NPU 在 `CONFIG_CONTROL_BASE = 0` 处看到该窗口，因此它也是该模块的 NPU 侧地址 | `device/include/platform_regs.h` |
 | NPU 侧 DDR PA | NPU 主端口访问共享 DDR 使用的地址，可以与 Host PA 不同 | `--soc-ddr-npu-base` |
-| ClusterMMU VA | 开启 MMU 后固件与算子使用的地址，经页表翻译为 NPU 侧 PA。HAL 只处理 PA | `server/mmu.c` |
+| ClusterMMU VA | 开启 MMU 后固件与算子使用的地址，经页表翻译为 NPU 侧 PA。页表由 HAL 维护，映射策略在 Service；HAL 其余接口只处理 PA | `hal/mmu_pt.c`、`server/mmu.c` |
 
 翻译规则：
 

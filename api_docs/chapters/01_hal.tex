@@ -155,6 +155,29 @@ XDMA 可选的 \code{_user} 节点使用相对寄存器偏移；没有该节点�
 设备文件返回 \code{EIO}、\code{ENODEV}、\code{EBADF} 等不可恢复错误时，HAL 会保存
 首个错误。后续控制操作直接返回该错误，Server 据此停止服务。
 
+\subsection{ClusterMMU 页表}
+
+HAL 只提供页表机制：每个 Cluster 一张 Sv39 页表，统一使用 2 MiB level-1 叶子，
+并在每类 Fault 的 redirect 基址后面放一页 guard page。映射哪些地址、固件窗口放在哪里、
+何时可以安全地 flush TLB，都由 Service 决定（\code{server/mmu.c}）。这些接口都不会
+flush；解除映射或收窄权限后，旧 TLB 条目一直有效，直到调用方在 Cluster 空闲时调用
+\code{npu_hal_mmu_flush}。va、pa、size 必须按 2 MiB 对齐，va 必须落在
+\code{NPU_HAL_MMU_BYPASS_LIMIT}（2 GiB，以下由硬件旁路）到
+\code{NPU_HAL_MMU_VA_LIMIT}（Sv39 上限）之间。
+
+\begin{dayantable}{HAL ClusterMMU API}{tab:api-hal-mmu}{X[39,l] X[61,l]}
+  API & 行为 \\
+  \code{npu_hal_mmu_read_reg} / \code{npu_hal_mmu_write_reg} / \code{npu_hal_mmu_read64} / \code{npu_hal_mmu_write64} & 读写 MMU APB 寄存器；硬件会静默丢弃的未对齐基址和超过 56 位的值直接返回 \code{-EINVAL}。 \\
+  \code{npu_hal_mmu_present} & 只读探测 Cluster 是否有 MMU。 \\
+  \code{npu_hal_mmu_flush} & 失效 Cluster TLB。调用方必须保证该 Cluster 没有在途 AXI 事务，否则硬件永久挂死。 \\
+  \code{npu_hal_mmu_create} & 为每个 Cluster 建空页表和 guard page，写 PTW\_BASE、GLOBAL\_ASID 和 redirect 基址；页表页从调用方给出的内存池顶部向下预留。不打开翻译。 \\
+  \code{npu_hal_mmu_activate} / \code{npu_hal_mmu_deactivate} & 把 FixMap 收窄到低 2 GiB，使高地址走页表；或恢复复位时的全范围直通。 \\
+  \code{npu_hal_mmu_map} & 安装 2 MiB 叶子；已有映射返回 \code{-EEXIST}，失败时撤回本次已装的叶子。 \\
+  \code{npu_hal_mmu_unmap} / \code{npu_hal_mmu_protect} & 清除叶子，或原地改写权限；不 flush。 \\
+  \code{npu_hal_mmu_check_faults} & 采样 guard page，报告 Fault 类别和 VA[11:0] 并恢复该页。 \\
+  \code{npu_hal_mmu_destroy} & 必要时先恢复直通，再释放所有页表和 guard page。 \\
+\end{dayantable}
+
 \subsection{物理内存管理}
 
 \begin{dayantable}{HAL 内存管理 API}{tab:api-hal-memory}{X[39,l] X[61,l]}

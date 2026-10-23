@@ -75,19 +75,15 @@ struct npu_service_cluster {
 };
 
 /*
- * Nothing below 2 GiB is mapped.  The MMU bypasses that whole range before it
- * ever consults a page table, so the control window, the BL0 ROM and URAM need
- * no PTEs and must not be given any: a mapping here would be dead weight that
- * disagrees with the hardware it is supposed to describe.  Only the firmware
- * window and Buffers are translated.
+ * Nothing below 2 GiB (NPU_HAL_MMU_BYPASS_LIMIT) is mapped.  The MMU bypasses
+ * that whole range before it ever consults a page table, so the control
+ * window, the BL0 ROM and URAM need no PTEs, and the HAL refuses to install
+ * any.  Only the firmware window and Buffers are translated.
  *
  * This makes the firmware and QEMU version-locked.  A firmware that maps
  * nothing below 2 GiB against a QEMU that still translates the whole space
  * sends every low access into an empty table, redirected to a guard page.
- */
-#define NPU_SERVICE_MMU_BYPASS_LIMIT UINT64_C(0x80000000)
-
-/*
+ *
  * The firmware window.  Its virtual base is fixed by device/linker.ld (which
  * places every section at CONFIG_RAM_BASE), so the firmware needs no rebuild
  * and its internal pointers stay valid.  Its physical base is chosen by the
@@ -112,19 +108,6 @@ struct npu_service_cluster {
 #define NPU_SERVICE_MMU_VA_SENTINEL NPU_SERVICE_MMU_LARGE_SIZE
 
 /*
- * One Sv39 table.  @entries is a Host shadow of the device-resident table at
- * @device_address: the Host cannot dereference device memory, so entries are
- * edited here and pushed across.  @children mirrors the interior links so a
- * walk never has to read them back.
- */
-struct npu_mmu_table {
-    uint64_t device_address;
-    npu_hal_allocation_t *allocation;
-    uint64_t *entries;
-    struct npu_mmu_table **children;
-};
-
-/*
  * An allocation whose PTEs are cleared but which must not be freed until a
  * TLB flush has happened.  The flush can only be issued when the device is
  * idle, so release is two-phase; see npu_service_mmu_defer_reclaim().
@@ -135,18 +118,12 @@ struct npu_mmu_reclaim {
     struct npu_mmu_reclaim *next;
 };
 
-/* Per-Cluster guard pages, one per redirect class. */
-struct npu_mmu_cluster {
-    npu_hal_allocation_t *guard_allocation[6];
-    uint64_t guard_address[6];
-};
-
 struct npu_mmu {
     pthread_mutex_t lock;
     uint32_t enabled;
     uint32_t cluster_count;
-    struct npu_mmu_table **root;
-    struct npu_mmu_cluster *clusters;
+    /* Page tables and guard pages, owned by the HAL (hal/mmu_pt.c). */
+    npu_hal_mmu_t *tables;
     struct npu_mmu_reclaim *reclaim;
     uint64_t va_next;
     uint64_t va_limit;
@@ -157,13 +134,6 @@ struct npu_mmu {
      */
     uint64_t fw_pool_base;
     uint64_t fw_pool_size;
-    /*
-     * Downward cursor for page tables and guard pages, from the top of the
-     * firmware pool.  The pool's base is the Host's choice, but the firmware's
-     * offset inside it is not - BL1's segments start at fw_pool_base - so MMU
-     * pages are taken from the far end.
-     */
-    uint64_t pool_cursor;
 };
 
 struct npu_service_heap_allocation {
