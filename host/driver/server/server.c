@@ -1115,12 +1115,14 @@ static int memory_request_for_buffer(dayan_server_t *server,
     memory.size = request->size;
     memory.alignment = request->alignment;
     /*
-     * With translation on, a Buffer has to be mappable, and the smallest thing
-     * the ClusterMMU can map is one 4 KiB page.  The Runtime's default
-     * alignment is far smaller than that, so without this the allocator hands
-     * back an unaligned physical address and buffer_map_locked() has no page
-     * to install.  Rounding the size up too keeps a page from spanning two
-     * Buffers, which would leak one Buffer's permissions onto the other.
+     * With translation on, a Buffer has to be mappable, and Buffers are mapped
+     * with 2 MiB leaves, whose physical base the walker requires to be 2 MiB
+     * aligned.  The Runtime's default alignment is far smaller than that, so
+     * without this the allocator hands back an unaligned physical address and
+     * buffer_map_locked() has no leaf to install.  Rounding the size up too
+     * keeps a leaf from spanning two Buffers, which would leak one Buffer's
+     * permissions onto the other - at the cost of every Buffer occupying at
+     * least 2 MiB of Normal memory.
      */
     if (server->options.service.enable_mmu) {
         if (memory.alignment < NPU_SERVICE_MMU_PAGE_SIZE)

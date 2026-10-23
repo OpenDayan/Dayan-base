@@ -235,11 +235,11 @@ const npu_service_options_t *npu_service_get_options(
 #define NPU_SERVICE_MMU_WRITE       (1U << 1)
 #define NPU_SERVICE_MMU_EXEC        (1U << 2)
 
-/* Buffer mapping granularity.  The firmware window uses 2 MiB leaves, but
- * that is internal to the page-table manager; everything mapped through this
- * API is 4 KiB. */
-#define NPU_SERVICE_MMU_PAGE_SIZE   UINT64_C(0x1000)
-#define NPU_SERVICE_MMU_PAGE_MASK   UINT64_C(0xfff)
+/* Buffer mapping granularity: one Sv39 level-1 leaf.  Everything mapped
+ * through this API - like the firmware window - is 2 MiB, so va, pa and size
+ * must all be 2 MiB multiples. */
+#define NPU_SERVICE_MMU_PAGE_SIZE   UINT64_C(0x200000)
+#define NPU_SERVICE_MMU_PAGE_MASK   UINT64_C(0x1fffff)
 
 /*
  * Physical address behind a firmware virtual address.  The firmware's

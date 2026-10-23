@@ -102,10 +102,9 @@ struct npu_service_cluster {
  */
 #define NPU_SERVICE_MMU_FW_VA_BASE  UINT64_C(0x80000000)
 
-/* 2 MiB Sv39 leaf, used only for the firmware window: permissions there are
- * uniform and the pool base is 2 MiB-aligned.  Buffers stay on 4 KiB leaves so
- * each keeps its own permissions and its own out-of-bounds granularity. */
-#define NPU_SERVICE_MMU_LARGE_SIZE  UINT64_C(0x00200000)
+/* 2 MiB Sv39 leaf.  The firmware window and Buffers both map with it, so
+ * permissions and out-of-bounds detection are per 2 MiB, not per 4 KiB. */
+#define NPU_SERVICE_MMU_LARGE_SIZE  NPU_SERVICE_MMU_PAGE_SIZE
 
 /* Unmapped gap between the firmware window and the Buffer VA window, so an
  * overrun off the end of the firmware window faults instead of sliding into

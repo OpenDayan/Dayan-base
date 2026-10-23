@@ -59,6 +59,8 @@
 #define FW_VA_BASE         NPU_SERVICE_MMU_FW_VA_BASE
 #define BUFFER_VA_BASE     (FW_VA_BASE + FW_POOL_SIZE + \
                             NPU_SERVICE_MMU_VA_SENTINEL)
+/* One Buffer mapping leaf: 2 MiB, the same size as a firmware-window leaf. */
+#define LEAF               NPU_SERVICE_MMU_PAGE_SIZE
 
 /* Fake device memory, so page tables can be read back and inspected. */
 static unsigned char device_memory[DEVICE_MEMORY_SIZE];
@@ -625,10 +627,21 @@ static void test_pte_encoding_and_walk(void)
 
     /* A W|X mapping, to check every permission bit is placed correctly. */
     assert(npu_service_mmu_map(&device, 0, UINT64_C(0x200000000),
-                               DEVICE_MEMORY_BASE + 0x10000, 0x2000,
+                               DEVICE_MEMORY_BASE + LEAF, 2 * LEAF,
                                NPU_SERVICE_MMU_READ | NPU_SERVICE_MMU_WRITE |
                                NPU_SERVICE_MMU_EXEC) == 0);
-    pte = walk_device(root, UINT64_C(0x200000000));
+    {
+        int level = -1;
+
+        /* A Buffer is a 2 MiB leaf at level 1, like the firmware window; a
+         * level-0 leaf would pass every other assertion below. */
+        pte = walk_device_level(root, UINT64_C(0x200000000), &level);
+        assert(level == 1);
+        /* Any address inside the leaf resolves through it. */
+        assert(walk_device_level(root, UINT64_C(0x200000000) + LEAF - 0x1000,
+                                 &level) == pte);
+        assert(level == 1);
+    }
     assert(pte & PTE_V);
     assert(pte & PTE_R);
     assert(pte & PTE_W);
@@ -639,14 +652,14 @@ static void test_pte_encoding_and_walk(void)
     assert(pte & PTE_D);
     assert(pte & PTE_U);
     assert(pte & PTE_G);
-    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + 0x10000);
-    /* The second page of the range resolves independently. */
-    pte = walk_device(root, UINT64_C(0x200000000) + 0x1000);
-    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + 0x11000);
+    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + LEAF);
+    /* The second leaf of the range resolves independently. */
+    pte = walk_device(root, UINT64_C(0x200000000) + LEAF);
+    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + 2 * LEAF);
 
     /* Read-only must not carry W, or a redirect would never trigger. */
     assert(npu_service_mmu_map(&device, 0, UINT64_C(0x300000000),
-                               DEVICE_MEMORY_BASE + 0x20000, 0x1000,
+                               DEVICE_MEMORY_BASE + 4 * LEAF, LEAF,
                                NPU_SERVICE_MMU_READ) == 0);
     pte = walk_device(root, UINT64_C(0x300000000));
     assert((pte & PTE_R) && !(pte & PTE_W) && !(pte & PTE_X));
@@ -654,57 +667,79 @@ static void test_pte_encoding_and_walk(void)
     /* Double mapping the same VA is a bookkeeping bug, not something to
      * silently overwrite. */
     assert(npu_service_mmu_map(&device, 0, UINT64_C(0x300000000),
-                               DEVICE_MEMORY_BASE + 0x21000, 0x1000,
+                               DEVICE_MEMORY_BASE + 5 * LEAF, LEAF,
                                NPU_SERVICE_MMU_READ) == -EEXIST);
     /*
      * A range that fails part-way must leave nothing behind.  The caller
      * frees the backing memory on failure, so a leaf installed for the first
-     * page would otherwise point at memory about to be reused.
+     * part would otherwise point at memory about to be reused.
      */
-    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x2ffffe000),
-                               DEVICE_MEMORY_BASE + 0x30000, 0x3000,
+    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x300000000) - 2 * LEAF,
+                               DEVICE_MEMORY_BASE + 6 * LEAF, 3 * LEAF,
                                NPU_SERVICE_MMU_READ) == -EEXIST);
-    assert(walk_device(root, UINT64_C(0x2ffffe000)) == 0);
-    assert(walk_device(root, UINT64_C(0x2fffff000)) == 0);
-    /* The colliding page itself is untouched. */
+    assert(walk_device(root, UINT64_C(0x300000000) - 2 * LEAF) == 0);
+    assert(walk_device(root, UINT64_C(0x300000000) - LEAF) == 0);
+    /* The colliding leaf itself is untouched. */
     pte = walk_device(root, UINT64_C(0x300000000));
-    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + 0x20000);
+    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + 4 * LEAF);
 
-    /* Misalignment and zero length are rejected rather than rounded. */
-    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000) + 1,
+    /* Misalignment and zero length are rejected rather than rounded.  4 KiB
+     * alignment is no longer enough: a 2 MiB leaf with an unaligned PPN is
+     * an ILLEGAL_PTE to the walker. */
+    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000) + 0x1000,
+                               DEVICE_MEMORY_BASE, LEAF,
+                               NPU_SERVICE_MMU_READ) == -EINVAL);
+    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000),
+                               DEVICE_MEMORY_BASE + 0x1000, LEAF,
+                               NPU_SERVICE_MMU_READ) == -EINVAL);
+    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000),
                                DEVICE_MEMORY_BASE, 0x1000,
                                NPU_SERVICE_MMU_READ) == -EINVAL);
     assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000),
-                               DEVICE_MEMORY_BASE + 1, 0x1000,
-                               NPU_SERVICE_MMU_READ) == -EINVAL);
-    assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000),
-                               DEVICE_MEMORY_BASE, 0x800,
+                               DEVICE_MEMORY_BASE, 0,
                                NPU_SERVICE_MMU_READ) == -EINVAL);
     /* A PA beyond 56 bits cannot be encoded. */
     assert(npu_service_mmu_map(&device, 0, UINT64_C(0x400000000),
-                               UINT64_C(0x0100000000000000), 0x1000,
+                               UINT64_C(0x0100000000000000), LEAF,
                                NPU_SERVICE_MMU_READ) == -EINVAL);
 
     /* protect() narrows in place and keeps the PA. */
-    assert(npu_service_mmu_protect(&device, 0, UINT64_C(0x200000000), 0x1000,
+    assert(npu_service_mmu_protect(&device, 0, UINT64_C(0x200000000), LEAF,
                                    NPU_SERVICE_MMU_READ) == 0);
     pte = walk_device(root, UINT64_C(0x200000000));
     assert((pte & PTE_R) && !(pte & PTE_W) && !(pte & PTE_X));
-    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + 0x10000);
+    assert(pte_pa(pte) == DEVICE_MEMORY_BASE + LEAF);
     /* Nothing mapped there means nothing to protect. */
-    assert(npu_service_mmu_protect(&device, 0, UINT64_C(0x500000000), 0x1000,
+    assert(npu_service_mmu_protect(&device, 0, UINT64_C(0x500000000), LEAF,
                                    NPU_SERVICE_MMU_READ) == -ENOENT);
+    assert(npu_service_mmu_protect(&device, 0, UINT64_C(0x200000000), 0x1000,
+                                   NPU_SERVICE_MMU_READ) == -EINVAL);
+
+    /*
+     * The firmware window's leaves sit at the same level as a Buffer's, so a
+     * walk no longer trips over them on the way down.  unmap and protect must
+     * refuse the range outright, or a stray call would pull the firmware's
+     * own memory out from under it.
+     */
+    assert(npu_service_mmu_unmap(&device, 0, FW_VA_BASE, LEAF) == -EINVAL);
+    assert(npu_service_mmu_protect(&device, 0, FW_VA_BASE + LEAF, LEAF,
+                                   NPU_SERVICE_MMU_READ) == -EINVAL);
+    pte = walk_device(root, FW_VA_BASE);
+    assert(pte_pa(pte) == FW_POOL_BASE && (pte & PTE_X));
+    pte = walk_device(root, FW_VA_BASE + LEAF);
+    assert((pte & PTE_W) && (pte & PTE_X));
 
     /* unmap clears the leaf in device memory... */
     assert(npu_service_mmu_unmap(&device, 0, UINT64_C(0x200000000),
-                                 0x2000) == 0);
+                                 2 * LEAF) == 0);
     assert(walk_device(root, UINT64_C(0x200000000)) == 0);
+    assert(walk_device(root, UINT64_C(0x200000000) + LEAF) == 0);
     /* ...and does not flush: that is the caller's, once the device is idle. */
     assert(flush_count == 0);
     /* Unmapping an absent range is not an error; reclaim retries are
      * allowed to be sloppy. */
     assert(npu_service_mmu_unmap(&device, 0, UINT64_C(0x600000000),
-                                 0x1000) == 0);
+                                 LEAF) == 0);
 
     npu_service_mmu_fini(&device);
 }
@@ -731,17 +766,20 @@ static void test_va_allocator(void)
      * colliding, which is what makes an overrun off the top of the firmware
      * window fault instead of sliding into Buffer space. */
     assert(npu_service_mmu_map(&device, 0, FW_VA_BASE + FW_POOL_SIZE,
-                               DEVICE_MEMORY_BASE, 0x1000,
+                               DEVICE_MEMORY_BASE, LEAF,
                                NPU_SERVICE_MMU_READ) == 0);
     assert(npu_service_mmu_unmap(&device, 0, FW_VA_BASE + FW_POOL_SIZE,
-                                 0x1000) == 0);
+                                 LEAF) == 0);
     assert(npu_service_mmu_reserve_va(&device, 0x1000, &second) == 0);
     /* Ranges never overlap and never come back, so a new Context can never
      * inherit an address another Context still has TLB entries for. */
-    assert(second >= first + 0x1000);
-    /* Sub-page requests are rounded up to a whole page. */
+    assert(second >= first + LEAF);
+    /* Sub-leaf requests are rounded up to a whole 2 MiB leaf, so every
+     * range starts on a boundary a leaf can map. */
+    assert(second == first + LEAF);
     assert(npu_service_mmu_reserve_va(&device, 1, &third) == 0);
-    assert(third >= second + 0x1000);
+    assert(third == second + LEAF);
+    assert(!(third & (LEAF - 1U)));
     /* Releasing does not recycle: the next reservation still moves forward. */
     npu_service_mmu_release_va(&device, first, 0x1000);
     {

@@ -36,7 +36,11 @@
 
 #include "platform_regs.h"
 
-/* Sv39: three levels of 512 entries, 4 KiB pages. */
+/*
+ * Sv39: three levels of 512 entries.  Every mapping is a 2 MiB level-1 leaf,
+ * so only the root and level-1 tables exist; DAYAN_MMU_PAGE_SHIFT (12) is
+ * still the PPN unit and the size of a table.
+ */
 #define NPU_MMU_PTE_V           UINT64_C(0x001)
 #define NPU_MMU_PTE_R           UINT64_C(0x002)
 #define NPU_MMU_PTE_W           UINT64_C(0x004)
@@ -253,11 +257,10 @@ static void npu_mmu_table_free(npu_service_device_t *device,
  * because every entry write has to be mirrored to device memory and so needs
  * to know which table it belongs to.
  *
- * @stop_level 0 is a 4 KiB leaf, 1 a 2 MiB leaf.  A level-1 slot reached this
- * way must be empty before it is written as a leaf: an interior entry already
- * there means 4 KiB mappings exist underneath, and overwriting it would strand
- * them.  The callers check that (npu_mmu_map_firmware_window() refuses a slot
- * with V set), and a create-walk down *through* a level-1 leaf is refused here.
+ * @stop_level 0 is a 4 KiB leaf, 1 a 2 MiB leaf.  Every caller now stops at
+ * level 1, so no level-0 table is ever created.  A level-1 slot reached this
+ * way must be empty before it is written as a leaf; the callers check that
+ * (both map paths refuse a slot with V set).
  */
 static int npu_mmu_walk_level(npu_service_device_t *device, uint32_t cluster,
                               uint64_t va, int create, unsigned stop_level,
@@ -276,12 +279,10 @@ static int npu_mmu_walk_level(npu_service_device_t *device, uint32_t cluster,
             int status;
 
             /*
-             * A valid entry with no child is a leaf - a 2 MiB firmware-window
-             * leaf, since those are the only ones installed above level 0.
-             * Descending would mean replacing it with an interior entry and
-             * unmapping the 2 MiB it covers, so refuse instead.  The firmware
-             * window and the Buffer range are disjoint by construction, which
-             * is why this is a guard and not a live path.
+             * A valid entry with no child is a leaf.  Descending would mean
+             * replacing it with an interior entry and unmapping everything it
+             * covers, so refuse instead.  Nothing installs leaves above level
+             * 1, which is why this is a guard and not a live path.
              */
             if (table->entries[index] & NPU_MMU_PTE_V)
                 return -EEXIST;
@@ -316,12 +317,13 @@ static int npu_mmu_walk_level(npu_service_device_t *device, uint32_t cluster,
     return 0;
 }
 
+/* Walk to the 2 MiB leaf slot for @va, as every Buffer mapping uses. */
 static int npu_mmu_walk(npu_service_device_t *device, uint32_t cluster,
                         uint64_t va, int create,
                         struct npu_mmu_table **table_out, uint32_t *index_out)
 {
-    return npu_mmu_walk_level(device, cluster, va, create, 0, table_out,
-                              index_out);
+    return npu_mmu_walk_level(device, cluster, va, create,
+                              NPU_MMU_LARGE_LEVEL, table_out, index_out);
 }
 
 /* ---------------------------------------------------------------- */
@@ -740,7 +742,8 @@ int npu_service_mmu_reserve_va(npu_service_device_t *device, uint64_t size,
         *base_out = 0;
         return -ENOTSUP;
     }
-    aligned = (size + DAYAN_MMU_PAGE_MASK) & ~(uint64_t)DAYAN_MMU_PAGE_MASK;
+    aligned = (size + NPU_SERVICE_MMU_PAGE_MASK) &
+              ~(uint64_t)NPU_SERVICE_MMU_PAGE_MASK;
     if (aligned < size)
         return -EOVERFLOW;
     pthread_mutex_lock(&mmu->lock);
@@ -771,6 +774,19 @@ void npu_service_mmu_release_va(npu_service_device_t *device, uint64_t base,
 /* Mapping                                                           */
 /* ---------------------------------------------------------------- */
 
+/*
+ * Whether [va, va + size) touches the firmware window.  Its leaves are the
+ * same 2 MiB level-1 entries a Buffer uses, so nothing but the window's own
+ * setup may write them: map would alias a firmware page, and unmap or protect
+ * would pull the firmware's own memory out from under it.
+ */
+static int npu_mmu_overlaps_fw_window(const struct npu_mmu *mmu, uint64_t va,
+                                      uint64_t size)
+{
+    return va < NPU_SERVICE_MMU_FW_VA_BASE + mmu->fw_pool_size &&
+           va + size > NPU_SERVICE_MMU_FW_VA_BASE;
+}
+
 int npu_service_mmu_map(npu_service_device_t *device, uint32_t cluster,
                         uint64_t va, uint64_t pa, uint64_t size, uint32_t prot)
 {
@@ -783,8 +799,10 @@ int npu_service_mmu_map(npu_service_device_t *device, uint32_t cluster,
     mmu = &device->mmu;
     if (!mmu->enabled)
         return 0;
-    if ((va & DAYAN_MMU_PAGE_MASK) || (pa & DAYAN_MMU_PAGE_MASK) ||
-        (size & DAYAN_MMU_PAGE_MASK) || !size)
+    /* The walker raises ILLEGAL_PTE for a 2 MiB leaf whose PPN is not 2 MiB
+     * aligned, so a misaligned pa is refused here rather than faulting. */
+    if ((va & NPU_SERVICE_MMU_PAGE_MASK) || (pa & NPU_SERVICE_MMU_PAGE_MASK) ||
+        (size & NPU_SERVICE_MMU_PAGE_MASK) || !size)
         return -EINVAL;
     if (va > UINT64_MAX - size || pa > UINT64_MAX - size)
         return -EOVERFLOW;
@@ -798,17 +816,16 @@ int npu_service_mmu_map(npu_service_device_t *device, uint32_t cluster,
     if (va < NPU_SERVICE_MMU_BYPASS_LIMIT)
         return -EINVAL;
     /*
-     * The firmware window is owned by npu_mmu_map_firmware_window() and mapped
-     * with 2 MiB leaves.  A 4 KiB mapping landing inside it would either
-     * collide with a large leaf or, worse, silently give a second virtual
-     * address to a physical page that already has one.
+     * The firmware window is owned by npu_mmu_map_firmware_window().  A
+     * mapping landing inside it would either collide with one of its leaves
+     * or, worse, silently give a second virtual address to a physical page
+     * that already has one.
      */
-    if (va < NPU_SERVICE_MMU_FW_VA_BASE + mmu->fw_pool_size &&
-        va + size > NPU_SERVICE_MMU_FW_VA_BASE)
+    if (npu_mmu_overlaps_fw_window(mmu, va, size))
         return -EINVAL;
 
     pthread_mutex_lock(&mmu->lock);
-    for (offset = 0; offset < size; offset += DAYAN_MMU_PAGE_SIZE) {
+    for (offset = 0; offset < size; offset += NPU_SERVICE_MMU_PAGE_SIZE) {
         struct npu_mmu_table *table = 0;
         uint32_t index = 0;
 
@@ -835,7 +852,7 @@ int npu_service_mmu_map(npu_service_device_t *device, uint32_t cluster,
          */
         uint64_t undo;
 
-        for (undo = 0; undo < offset; undo += DAYAN_MMU_PAGE_SIZE) {
+        for (undo = 0; undo < offset; undo += NPU_SERVICE_MMU_PAGE_SIZE) {
             struct npu_mmu_table *table = 0;
             uint32_t index = 0;
 
@@ -873,11 +890,16 @@ int npu_service_mmu_unmap(npu_service_device_t *device, uint32_t cluster,
     mmu = &device->mmu;
     if (!mmu->enabled)
         return 0;
-    if ((va & DAYAN_MMU_PAGE_MASK) || (size & DAYAN_MMU_PAGE_MASK))
+    if ((va & NPU_SERVICE_MMU_PAGE_MASK) ||
+        (size & NPU_SERVICE_MMU_PAGE_MASK))
+        return -EINVAL;
+    if (va > UINT64_MAX - size)
+        return -EOVERFLOW;
+    if (npu_mmu_overlaps_fw_window(mmu, va, size))
         return -EINVAL;
 
     pthread_mutex_lock(&mmu->lock);
-    for (offset = 0; offset < size; offset += DAYAN_MMU_PAGE_SIZE) {
+    for (offset = 0; offset < size; offset += NPU_SERVICE_MMU_PAGE_SIZE) {
         struct npu_mmu_table *table = 0;
         uint32_t index = 0;
         int walked = npu_mmu_walk(device, cluster, va + offset, 0, &table,
@@ -919,11 +941,16 @@ int npu_service_mmu_protect(npu_service_device_t *device, uint32_t cluster,
     mmu = &device->mmu;
     if (!mmu->enabled)
         return 0;
-    if ((va & DAYAN_MMU_PAGE_MASK) || (size & DAYAN_MMU_PAGE_MASK))
+    if ((va & NPU_SERVICE_MMU_PAGE_MASK) ||
+        (size & NPU_SERVICE_MMU_PAGE_MASK))
+        return -EINVAL;
+    if (va > UINT64_MAX - size)
+        return -EOVERFLOW;
+    if (npu_mmu_overlaps_fw_window(mmu, va, size))
         return -EINVAL;
 
     pthread_mutex_lock(&mmu->lock);
-    for (offset = 0; offset < size; offset += DAYAN_MMU_PAGE_SIZE) {
+    for (offset = 0; offset < size; offset += NPU_SERVICE_MMU_PAGE_SIZE) {
         struct npu_mmu_table *table = 0;
         uint32_t index = 0;
         uint64_t previous;

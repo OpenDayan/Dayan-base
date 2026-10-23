@@ -51,7 +51,7 @@ Socket 协议不属于公开 API。
   \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统 Proc、Host 创建的根 Proc，以及 Device 创建的子 Thread。 \\
   \code{NPU_SERVICE_PROC_ZOMBIE} / \code{NPU_SERVICE_PROC_KILL_WAIT_PRODUCE} & 已退出但尚未回收的 Proc，或终止后仍在等待异步执行单元完成的 Proc。 \\
   \code{NPU_SERVICE_MMU_READ} / \code{NPU_SERVICE_MMU_WRITE} / \code{NPU_SERVICE_MMU_EXEC} & ClusterMMU 映射的读、写和执行权限位。 \\
-  \code{NPU_SERVICE_MMU_PAGE_SIZE} / \code{NPU_SERVICE_MMU_PAGE_MASK} & Service 使用的 4 KiB 页大小和页内偏移掩码。 \\
+  \code{NPU_SERVICE_MMU_PAGE_SIZE} / \code{NPU_SERVICE_MMU_PAGE_MASK} & Buffer 映射粒度（2 MiB Sv39 level-1 leaf）及其掩码；va、pa、size 均须 2 MiB 对齐。 \\
 \end{dayantable}
 
 \subsection{Service 生命周期}
