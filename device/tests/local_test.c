@@ -6,6 +6,7 @@
 #include "errno.h"
 #include "string.h"
 #include "test.h"
+#include "tensor_context.h"
 
 _Alignas(CONFIG_CACHE_LINE_SIZE) unsigned char __cpu_start[CONFIG_CPU_LOCAL_SIZE];
 static unsigned wakes;
@@ -60,6 +61,11 @@ static void test_descriptors(void)
     assert(request.shared_size == CONFIG_COHERENT_SIZE);
     assert(request.task_mode == 1 && request.task_dim[2] == 1);
     assert(request.max_child_threads == 15);
+    assert(dayan_context_unpack(request.tensor_context).uram_hi *
+           DAYAN_CONTEXT_URAM_GRANULE == CONFIG_URAM_SIZE);
+    test.resources.uram_size = CONFIG_URAM_SIZE + DAYAN_CONTEXT_URAM_GRANULE;
+    assert(test_build_request(&test, &request) == -EINVAL);
+    test.resources.uram_size = CONFIG_URAM_SIZE;
     test.argc = 33;
     assert(test_build_request(&test, &request) == -EINVAL);
     test.argc = 0;

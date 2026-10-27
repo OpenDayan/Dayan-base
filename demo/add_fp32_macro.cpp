@@ -89,6 +89,8 @@ DAYAN_KERNEL_LOCKED_TASK_DESC(add_fp32_macro, 0, 0, kAddUramBytes,
 
 #if !defined(__DAYAN_DEVICE__)
 
+#include "uram_config.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -158,7 +160,10 @@ __host__ int main(int argc, char **argv)
     socket_path = getenv("DAYAN_SERVER_SOCKET");
     if (socket_path && *socket_path)
         options.server_socket = socket_path;
+    uint64_t uram_capacity = 0;
     status = npu_runtime_open(&runtime, &options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, kAddUramBytes, &uram_capacity);
     if (status == 0)
         status = npu_context_create(runtime, nullptr, &context);
     if (status == 0)

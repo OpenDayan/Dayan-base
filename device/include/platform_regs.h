@@ -49,7 +49,10 @@
 #define DAYAN_ATOMIC_CACHE_CONTROL_SIZE 0x000010U
 #define DAYAN_COHERENT_WINDOW_BASE      0x00400000U
 #define DAYAN_URAM_BASE                 0x00800000U
-#define DAYAN_URAM_SIZE                 0x00180000U
+#define DAYAN_URAM_SIZE_768K            0x000c0000U
+#define DAYAN_URAM_SIZE_1536K           0x00180000U
+/* Default until the platform provides a capacity/version register. */
+#define DAYAN_URAM_SIZE                 DAYAN_URAM_SIZE_1536K
 #define DAYAN_URAM_STRIDE               0x00200000U
 #define DAYAN_URAM(hart) \
     (DAYAN_URAM_BASE + (hart) * DAYAN_URAM_STRIDE)

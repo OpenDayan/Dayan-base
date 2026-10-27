@@ -52,6 +52,26 @@ demo 通过 `DAYAN_SERVER_SOCKET` 连接已经启动的 Server，不接收 DMA d
 Server 的统一后端使用 `--backend xilinx-dma`，`--dma-driver xdma|qdma` 选择驱动，
 `--dma-profile simulator|fpga` 选择默认目录与 MMIO 偏移。
 
+使用 URAM 的算子在创建 Buffer、启动 kernel 前调用
+`npu_runtime_get_uram_capacity()`。返回值是启用核心中最小的每核总容量，单位为字节，
+不随正在运行的任务占用而变化。Server 默认配置为 1.5 MiB；768 KiB 核心启动时指定
+`--uram-size 0xc0000`，demo 自动选择小容量入口及对应的资源描述符。
+查询失败或容量不足时直接报错，不猜测容量。
+
+| 算子 | 1.5 MiB 配置 | 768 KiB 配置 |
+| --- | --- | --- |
+| BF16 Matmul，1c / 4c | 512×384×256 | 192×384×256 |
+| FP8 Matmul，4c | 512×384×512 | 192×384×512 |
+| FP4 Matmul，4c | 512×512×640 | 192×512×640 |
+| FlashAttention，所有入口 | Q/KV tile 128×128 | Q/KV tile 32×128 |
+| LSU bandwidth | 最大 DMA 1 MiB | 最大 DMA 768 KiB |
+| FP32 Add、VEC peak、Context probe | 32 KiB | 相同配置 |
+
+小容量 Matmul 保留 N/K、slice 数和行跨度，缩小 A/C Buffer；BF16/FP8 两种
+缓冲方向实际占用 672 / 768 KiB，FP4 占用 664 / 764 KiB，均声明 768 KiB。
+按实际 Buffer 基地址重算 VisualSwizzle，所有 A/B/C 每拍 Bank 峰值仍为 1x，
+重排地址不跨 Buffer 边界。容量选择不改变输入矩阵的尺寸和数值参考计算。
+
 例如，在已启动双向 MM queue 0 的 QDMA FPGA 上：
 
 ```sh
@@ -154,7 +174,7 @@ DAYAN_SERVER_SOCKET=/tmp/my-dayan.sock \
 Resource，不执行跨核 barrier 或远端 K/V 复制。单核指每个 Task 使用一颗 Core，
 不绑定物理 Core 0；`--tasks` 可配置多个独立单核 Task。Split-KV 仅支持四核。
 
-每个 Core 使用两个 128-row Q slice，共享双缓冲的 128-column K/V tile。
+1.5 MiB 配置下，每个 Core 使用两个 128-row Q slice，共享双缓冲的 128-column K/V tile。
 root 执行 QK，六个子 Thread 分别负责 Q/K/V 加载、softmax、PV 和输出更新，
 通过 30 个 Local Resource 管理缓冲区和状态版本。score 原地转为 FP32 P，
 PV 使用 `TF32 × FP16/BF16 -> FP32`，省去单独的 P16 缓冲区和格式转换。
@@ -162,7 +182,8 @@ alpha、M/L、PV 存在 URAM 中供不同阶段或下一轮使用；O 在最后�
 softmax 和 output 各用一组单消费者 State Resource；复用 M/L/alpha 存储前，
 两组都必须 FREE。softmax 自己消费末 tile 的 State，每个 Resource 都逐代消费，
 不再与 output 共用消费计数或跳过尾代。Split-KV 的 output State 保留到合并结束。
-每核申请 1536 KiB URAM，布局实际占用 1489 KiB。
+该配置每核申请 1536 KiB URAM，布局实际占用 1489 KiB。768 KiB 配置将 Q slice
+缩到 32 行，布局实际占用 565 KiB；KV 仍为 128 列，softmax 的 VEC 指令序列不变。
 
 四核 prefill 用四个 Shared Resource 选出 K/V loader，其余 Core 从 loader 的
 URAM 复制；Shared Resource 的消费完成后才允许复用源缓冲区。
@@ -225,7 +246,8 @@ Host 使用确定性的可精确表示输入，按输入数据计算双精度完
 `lsu_bandwidth` 隔离测试一个 Core 发射的连续 D2U，以及从本 Core URAM 到相邻 Core
 URAM 地址窗的 U2D。四个 Core 仅用于建立 Cluster URAM 映射；测量区间内只有 lane 0
 发射 DMA。每个尺寸都严格采用“发射一条 DMA、立即 `dayan_wait_lsu()`”的顺序，并用
-`dayan_get_time()` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期。测试结束
+`dayan_get_time()` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期；
+768 KiB 核心的最后一档改为 768 KiB，输入 Buffer 同步缩小。测试结束
 后另行回读 64 KiB 做数据校验，回读不计入带宽：
 
 ```sh
@@ -371,14 +393,14 @@ A[M][K] (BF16) × BT[N][K] (BF16) -> C[M][N] (FP32)
 ```
 
 Host 按转置布局提供 BT，三个 stride 均以字节为单位。核内流水沿用
-`matmul_bf16_4c` 的 `512×384×256` tile、4 个 slice、两个 Loader Thread、
+`matmul_bf16_4c` 的 tile（1.5 MiB 配置为 `512×384×256`）、4 个 slice、两个 Loader Thread、
 根 Calc Proc 和一个 Post Thread，按输出 tile → K tile → slice 的顺序推进。
 `M<N` 时 A 双缓冲，BT 分为四份 `96×256`；否则 BT 双缓冲，A 分为四份
 `128×256`。每个 slice 保留独立 C，直到全部 K 累加完成，再由 Post 写回。
 
 每个 Task 自己从 DRAM 加载 A/BT，只用 10 个 Local Resource 管理核内依赖，
 不做跨核复制、Shared Resource 选举或 Cluster barrier，也不申请 atomic/shared
-存储。两种布局分别使用 1,472 KiB、1,408 KiB URAM，统一申请 1,536 KiB，
+存储。1.5 MiB 配置的两种布局分别使用 1,472 KiB、1,408 KiB URAM，统一申请 1,536 KiB，
 每 Core 同时驻留一个 Task。
 
 默认 `M=1024, N=1536, K=1536, TASKS=1`，启动单 Core Task。可选第四个参数
@@ -406,7 +428,7 @@ VisualSwizzle 按实际类型、尺寸、URAM 基地址和 32 个 Bank 搜索：
 
 ## 四 Core BF16 matmul
 
-`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，每核固定使用
+`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，1.5 MiB 配置下每核使用
 `512×384×256` tile，分成 4 个 slice。`M<N` 时 A 双缓冲供 4 个 B slice 共用，
 B 每片为 `96×256 BF16`；反之 B 双缓冲供 4 个 A slice 共用，A 每片为
 `128×256 BF16`。切片输入和 C 都是每 slice 单缓冲。C 每份为 `512×96` 或
@@ -511,7 +533,7 @@ FP8 每核保留 4 个 slice，FP4 每核使用 2 个 slice，总 tile 为 `512�
 | `matmul_fp8_4c` | E4M3，每元素 1 字节 | 512×384×512 | 1024×1536×3072 |
 | `matmul_fp4_4c` | E2M1，每字节 2 个元素 | 512×512×640 | 1024×2048×6144 |
 
-FP8 相对 BF16 的 K tile 扩大到 2 倍，M/N tile 和 slice 尺寸保持不变；
+以下描述 1.5 MiB 配置。FP8 相对 BF16 的 K tile 扩大到 2 倍，M/N tile 和 slice 尺寸保持不变；
 A/B 的 URAM 行跨度为 512 字节，A 共享路径使用 1,472 KiB，B 共享路径使用
 1,408 KiB。FP4 的 M/N tile 保持 512，K tile 为 640，A/B 行跨度为 320 字节。
 共享 A 时每个 slice 为 `512×256×640`，共享 B 时为 `256×512×640`，

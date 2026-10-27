@@ -35,6 +35,8 @@ CONTROL_BASE    ?= 0x00000000
 COHERENT_BASE   ?= 0x00400000
 COHERENT_SIZE   ?= 0x00400000
 URAM_BASE       ?= 0x00800000
+# Bare-metal tests use this physical limit; hosted kernels use Server allocations.
+# Select 0x000c0000 for a 768 KiB core, or keep the 1.5 MiB default.
 URAM_SIZE       ?= 0x00180000
 URAM_STRIDE     ?= 0x00200000
 

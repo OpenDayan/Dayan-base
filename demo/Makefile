@@ -1,9 +1,11 @@
 ROOT := ..
+CPPFLAGS += -I$(CURDIR)
 BUILD := $(ROOT)/build/demo
 DYCC := $(ROOT)/host/dycc/dycc
 DYCC_BIN := $(ROOT)/build/host/dycc/dycc-bin
 RUNTIME_LIB := $(ROOT)/build/host/driver/libDayanRuntime.a
-DAYAN_API_HEADERS := $(wildcard $(ROOT)/device/include/api/*.h)
+DAYAN_API_HEADERS := $(wildcard $(ROOT)/device/include/api/*.h) \
+	$(ROOT)/host/include/npu_runtime.h uram_config.h
 MATMUL_BROADCAST_SLICES ?= 4
 DEVICE_ISA_CHECK := ./check_device_isa.sh
 
@@ -59,13 +61,13 @@ $(DYCC_BIN) $(RUNTIME_LIB): | toolchain
 $(PRINT_TARGET): print_demo.cpp $(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(PRINT_TEMPS) -O2 -Wall -Wextra -Werror $< -o $@
+	$(DYCC) $(CPPFLAGS) --save-temps=$(PRINT_TEMPS) -O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) $(PRINT_TEMPS)/print_demo.cpp.dycc.device.o
 
 $(ADD_FP32_MACRO_TARGET): add_fp32_macro.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(ADD_FP32_MACRO_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(ADD_FP32_MACRO_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(ADD_FP32_MACRO_TEMPS)/add_fp32_macro.cpp.dycc.device.o
@@ -73,7 +75,7 @@ $(ADD_FP32_MACRO_TARGET): add_fp32_macro.cpp $(DAYAN_API_HEADERS) \
 $(ADD_FP32_VEC_TARGET): add_fp32_vec.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(ADD_FP32_VEC_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(ADD_FP32_VEC_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(ADD_FP32_VEC_TEMPS)/add_fp32_vec.cpp.dycc.device.o
@@ -82,7 +84,7 @@ $(FLASH_ATTENTION_TARGET): flash_attention.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(BUILD)/flash_attention-temps \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(BUILD)/flash_attention-temps \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(BUILD)/flash_attention-temps/flash_attention.cpp.dycc.device.o
@@ -90,7 +92,7 @@ $(FLASH_ATTENTION_TARGET): flash_attention.cpp \
 $(TASK_GRID_PROBE_TARGET): task_grid_probe.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(TASK_GRID_PROBE_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(TASK_GRID_PROBE_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(TASK_GRID_PROBE_TEMPS)/task_grid_probe.cpp.dycc.device.o
@@ -99,7 +101,7 @@ $(CONTEXT_THREAD_PROBE_TARGET): context_thread_probe.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(CONTEXT_THREAD_PROBE_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(CONTEXT_THREAD_PROBE_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(CONTEXT_THREAD_PROBE_TEMPS)/context_thread_probe.cpp.dycc.device.o
@@ -108,7 +110,7 @@ $(TENSOR_INTERRUPT_PROBE_TARGET): tensor_interrupt_probe.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(TENSOR_INTERRUPT_PROBE_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(TENSOR_INTERRUPT_PROBE_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(TENSOR_INTERRUPT_PROBE_TEMPS)/tensor_interrupt_probe.cpp.dycc.device.o
@@ -117,7 +119,7 @@ $(LSU_BANDWIDTH_TARGET): lsu_bandwidth.cpp \
 		$(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(LSU_BANDWIDTH_TEMPS) -O2 -Wall -Wextra -Werror \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(LSU_BANDWIDTH_TEMPS) -O2 -Wall -Wextra -Werror \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(LSU_BANDWIDTH_TEMPS)/lsu_bandwidth.cpp.dycc.device.o
@@ -125,14 +127,14 @@ $(LSU_BANDWIDTH_TARGET): lsu_bandwidth.cpp \
 $(VEC_PEAK_TARGET): vec_peak.cpp $(DAYAN_API_HEADERS) $(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(VEC_PEAK_TEMPS) -O2 -Wall -Wextra -Werror \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(VEC_PEAK_TEMPS) -O2 -Wall -Wextra -Werror \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) $(VEC_PEAK_TEMPS)/vec_peak.cpp.dycc.device.o
 
 $(SCHEDULER_BENCH_TARGET): scheduler_yield_bench.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(SCHEDULER_BENCH_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(SCHEDULER_BENCH_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(SCHEDULER_BENCH_TEMPS)/scheduler_yield_bench.cpp.dycc.device.o
@@ -140,7 +142,7 @@ $(SCHEDULER_BENCH_TARGET): scheduler_yield_bench.cpp $(DAYAN_API_HEADERS) \
 $(SHARED_NOTIFY_TARGET): shared_notify_latency.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(SHARED_NOTIFY_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(SHARED_NOTIFY_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(SHARED_NOTIFY_TEMPS)/shared_notify_latency.cpp.dycc.device.o
@@ -148,7 +150,7 @@ $(SHARED_NOTIFY_TARGET): shared_notify_latency.cpp $(DAYAN_API_HEADERS) \
 $(LAUNCH_LATENCY_TARGET): launch_latency.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(LAUNCH_LATENCY_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(LAUNCH_LATENCY_TEMPS) \
 		-O2 -Wall -Wextra -Werror $< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(LAUNCH_LATENCY_TEMPS)/launch_latency.cpp.dycc.device.o
@@ -157,7 +159,7 @@ $(MATMUL_1C_TARGET): matmul_bf16_1c.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(MATMUL_1C_TEMPS) -O2 -Wall -Wextra -Werror \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(MATMUL_1C_TEMPS) -O2 -Wall -Wextra -Werror \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(MATMUL_1C_TEMPS)/matmul_bf16_1c.cpp.dycc.device.o
@@ -166,14 +168,14 @@ $(MATMUL_4C_TARGET): matmul_bf16_4c.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) \
 		$(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(MATMUL_4C_TEMPS) -O2 -Wall -Wextra -Werror \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(MATMUL_4C_TEMPS) -O2 -Wall -Wextra -Werror \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) \
 		$(MATMUL_4C_TEMPS)/matmul_bf16_4c.cpp.dycc.device.o
 $(MATMUL_LOWP_TARGETS): $(BUILD)/%: %.cpp $(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(BUILD)/$*-temps -O2 -Wall -Wextra -Werror \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(BUILD)/$*-temps -O2 -Wall -Wextra -Werror \
 		$< -o $@
 	bash $(DEVICE_ISA_CHECK) $(BUILD)/$*-temps/$*.cpp.dycc.device.o
 
@@ -181,7 +183,7 @@ $(MATMUL_4C_BROADCAST_TARGET): matmul_bf16_broadcast_4c.cpp \
 		$(DAYAN_API_HEADERS) \
 		$(DEVICE_ISA_CHECK) $(DYCC_BIN) $(RUNTIME_LIB) | toolchain
 	@mkdir -p $(dir $@)
-	$(DYCC) --save-temps=$(MATMUL_4C_BROADCAST_TEMPS) \
+	$(DYCC) $(CPPFLAGS) --save-temps=$(MATMUL_4C_BROADCAST_TEMPS) \
 		-O2 -Wall -Wextra -Werror \
 		-DMATMUL_BF16_4C_SLICES=$(MATMUL_BROADCAST_SLICES) \
 		$< -o $@

@@ -488,6 +488,8 @@ DAYAN_KERNEL_TASK_DESC(vec_peak, 1, 0, 0, kUramBytes, 1, 0, 1, 0);
 
 #if !defined(__DAYAN_DEVICE__)
 
+#include "uram_config.h"
+
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -981,7 +983,10 @@ __host__ int main(int argc, char **argv)
     if (socket_path && *socket_path)
         runtime_options.server_socket = socket_path;
 
+    uint64_t uram_capacity = 0;
     status = npu_runtime_open(&runtime, &runtime_options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, kUramBytes, &uram_capacity);
     if (status == 0)
         status = npu_runtime_get_topology(runtime, &topology);
     if (status == 0 && cores == kMaxCores &&

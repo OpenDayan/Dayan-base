@@ -11,6 +11,8 @@ struct MatmulFp8Shape {
     enum : int {
         kTileM = 512, kTileN = 384, kTileK = 512, kSlices = 4,
         kInputRowBytes = kTileK,
+        // Keep row strides; reduce A/C buffers to fit both pipeline layouts.
+        kSmallTileM = 192, kSmallUramBytes = 768 * 1024,
         kWorkers = 3, kAtomicBytes = 64, kUramBytes = 1536 * 1024,
     };
 };
@@ -25,6 +27,7 @@ namespace matmul_fp8_4c_detail {
 // Local: sliced operand + two buffered tiles + C slices. Shared: each pair's
 // input-ready resources, consumed once after the peer's copy completes.
 enum : int {
+    SmallTM = MatmulFp8Shape::kSmallTileM,
     TM = MatmulFp8Shape::kTileM, TN = MatmulFp8Shape::kTileN,
     TK = MatmulFp8Shape::kTileK,
     InputRowBytes = MatmulFp8Shape::kInputRowBytes,
@@ -48,6 +51,14 @@ static_assert(2ULL * TM * InputRowBytes + TN * InputRowBytes +
 static_assert(TM * InputRowBytes + 2ULL * TN * InputRowBytes +
               4ULL * TM * TN <= MatmulFp8Shape::kUramBytes);
 
+static_assert(SmallTM % Slices == 0);
+static_assert((2ULL * SmallTM + TN) * InputRowBytes +
+              4ULL * SmallTM * TN <=
+              MatmulFp8Shape::kSmallUramBytes);
+static_assert((SmallTM + 2ULL * TN) * InputRowBytes +
+              4ULL * SmallTM * TN <=
+              MatmulFp8Shape::kSmallUramBytes);
+
 struct Cluster {
     dayan_cluster_barrier_t barrier;
     uint64_t uram[4];
@@ -62,7 +73,7 @@ struct State {
     uint64_t m, n, k, a_stride, bt_stride, c_stride;
     uint64_t input[2], output, uram, generations;
     uint64_t b_base, c_base;
-    int lane, nt, kt, slice_m, slice_n;
+    int tile_m, lane, nt, kt, slice_m, slice_n;
     bool buffer_a;
 };
 struct Node {
@@ -102,9 +113,9 @@ static Node node(const State &s, uint64_t generation, int slice, int lane)
     const int phase = (int)(generation & 1);
     const uint64_t begin = s.m * (lane >> 1) / 2;
     const uint64_t end = s.m * ((lane >> 1) + 1) / 2;
-    const uint64_t row = begin + out / s.nt * TM;
+    const uint64_t row = begin + out / s.nt * s.tile_m;
     const uint64_t col = (out % s.nt * 2 + (lane & 1)) * TN;
-    const int rows = extent((int64_t)end - (int64_t)row, TM);
+    const int rows = extent((int64_t)end - (int64_t)row, s.tile_m);
     const int cols = extent((int64_t)s.n - (int64_t)col, TN);
     const int row_offset = s.buffer_a ? 0 : slice * s.slice_m;
     const int col_offset = s.buffer_a ? slice * s.slice_n : 0;
@@ -271,17 +282,13 @@ static void post(void *argument)
     dayan_wait_lsu();
 }
 
-} // namespace matmul_fp8_4c_detail
-#endif
-
-__kernel__ void matmul_fp8_4c(uint64_t m, uint64_t n, uint64_t k,
-                              uint64_t a_stride, uint64_t bt_stride,
-                              uint64_t c_stride, const uint8_t *a,
-                              const uint8_t *bt, float *c)
+static void run(uint64_t m, uint64_t n, uint64_t k,
+                uint64_t a_stride, uint64_t bt_stride, uint64_t c_stride,
+                const uint8_t *a, const uint8_t *bt, float *c, int tile_m)
 {
-    using namespace matmul_fp8_4c_detail;
     // The demo Host validates shape/size and launches exactly four lanes.
     State s;
+    s.tile_m = tile_m;
     s.m = m;
     s.n = n;
     s.k = k;
@@ -293,18 +300,25 @@ __kernel__ void matmul_fp8_4c(uint64_t m, uint64_t n, uint64_t k,
     s.output = (uintptr_t)c;
     s.nt = (int)((n + 2 * TN - 1) / (2 * TN));
     s.kt = (int)((k + TK - 1) / TK);
-    const uint64_t outputs = (m + 2 * TM - 1) / (2 * TM) * s.nt;
+    const uint64_t outputs = (m + 2 * s.tile_m - 1) / (2 * s.tile_m) * s.nt;
     // Host caps each matrix at 64 MiB, which also bounds this product.
     s.generations = outputs * s.kt;
     s.buffer_a = m < n;
-    s.slice_m = s.buffer_a ? TM : TM / Slices;
+    s.slice_m = s.buffer_a ? s.tile_m : s.tile_m / Slices;
     s.slice_n = s.buffer_a ? TN / Slices : TN;
     const int lane = dayan_task_id(DAYAN_TASK_X);
     s.lane = lane;
     const uint64_t physical = (uintptr_t)dayan_uram_base();
     const uint64_t window = WindowBase + lane * WindowStride;
+    const uint64_t required =
+        ((s.buffer_a ? 2ULL : 1ULL) * s.tile_m +
+         (s.buffer_a ? 1ULL : 2ULL) * TN) * InputRowBytes +
+        4ULL * s.tile_m * TN;
+    if (dayan_uram_size() < required || physical < window ||
+        physical - window > WindowStride - required)
+        dayan_thread_exit(-12);
     s.uram = physical - window;
-    s.b_base = s.uram + (s.buffer_a ? 2ULL * TM : TM) * InputRowBytes;
+    s.b_base = s.uram + (s.buffer_a ? 2ULL * s.tile_m : s.tile_m) * InputRowBytes;
     s.c_base = s.b_base + (s.buffer_a ? TN : 2ULL * TN) * InputRowBytes;
     static constexpr dayan_thread_resources_t resources = {
         1, 0, 0, 0, LocalResources, SharedResources, 0,
@@ -321,13 +335,42 @@ __kernel__ void matmul_fp8_4c(uint64_t m, uint64_t n, uint64_t k,
     check(dayan_cluster_barrier(4, &cluster.barrier));
 }
 
+} // namespace matmul_fp8_4c_detail
+#endif
+
+__kernel__ void matmul_fp8_4c(uint64_t m, uint64_t n, uint64_t k,
+                              uint64_t a_stride, uint64_t bt_stride,
+                              uint64_t c_stride, const uint8_t *a,
+                              const uint8_t *bt, float *c)
+{
+    matmul_fp8_4c_detail::run(m, n, k, a_stride, bt_stride, c_stride,
+                             a, bt, c, MatmulFp8Shape::kTileM);
+}
+
+__kernel__ void matmul_fp8_4c_small(uint64_t m, uint64_t n, uint64_t k,
+                              uint64_t a_stride, uint64_t bt_stride,
+                              uint64_t c_stride, const uint8_t *a,
+                              const uint8_t *bt, float *c)
+{
+    matmul_fp8_4c_detail::run(m, n, k, a_stride, bt_stride, c_stride,
+                             a, bt, c, MatmulFp8Shape::kSmallTileM);
+}
+
 DAYAN_KERNEL_NAMED_RESOURCE_DESC(
     matmul_fp8_4c, MatmulFp8Shape::kWorkers,
     MatmulFp8Shape::kAtomicBytes, MatmulFp8Shape::kUramBytes,
     3, 1, 0, 0, 2 * MatmulFp8Shape::kSlices + 2,
     2 * (MatmulFp8Shape::kSlices + 2));
 
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    matmul_fp8_4c_small, MatmulFp8Shape::kWorkers,
+    MatmulFp8Shape::kAtomicBytes, MatmulFp8Shape::kSmallUramBytes,
+    3, 1, 0, 0, 2 * MatmulFp8Shape::kSlices + 2,
+    2 * (MatmulFp8Shape::kSlices + 2));
+
 #if !defined(__DAYAN_DEVICE__)
+
+#include "uram_config.h"
 
 #include <cmath>
 #include <cstdio>
@@ -600,6 +643,7 @@ __host__ int main(int argc, char **argv)
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
     const char *socket_path;
+    uint64_t uram_capacity = 0;
     int status = 0;
 
     npu_runtime_options_init(&runtime_options);
@@ -609,6 +653,12 @@ __host__ int main(int argc, char **argv)
         runtime_options.server_socket = socket_path;
 
     status = npu_runtime_open(&runtime, &runtime_options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, MatmulFp8Shape::kSmallUramBytes,
+                                    &uram_capacity);
+    const bool small_uram = uram_capacity < MatmulFp8Shape::kUramBytes;
+    const unsigned tile_m = small_uram ? MatmulFp8Shape::kSmallTileM :
+                                         MatmulFp8Shape::kTileM;
     if (status == 0)
         status = npu_context_create(runtime, nullptr, &context);
     if (status == 0)
@@ -626,8 +676,8 @@ __host__ int main(int argc, char **argv)
 
     if (status == 0) {
         const uint64_t cluster_tiles_m =
-            (m + 2U * MatmulFp8Shape::kTileM - 1U) /
-            (2U * MatmulFp8Shape::kTileM);
+            (m + 2U * tile_m - 1U) /
+            (2U * tile_m);
         const uint64_t cluster_tiles_n =
             (n + 2U * MatmulFp8Shape::kTileN - 1U) /
             (2U * MatmulFp8Shape::kTileN);
@@ -643,13 +693,14 @@ __host__ int main(int argc, char **argv)
                     (unsigned long long)m, (unsigned long long)k,
                     (unsigned long long)n, (unsigned long long)k,
                     (unsigned long long)m, (unsigned long long)n,
-                    (unsigned)MatmulFp8Shape::kTileM,
+                    (unsigned)tile_m,
                     (unsigned)MatmulFp8Shape::kTileN,
                     (unsigned)MatmulFp8Shape::kTileK,
                     (unsigned)MatmulFp8Shape::kSlices,
                     (unsigned long long)cluster_tiles_m,
                     (unsigned long long)cluster_tiles_n, m < n ? "A" : "B");
-        status = matmul_fp8_4c(m, n, k, k, k, n * sizeof(float), a_buffer,
+        auto launch = small_uram ? matmul_fp8_4c_small : matmul_fp8_4c;
+        status = launch(m, n, k, k, k, n * sizeof(float), a_buffer,
                                bt_buffer, c_buffer, &launch_attrs);
     }
     if (status == 0)

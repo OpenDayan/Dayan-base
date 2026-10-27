@@ -423,8 +423,11 @@ token，不再编码 Resource 指针或软件事件类型。
 新 Thread 的栈、PC、Context1 和 Context2。软件 ready/resource 链表与扫描循环已经删除。
 
 `dayan_uram_base()` 和 `dayan_uram_size()` 返回 Service 为当前 kernel 实例在本 Core
-分配的私有 URAM；默认每 Core 容量为 1.5 MiB，地址窗口从 `0x00800000` 起并以 2 MiB
-为 Core stride。声明、分配和释放大小以 32 KiB 为粒度。
+分配的私有 URAM；每 Core 容量默认 1.5 MiB（`0x180000`），768 KiB 核心需在
+`dayan_server` 启动时指定 `--uram-size 0xc0000`。两种容量的地址窗口均从
+`0x00800000` 起并以 2 MiB 为 Core stride。声明、分配和释放大小以 32 KiB 为粒度。
+Host 管理的 BL1 从 Context 获取分配范围；独立裸机测试则用
+`make -C device URAM_SIZE=0xc0000` 选择 768 KiB，默认仍为 1.5 MiB。
 `dayan_create_thread(name, entry, arg, resources)` 使用 kernel 描述符预留的 slot 在同
 Core 创建一个有名称的单参数子 Thread；子 Thread 继承 URAM，TCSR 必须显式申请，达到
 声明上限或 TCSR 池耗尽时返回失败。

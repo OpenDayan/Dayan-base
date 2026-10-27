@@ -14,6 +14,8 @@ struct MatmulBf16Config {
 struct MatmulBf16Shape {
     enum : int {
         kTileM = 512, kTileN = 384, kTileK = 256, kSlices = 4,
+        // Keep row strides; reduce A/C buffers to fit both pipeline layouts.
+        kSmallTileM = 192, kSmallUramBytes = 768 * 1024,
         kWorkers = 3, kUramBytes = 1536 * 1024,
     };
 };
@@ -27,6 +29,7 @@ namespace matmul_bf16_1c_detail {
 
 // One Local Resource per sliced input, buffered input, and C slice.
 enum : int {
+    SmallTM = MatmulBf16Shape::kSmallTileM,
     TM = MatmulBf16Shape::kTileM, TN = MatmulBf16Shape::kTileN,
     TK = MatmulBf16Shape::kTileK, Slices = MatmulBf16Shape::kSlices,
     LocalResources = 2 * Slices + 2,
@@ -46,6 +49,14 @@ static_assert(2 * TM * TK * 2 + TN * TK * 2 + TM * TN * 4 <=
 static_assert(TM * TK * 2 + 2 * TN * TK * 2 + TM * TN * 4 <=
               MatmulBf16Shape::kUramBytes);
 
+static_assert(SmallTM % Slices == 0);
+static_assert((2ULL * SmallTM + TN) * TK * 2 +
+              4ULL * SmallTM * TN <=
+              MatmulBf16Shape::kSmallUramBytes);
+static_assert((SmallTM + 2ULL * TN) * TK * 2 +
+              4ULL * SmallTM * TN <=
+              MatmulBf16Shape::kSmallUramBytes);
+
 struct Buffer {
     uint64_t uram;
     dayan_resource_t resource;
@@ -54,7 +65,7 @@ struct State {
     const MatmulBf16Config *cfg;
     uint64_t input[2], output, generations, c_swizzle;
     uint32_t task, tasks;
-    int nt, kt, slice_m, slice_n;
+    int tile_m, nt, kt, slice_m, slice_n;
     bool buffer_a;
     Buffer a[Slices], b[Slices], c[Slices];
 };
@@ -79,9 +90,9 @@ static Node node(const State &s, uint64_t generation, int slice)
     const uint64_t out = s.task + generation / s.kt * s.tasks;
     const int step = (int)(generation % s.kt);
     const int phase = (int)(generation & 1);
-    const uint64_t row = out / s.nt * TM;
+    const uint64_t row = out / s.nt * s.tile_m;
     const uint64_t col = out % s.nt * TN;
-    const int rows = extent((int64_t)s.cfg->m - (int64_t)row, TM);
+    const int rows = extent((int64_t)s.cfg->m - (int64_t)row, s.tile_m);
     const int cols = extent((int64_t)s.cfg->n - (int64_t)col, TN);
     const int row_offset = s.buffer_a ? 0 : slice * s.slice_m;
     const int col_offset = s.buffer_a ? slice * s.slice_n : 0;
@@ -226,13 +237,9 @@ static bool config_valid(const MatmulBf16Config *c)
     return !(c->a_stride & 1) && !(c->bt_stride & 1) && !(c->c_stride & 63);
 }
 
-} // namespace matmul_bf16_1c_detail
-#endif
-
-__kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
-                              const uint16_t *a, const uint16_t *bt, float *c)
+static void run(const MatmulBf16Config *config,
+                const uint16_t *a, const uint16_t *bt, float *c, int tile_m)
 {
-    using namespace matmul_bf16_1c_detail;
     // Host DMA may reuse a config address still cached by this Hart.
     if (config)
         dayan_cache_invalidate(config, sizeof(*config));
@@ -242,6 +249,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         dayan_task_dim(DAYAN_TASK_Y) != 1 || dayan_task_dim(DAYAN_TASK_Z) != 1)
         dayan_thread_exit(-22);
     State s = {};
+    s.tile_m = tile_m;
     s.cfg = config;
     s.input[0] = (uintptr_t)a;
     s.input[1] = (uintptr_t)bt;
@@ -250,7 +258,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
     s.tasks = dayan_task_dim(DAYAN_TASK_X);
     s.nt = (int)((config->n + TN - 1) / TN);
     s.kt = (int)((config->k + TK - 1) / TK);
-    const uint64_t outputs = (config->m + TM - 1) / TM * s.nt;
+    const uint64_t outputs = (config->m + s.tile_m - 1) / s.tile_m * s.nt;
     if (s.task >= s.tasks)
         dayan_thread_exit(-22);
     if (s.task >= outputs)
@@ -261,7 +269,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         dayan_thread_exit(-22);
     s.generations = tiles * s.kt;
     s.buffer_a = config->m < config->n;
-    s.slice_m = s.buffer_a ? TM : TM / Slices;
+    s.slice_m = s.buffer_a ? s.tile_m : s.tile_m / Slices;
     s.slice_n = s.buffer_a ? TN / Slices : TN;
     s.c_swizzle = s.buffer_a ? MAT_BATCH_SWIZZLE(5, 0, 1)
                             : MAT_BATCH_SWIZZLE(7, 2, 3);
@@ -297,12 +305,34 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
     check(dayan_thread_join_all());
 }
 
+} // namespace matmul_bf16_1c_detail
+#endif
+
+__kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
+                              const uint16_t *a, const uint16_t *bt, float *c)
+{
+    matmul_bf16_1c_detail::run(config, a, bt, c, MatmulBf16Shape::kTileM);
+}
+
+__kernel__ void matmul_bf16_1c_small(const MatmulBf16Config *config,
+                              const uint16_t *a, const uint16_t *bt, float *c)
+{
+    matmul_bf16_1c_detail::run(config, a, bt, c, MatmulBf16Shape::kSmallTileM);
+}
+
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
     matmul_bf16_1c, 1, MatmulBf16Shape::kWorkers,
     0, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
     2 * MatmulBf16Shape::kSlices + 2, 0);
 
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
+    matmul_bf16_1c_small, 1, MatmulBf16Shape::kWorkers,
+    0, MatmulBf16Shape::kSmallUramBytes, 3, 1, 0, 0,
+    2 * MatmulBf16Shape::kSlices + 2, 0);
+
 #if !defined(__DAYAN_DEVICE__)
+
+#include "uram_config.h"
 
 #include <cmath>
 #include <cstdio>
@@ -592,6 +622,7 @@ __host__ int main(int argc, char **argv)
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
     const char *socket_path;
+    uint64_t uram_capacity = 0;
     int status = 0;
 
     npu_runtime_options_init(&runtime_options);
@@ -601,6 +632,12 @@ __host__ int main(int argc, char **argv)
         runtime_options.server_socket = socket_path;
 
     status = npu_runtime_open(&runtime, &runtime_options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, MatmulBf16Shape::kSmallUramBytes,
+                                    &uram_capacity);
+    const bool small_uram = uram_capacity < MatmulBf16Shape::kUramBytes;
+    const unsigned tile_m = small_uram ? MatmulBf16Shape::kSmallTileM :
+                                         MatmulBf16Shape::kTileM;
     if (status == 0)
         status = npu_context_create(runtime, nullptr, &context);
     if (status == 0)
@@ -623,7 +660,7 @@ __host__ int main(int argc, char **argv)
 
     if (status == 0) {
         const uint64_t tiles_m =
-            (m + MatmulBf16Shape::kTileM - 1U) / MatmulBf16Shape::kTileM;
+            (m + tile_m - 1U) / tile_m;
         const uint64_t tiles_n =
             (n + MatmulBf16Shape::kTileN - 1U) / MatmulBf16Shape::kTileN;
 
@@ -638,13 +675,14 @@ __host__ int main(int argc, char **argv)
                     (unsigned long long)m, (unsigned long long)k,
                     (unsigned long long)n, (unsigned long long)k,
                     (unsigned long long)m, (unsigned long long)n,
-                    (unsigned)MatmulBf16Shape::kTileM,
+                    (unsigned)tile_m,
                     (unsigned)MatmulBf16Shape::kTileN,
                     (unsigned)MatmulBf16Shape::kTileK,
                     (unsigned)MatmulBf16Shape::kSlices,
                     (unsigned long long)tiles_m,
                     (unsigned long long)tiles_n, (unsigned long long)tasks, m < n ? "A" : "B");
-        status = matmul_bf16_1c(config_buffer, a_buffer, bt_buffer,
+        auto launch = small_uram ? matmul_bf16_1c_small : matmul_bf16_1c;
+        status = launch(config_buffer, a_buffer, bt_buffer,
                                 c_buffer, &launch_attrs);
     }
     if (status == 0)

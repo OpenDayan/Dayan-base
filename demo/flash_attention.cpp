@@ -2,7 +2,8 @@
 #include <stdint.h>
 
 // Ported from llama.cpp/ggml/src/ggml-dayan/ggml-dayan-flash-attention.h.
-// Two 128-row Q slices share double-buffered 128-key K/V tiles. Six child
+// Two Q slices (128 rows, or 32 on 768 KiB cores) share double-buffered
+// 128-key K/V tiles. Six child
 // Threads load Q/K/V, evaluate online softmax, multiply P*V, and update O;
 // the root issues Q*K. P stays FP32 in the score allocation and MAT reads it
 // as TF32, avoiding the old demo's FP16 conversion and separate P allocation.
@@ -133,44 +134,48 @@ static inline void start_vec_block(long instructions) {
     __tx_vec_tcsr_write<kVecControl>(vec_control(instructions));
 }
 
-__device__ constexpr long kSlices = 2;
-__device__ constexpr long kSlots = 2;
-__device__ constexpr long kVecLanes = 64;
-__device__ constexpr uint32_t kFlagCausal = 1;
-__device__ constexpr long kBr = 128;
-__device__ constexpr long kBc = 128;
-__device__ constexpr long kMaxHeadDim = 256;
-__device__ constexpr long kVecBytes = 256;
-__device__ constexpr long kLocalResources = kSlices + 6 * kSlices * kSlots + 4;
-__device__ constexpr long kSharedResources = 4;
-__device__ constexpr long kMatQK = 1;
-__device__ constexpr long kAtomicBytes = 128;
-__device__ constexpr long kUramBytes = 1536 * 1024;
-__device__ constexpr long kQBytes = kBr * kMaxHeadDim * sizeof(uint16_t);
-__device__ constexpr long kOBytes = kBr * kMaxHeadDim * sizeof(float);
-__device__ constexpr long kPVBytes = kOBytes;
-__device__ constexpr long kScoreBytes = kBr * kBc * sizeof(float);
-__device__ constexpr long kStateVectorBytes = kBr * 32;
-__device__ constexpr long kMaskBytes = (kBr / 8) * (kBc / 8) * 32;
-__device__ constexpr long kCtxQ = 0;
-__device__ constexpr long kCtxO = kQBytes;
-__device__ constexpr long kCtxTiles = kCtxO + kOBytes;
-__device__ constexpr long kTileScore = 0;
-__device__ constexpr long kTilePV = kTileScore + kScoreBytes;
-__device__ constexpr long kTileM = kTilePV + kPVBytes;
-__device__ constexpr long kTileL = kTileM + kStateVectorBytes;
-__device__ constexpr long kTileAlpha = kTileL + kStateVectorBytes;
-__device__ constexpr long kTileMask = kTileAlpha + kStateVectorBytes;
-__device__ constexpr long kTileBytes = kTileMask + kMaskBytes;
-__device__ constexpr long kContextBytes = kCtxTiles + kSlots * kTileBytes;
-__device__ constexpr long kKBytes = kBc * kMaxHeadDim * sizeof(uint16_t);
-__device__ constexpr long kVtBytes = kKBytes;
-__device__ constexpr long kUramK0 = kSlices * kContextBytes;
-__device__ constexpr long kUramVt0 = kUramK0 + 2 * kKBytes;
-__device__ constexpr long kUramZero = kUramVt0 + 2 * kVtBytes;
-__device__ constexpr long kUramMaskRows = kUramZero + kVecBytes;
-__device__ constexpr long kUramMaskCols = kUramMaskRows + kVecBytes;
-__device__ constexpr long kUramMaskDelta = kUramMaskCols + kVecBytes;
+// Each kernel instantiates a fixed layout, so vector and MAT loops keep
+// compile-time tile sizes for both physical URAM capacities.
+template <long BlockRows>
+struct Pipeline {
+__device__ static constexpr long kSlices = 2;
+__device__ static constexpr long kSlots = 2;
+__device__ static constexpr long kVecLanes = 64;
+__device__ static constexpr uint32_t kFlagCausal = 1;
+__device__ static constexpr long kBr = BlockRows;
+__device__ static constexpr long kBc = 128;
+__device__ static constexpr long kMaxHeadDim = 256;
+__device__ static constexpr long kVecBytes = 256;
+__device__ static constexpr long kLocalResources = kSlices + 6 * kSlices * kSlots + 4;
+__device__ static constexpr long kSharedResources = 4;
+__device__ static constexpr long kMatQK = 1;
+__device__ static constexpr long kAtomicBytes = 128;
+__device__ static constexpr long kUramBytes = BlockRows == 128 ? 1536 * 1024 : 768 * 1024;
+__device__ static constexpr long kQBytes = kBr * kMaxHeadDim * sizeof(uint16_t);
+__device__ static constexpr long kOBytes = kBr * kMaxHeadDim * sizeof(float);
+__device__ static constexpr long kPVBytes = kOBytes;
+__device__ static constexpr long kScoreBytes = kBr * kBc * sizeof(float);
+__device__ static constexpr long kStateVectorBytes = kBr * 32;
+__device__ static constexpr long kMaskBytes = (kBr / 8) * (kBc / 8) * 32;
+__device__ static constexpr long kCtxQ = 0;
+__device__ static constexpr long kCtxO = kQBytes;
+__device__ static constexpr long kCtxTiles = kCtxO + kOBytes;
+__device__ static constexpr long kTileScore = 0;
+__device__ static constexpr long kTilePV = kTileScore + kScoreBytes;
+__device__ static constexpr long kTileM = kTilePV + kPVBytes;
+__device__ static constexpr long kTileL = kTileM + kStateVectorBytes;
+__device__ static constexpr long kTileAlpha = kTileL + kStateVectorBytes;
+__device__ static constexpr long kTileMask = kTileAlpha + kStateVectorBytes;
+__device__ static constexpr long kTileBytes = kTileMask + kMaskBytes;
+__device__ static constexpr long kContextBytes = kCtxTiles + kSlots * kTileBytes;
+__device__ static constexpr long kKBytes = kBc * kMaxHeadDim * sizeof(uint16_t);
+__device__ static constexpr long kVtBytes = kKBytes;
+__device__ static constexpr long kUramK0 = kSlices * kContextBytes;
+__device__ static constexpr long kUramVt0 = kUramK0 + 2 * kKBytes;
+__device__ static constexpr long kUramZero = kUramVt0 + 2 * kVtBytes;
+__device__ static constexpr long kUramMaskRows = kUramZero + kVecBytes;
+__device__ static constexpr long kUramMaskCols = kUramMaskRows + kVecBytes;
+__device__ static constexpr long kUramMaskDelta = kUramMaskCols + kVecBytes;
 static_assert(kUramMaskDelta + kVecBytes <= kUramBytes, "Attention URAM exceeds allocation");
 static_assert(kLocalResources <= 32, "Attention exceeds the Local Resource window");
 
@@ -427,7 +432,7 @@ static inline long qk_swizzle(long head_dim) {
     return head_dim == 128 ? MAT_BATCH_SWIZZLE(5, 1, 5) :
            head_dim == 256 ? MAT_BATCH_SWIZZLE(5, 2, 5) : 0;
 }
-__device__ constexpr long kVSwizzle = MAT_BATCH_SWIZZLE(5, 1, 5);
+__device__ static constexpr long kVSwizzle = MAT_BATCH_SWIZZLE(5, 1, 5);
 
 static void load_q(void * argument) {
     const State & s = *(State *) argument;
@@ -1105,117 +1110,118 @@ static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint1
     return 0;
 }
 
+template <typename Format, int Cores, bool SplitKV>
+static void launch(const FlashAttentionConfig *config, const uint16_t *q,
+                   const uint16_t *k, const uint16_t *v, float *out,
+                   FlashAttentionResult *result) {
+    if (config) dayan_cache_invalidate(config, sizeof(*config));
+    const int status = run<Format, Cores, SplitKV>(config, q, k, v, out);
+    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) *
+                          dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
+    result[task].status = status;
+    dayan_cache_flush(&result[task], sizeof(result[task]));
+}
+
+};
 
 } // namespace flash_attention_detail
 
 #endif // __DAYAN_DEVICE__
 
-__kernel__ void flash_attention_fp16_1c(const FlashAttentionConfig * config,
-                                                const uint16_t * q,
-                                                const uint16_t * k,
-                                                const uint16_t * v,
-                                                float * output,
-                                                FlashAttentionResult * result) {
-#if defined(__DAYAN_DEVICE__)
-    if (config) {
-        dayan_cache_invalidate(config, sizeof(*config));
-    }
-    const int status = flash_attention_detail::run<flash_attention_detail::Fp16Format, 1, false>(
-        config, q, k, v, output);
-    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) * dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
-    result[task].status = status;
-    dayan_cache_flush(&result[task], sizeof(result[task]));
-#endif
+__kernel__ void flash_attention_fp16_1c(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<128>::launch<
+        flash_attention_detail::Fp16Format, 1, false>(config, q, k, v, output, result);
 }
 
-__kernel__ void flash_attention_bf16_1c(const FlashAttentionConfig * config,
-                                                const uint16_t * q,
-                                                const uint16_t * k,
-                                                const uint16_t * v,
-                                                float * output,
-                                                FlashAttentionResult * result) {
-#if defined(__DAYAN_DEVICE__)
-    if (config) {
-        dayan_cache_invalidate(config, sizeof(*config));
-    }
-    const int status = flash_attention_detail::run<flash_attention_detail::Bf16Format, 1, false>(
-        config, q, k, v, output);
-    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) * dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
-    result[task].status = status;
-    dayan_cache_flush(&result[task], sizeof(result[task]));
-#endif
+__kernel__ void flash_attention_bf16_1c(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<128>::launch<
+        flash_attention_detail::Bf16Format, 1, false>(config, q, k, v, output, result);
 }
 
-__kernel__ void flash_attention_fp16_4c(const FlashAttentionConfig * config,
-                                                const uint16_t * q,
-                                                const uint16_t * k,
-                                                const uint16_t * v,
-                                                float * output,
-                                                FlashAttentionResult * result) {
-#if defined(__DAYAN_DEVICE__)
-    if (config) {
-        dayan_cache_invalidate(config, sizeof(*config));
-    }
-    const int status = flash_attention_detail::run<flash_attention_detail::Fp16Format, 4, false>(
-        config, q, k, v, output);
-    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) * dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
-    result[task].status = status;
-    dayan_cache_flush(&result[task], sizeof(result[task]));
-#endif
+__kernel__ void flash_attention_fp16_4c(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<128>::launch<
+        flash_attention_detail::Fp16Format, 4, false>(config, q, k, v, output, result);
 }
 
-__kernel__ void flash_attention_bf16_4c(const FlashAttentionConfig * config,
-                                                const uint16_t * q,
-                                                const uint16_t * k,
-                                                const uint16_t * v,
-                                                float * output,
-                                                FlashAttentionResult * result) {
-#if defined(__DAYAN_DEVICE__)
-    if (config) {
-        dayan_cache_invalidate(config, sizeof(*config));
-    }
-    const int status = flash_attention_detail::run<flash_attention_detail::Bf16Format, 4, false>(
-        config, q, k, v, output);
-    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) * dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
-    result[task].status = status;
-    dayan_cache_flush(&result[task], sizeof(result[task]));
-#endif
+__kernel__ void flash_attention_bf16_4c(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<128>::launch<
+        flash_attention_detail::Bf16Format, 4, false>(config, q, k, v, output, result);
 }
 
-__kernel__ void flash_attention_fp16_decode_4c(const FlashAttentionConfig * config,
-                                                const uint16_t * q,
-                                                const uint16_t * k,
-                                                const uint16_t * v,
-                                                float * output,
-                                                FlashAttentionResult * result) {
-#if defined(__DAYAN_DEVICE__)
-    if (config) {
-        dayan_cache_invalidate(config, sizeof(*config));
-    }
-    const int status = flash_attention_detail::run<flash_attention_detail::Fp16Format, 4, true>(
-        config, q, k, v, output);
-    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) * dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
-    result[task].status = status;
-    dayan_cache_flush(&result[task], sizeof(result[task]));
-#endif
+__kernel__ void flash_attention_fp16_decode_4c(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<128>::launch<
+        flash_attention_detail::Fp16Format, 4, true>(config, q, k, v, output, result);
 }
 
-__kernel__ void flash_attention_bf16_decode_4c(const FlashAttentionConfig * config,
-                                                const uint16_t * q,
-                                                const uint16_t * k,
-                                                const uint16_t * v,
-                                                float * output,
-                                                FlashAttentionResult * result) {
-#if defined(__DAYAN_DEVICE__)
-    if (config) {
-        dayan_cache_invalidate(config, sizeof(*config));
-    }
-    const int status = flash_attention_detail::run<flash_attention_detail::Bf16Format, 4, true>(
-        config, q, k, v, output);
-    const uint32_t task = dayan_task_id(DAYAN_TASK_Y) * dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
-    result[task].status = status;
-    dayan_cache_flush(&result[task], sizeof(result[task]));
-#endif
+__kernel__ void flash_attention_bf16_decode_4c(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<128>::launch<
+        flash_attention_detail::Bf16Format, 4, true>(config, q, k, v, output, result);
+}
+
+__kernel__ void flash_attention_fp16_1c_small(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<32>::launch<
+        flash_attention_detail::Fp16Format, 1, false>(config, q, k, v, output, result);
+}
+
+__kernel__ void flash_attention_bf16_1c_small(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<32>::launch<
+        flash_attention_detail::Bf16Format, 1, false>(config, q, k, v, output, result);
+}
+
+__kernel__ void flash_attention_fp16_4c_small(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<32>::launch<
+        flash_attention_detail::Fp16Format, 4, false>(config, q, k, v, output, result);
+}
+
+__kernel__ void flash_attention_bf16_4c_small(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<32>::launch<
+        flash_attention_detail::Bf16Format, 4, false>(config, q, k, v, output, result);
+}
+
+__kernel__ void flash_attention_fp16_decode_4c_small(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<32>::launch<
+        flash_attention_detail::Fp16Format, 4, true>(config, q, k, v, output, result);
+}
+
+__kernel__ void flash_attention_bf16_decode_4c_small(const FlashAttentionConfig *config,
+    const uint16_t *q, const uint16_t *k, const uint16_t *v,
+    float *output, FlashAttentionResult *result)
+{
+    flash_attention_detail::Pipeline<32>::launch<
+        flash_attention_detail::Bf16Format, 4, true>(config, q, k, v, output, result);
 }
 
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_1c, 1, 6,
@@ -1231,7 +1237,22 @@ DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_decode_4c, 1, 6,
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_decode_4c, 1, 6,
     128, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
 
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_1c_small, 1, 6,
+    0, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_1c_small, 1, 6,
+    0, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_4c_small, 1, 6,
+    128, 768U * 1024U, 6, 2, 2, 0, 30, 4);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_4c_small, 1, 6,
+    128, 768U * 1024U, 6, 2, 2, 0, 30, 4);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_decode_4c_small, 1, 6,
+    128, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_decode_4c_small, 1, 6,
+    128, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+
 #if !defined(__DAYAN_DEVICE__)
+
+#include "uram_config.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -1497,7 +1518,12 @@ __host__ int main(int argc, char **argv) {
     const size_t bytes[] = {sizeof(cfg), q_bytes, kv_bytes, kv_bytes,
                            output.size() * sizeof(float), results.size() * sizeof(FlashAttentionResult)};
     const void *inputs[] = {&cfg, q.data(), k.data(), v.data()};
+    uint64_t uram_capacity = 0;
     int status = npu_runtime_open(&runtime, &options);
+    if (status == 0) status = demo_uram_capacity(runtime, 768U * 1024U, &uram_capacity);
+    const bool small_uram = uram_capacity < 1536U * 1024U;
+    std::printf("[host] attention Q/KV tile: %ux%u\n",
+                small_uram ? 32U : 128U, 128U);
     if (status == 0) status = npu_context_create(runtime, nullptr, &context);
     if (status == 0) status = npu_stream_create(context, nullptr, &stream);
     for (size_t i = 0; i < 6 && status == 0; ++i) {
@@ -1512,6 +1538,11 @@ __host__ int main(int argc, char **argv) {
     auto launch = bf16 ? flash_attention_bf16_1c : flash_attention_fp16_1c;
     if (cores == 4) launch = bf16 ? flash_attention_bf16_4c : flash_attention_fp16_4c;
     if (split_kv) launch = bf16 ? flash_attention_bf16_decode_4c : flash_attention_fp16_decode_4c;
+    if (small_uram) {
+        launch = bf16 ? flash_attention_bf16_1c_small : flash_attention_fp16_1c_small;
+        if (cores == 4) launch = bf16 ? flash_attention_bf16_4c_small : flash_attention_fp16_4c_small;
+        if (split_kv) launch = bf16 ? flash_attention_bf16_decode_4c_small : flash_attention_fp16_decode_4c_small;
+    }
     npu_kernel_launch_attrs_t attrs;
     npu_kernel_launch_attrs_init(&attrs, context, stream, "flash-attention");
     attrs.config.task_mode = cores == 4 ? NPUTaskMode::kFourCore : NPUTaskMode::kSingleCore;
