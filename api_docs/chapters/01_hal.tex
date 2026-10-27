@@ -75,7 +75,7 @@ HAL 由两个相互独立的部分组成：
 
 \begin{dayantable}{HAL 生命周期与查询}{tab:api-hal-life}{X[38,l] X[62,l]}
   API & 行为 \\
-  \code{npu_hal_options_init} & 写入配置版本和一个 Cluster、每个 Cluster 四个 Core 的默认拓扑，不写入任何后端私有配置。 \\
+  \code{npu_hal_options_init} & 写入配置版本、一个 Cluster、每个 Cluster 四个 Core 和每 Core 1.5 MiB URAM 的默认配置，不写入任何后端私有配置。 \\
   \code{npu_hal_open} & 校验通用配置，建立内存管理器并打开所选后端。未指定后端配置时使用注册表中的默认后端。 \\
   \code{npu_hal_close} & 关闭后端并释放全部内存管理和同步状态。可传入空指针。 \\
   \code{npu_hal_device_status} & 返回 0，或此前记录的首个不可恢复设备 I/O 错误。 \\

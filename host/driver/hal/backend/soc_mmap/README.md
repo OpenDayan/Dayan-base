@@ -34,6 +34,7 @@ dayan_server --backend soc-mmap \
 | `--soc-memory-device` | Server 映射用的设备 | `/dev/mem` |
 | `--soc-data-device` | 传给 Runtime 的设备，DDR 偏移须与前者相同 | 同上 |
 | `--soc-platform-control` | 只有 `external`：clock/reset/电源由 BSP 负责 | `external` |
+| `--uram-size` | 每 Core 的 URAM 字节数，只接受 `0x180000` 或 `0xc0000` | `0x180000` |
 
 在 soc-mmap 后端下：
 - `--cluster-count` 只能为 1；
@@ -70,8 +71,8 @@ Normal DDR 不属于 IP 窗口，而是独立的 SoC 共享内存。依据是：
 
 ## 固定布局
 
-布局只来源于 `platform_regs.h`。`layout.c` 把它转成访问规则，其他源文件不再写死模块地址；
-`hal/memory.c` 的默认区域也改为引用这些常量。
+模块地址和固定大小来源于 `platform_regs.h`，URAM 大小由 `--uram-size` 选择。
+`layout.c` 把它们转成访问规则，`hal/memory.c` 使用相同的地址常量和容量配置。
 
 | 模块 | IP offset | 大小（4 核） | 规则 |
 | --- | --- | --- | --- |
@@ -84,11 +85,13 @@ Normal DDR 不属于 IP 窗口，而是独立的 SoC 共享内存。依据是：
 | CLINT MSIP | `0x020000` | 4 × 4 | 寄存器，32 位 |
 | PCU | `0x030000` | 4 × 0x2000 | 寄存器，64 位 |
 | Coherent（atomic-cache）窗口 | `0x400000` | 4 MiB | 内存 |
-| URAM，每核一份 | `0x800000 + core × 0x200000` | 0x180000 | 内存，仅该核可见 |
+| URAM，每核一份 | `0x800000 + core × 0x200000` | 0x180000 或 0xc0000 | 内存，仅该核可见 |
 
 窗口内的其他偏移（BootROM、CLINT 其余部分、保留区）Host 不访问，访问会返回 `-EFAULT`。
 
-HAL 分配区域由 `npu_hal_soc_mmap_memory_regions()` 按上表和 DDR 参数生成：
+HAL 分配区域由 `npu_hal_soc_mmap_memory_regions()` 按上表、DDR 参数和
+`npu_hal_options_t.uram_size` 生成。后端使用同一个容量限制读写范围：
+
 - Normal 覆盖整段共享 DDR；
 - Coherent；
 - 每核一个 URAM。

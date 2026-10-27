@@ -92,7 +92,7 @@ static void assert_unchanged(uint64_t offset, const unsigned char *saved,
 static void test_layout(void)
 {
     struct soc_layout_entry e[SOC_LAYOUT_MAX_ENTRIES];
-    int count = soc_layout_build(4, e, SOC_LAYOUT_MAX_ENTRIES);
+    int count = soc_layout_build(4, DAYAN_URAM_SIZE, e, SOC_LAYOUT_MAX_ENTRIES);
     int i;
 
     assert(count > 0);
@@ -104,10 +104,13 @@ static void test_layout(void)
     /* Last entries are the per-core URAMs at the platform stride. */
     assert(e[count - 1].memory_class == NPU_HAL_MEMORY_URAM &&
            e[count - 1].core == 3 && e[count - 1].offset == DAYAN_URAM(3));
-    assert(soc_layout_build(0, e, SOC_LAYOUT_MAX_ENTRIES) == -EINVAL);
-    assert(soc_layout_build(DAYAN_CLUSTER_MAX_HARTS + 1, e,
+    assert(soc_layout_build(0, DAYAN_URAM_SIZE, e,
                             SOC_LAYOUT_MAX_ENTRIES) == -EINVAL);
-    assert(soc_layout_build(4, e, 4) == -E2BIG);
+    assert(soc_layout_build(DAYAN_CLUSTER_MAX_HARTS + 1, DAYAN_URAM_SIZE, e,
+                            SOC_LAYOUT_MAX_ENTRIES) == -EINVAL);
+    assert(soc_layout_build(4, DAYAN_URAM_SIZE, e, 4) == -E2BIG);
+    assert(soc_layout_build(4, 0, e, SOC_LAYOUT_MAX_ENTRIES) == -EINVAL);
+    assert(soc_layout_build(4, 0x100000, e, SOC_LAYOUT_MAX_ENTRIES) == -EINVAL);
 }
 
 static void test_io(void)
@@ -180,7 +183,7 @@ static void test_configuration(void)
     int count;
 
     soc_defaults(&soc);
-    count = npu_hal_soc_mmap_memory_regions(&soc, 4, regions,
+    count = npu_hal_soc_mmap_memory_regions(&soc, 4, DAYAN_URAM_SIZE, regions,
                                             NPU_HAL_SOC_MMAP_MAX_REGIONS);
     /* Normal, Coherent, one URAM per core. */
     assert(count == 6);
@@ -193,7 +196,8 @@ static void test_configuration(void)
            regions[5].scope == NPU_HAL_MEMORY_CORE && regions[5].core == 3 &&
            regions[5].base == DAYAN_URAM(3) &&
            regions[5].size == DAYAN_URAM_SIZE);
-    assert(npu_hal_soc_mmap_memory_regions(&soc, 4, regions, 3) == -E2BIG);
+    assert(npu_hal_soc_mmap_memory_regions(&soc, 4, DAYAN_URAM_SIZE,
+                                          regions, 3) == -E2BIG);
 
     /* The regions used to be the 4 GiB PCIe defaults while only the mapped
      * DDR existed: now the backend refuses anything not fully mapped. */
@@ -497,6 +501,64 @@ static void test_copy_address(npu_hal_t *hal)
     free(before);
 }
 
+static void test_uram_capacity(void)
+{
+    const uint32_t sizes[] = { DAYAN_URAM_SIZE_1536K, DAYAN_URAM_SIZE_768K };
+    npu_hal_memory_region_t regions[NPU_HAL_SOC_MMAP_MAX_REGIONS];
+    npu_hal_soc_mmap_options_t soc;
+    npu_hal_options_t options;
+    npu_hal_t *hal = 0;
+
+    soc_defaults(&soc);
+    npu_hal_options_init(&options);
+    options.backend_options = &soc.base;
+    options.memory_regions = regions;
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        int count;
+
+        options.uram_size = sizes[i];
+        /* A stale 1.5 MiB pool must not open on a 768 KiB layout. */
+        if (i)
+            assert(npu_hal_open(&hal, &options) == -EINVAL && !hal);
+        count = npu_hal_soc_mmap_memory_regions(
+            &soc, options.cores_per_cluster, options.uram_size, regions,
+            NPU_HAL_SOC_MMAP_MAX_REGIONS);
+        assert(count == 6);
+        options.memory_region_count = (uint32_t)count;
+        assert(npu_hal_open(&hal, &options) == 0);
+        for (uint32_t core = 0; core < options.cores_per_cluster; ++core) {
+            npu_hal_core_t target = {0, core};
+            uint64_t end = DAYAN_URAM(core) + sizes[i];
+            uint64_t capacity;
+            uint64_t value = UINT64_C(0x1122334455667788);
+            uint64_t observed = 0;
+            unsigned char saved[16];
+
+            assert(regions[2 + core].base == DAYAN_URAM(core));
+            assert(regions[2 + core].size == sizes[i]);
+            assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM, target,
+                                           &capacity) == 0);
+            assert(capacity == sizes[i]);
+            assert(npu_hal_copy_to_address(hal, 0, end - sizeof(value), &value,
+                                           sizeof(value)) == 0);
+            assert(npu_hal_copy_from_address(hal, 0, &observed,
+                                             end - sizeof(value),
+                                             sizeof(value)) == 0);
+            assert(observed == value);
+            mark(NPU_BASE + end - 8, saved, sizeof(saved));
+            assert(npu_hal_copy_to_address(hal, 0, end - 4, &value,
+                                           sizeof(value)) == -EFAULT);
+            assert(npu_hal_copy_from_address(hal, 0, &observed, end,
+                                             sizeof(observed)) == -EFAULT);
+            assert(npu_hal_copy_address(hal, 0, end - 4, DDR_NPU,
+                                        sizeof(value)) == -EFAULT);
+            assert_unchanged(NPU_BASE + end - 8, saved, sizeof(saved));
+        }
+        npu_hal_close(hal);
+        hal = 0;
+    }
+}
+
 int main(void)
 {
     npu_hal_memory_region_t regions[NPU_HAL_SOC_MMAP_MAX_REGIONS];
@@ -534,9 +596,10 @@ int main(void)
     assert(memory_fd >= 0);
     assert(ftruncate(memory_fd, (off_t)FILE_SIZE) == 0);
     test_configuration();
+    test_uram_capacity();
 
     soc_defaults(&soc);
-    count = npu_hal_soc_mmap_memory_regions(&soc, 4, regions,
+    count = npu_hal_soc_mmap_memory_regions(&soc, 4, DAYAN_URAM_SIZE, regions,
                                             NPU_HAL_SOC_MMAP_MAX_REGIONS);
     assert(open_with(&hal, &soc, regions, (uint32_t)count) == 0);
     assert(npu_hal_get_info(hal, &info) == 0);

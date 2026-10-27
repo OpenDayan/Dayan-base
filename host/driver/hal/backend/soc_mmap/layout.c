@@ -22,7 +22,8 @@ static const char *const uram_names[DAYAN_CLUSTER_MAX_HARTS] = {
  *     PCU_CONTROL latches every counter into its hold register first
  *     (hal/pcu.c); a split read could still tear, so it is refused.
  */
-int soc_layout_build(uint32_t cores, struct soc_layout_entry *entries,
+int soc_layout_build(uint32_t cores, uint32_t uram_size,
+                     struct soc_layout_entry *entries,
                      uint32_t capacity)
 {
     const struct soc_layout_entry fixed[] = {
@@ -53,7 +54,9 @@ int soc_layout_build(uint32_t cores, struct soc_layout_entry *entries,
     uint32_t count = sizeof(fixed) / sizeof(fixed[0]);
     uint32_t index;
 
-    if (!entries || !cores || cores > DAYAN_CLUSTER_MAX_HARTS)
+    if (!entries || !cores || cores > DAYAN_CLUSTER_MAX_HARTS ||
+        (uram_size != DAYAN_URAM_SIZE_768K &&
+         uram_size != DAYAN_URAM_SIZE_1536K))
         return -EINVAL;
     if (capacity < count + cores)
         return -E2BIG;
@@ -61,7 +64,7 @@ int soc_layout_build(uint32_t cores, struct soc_layout_entry *entries,
     for (index = 0; index < cores; ++index) {
         entries[count++] = (struct soc_layout_entry){
             uram_names[index], SOC_LAYOUT_MEMORY, 0, DAYAN_URAM(index),
-            DAYAN_URAM_SIZE, NPU_HAL_MEMORY_URAM, index
+            uram_size, NPU_HAL_MEMORY_URAM, index
         };
     }
     /* The table is fixed, but a wrong edit to platform_regs.h should fail

@@ -22,6 +22,7 @@ int npu_hal_soc_mmap_options_init(npu_hal_soc_mmap_options_t *options)
 
 int npu_hal_soc_mmap_memory_regions(const npu_hal_soc_mmap_options_t *options,
                                     uint32_t cores_per_cluster,
+                                    uint32_t uram_size,
                                     npu_hal_memory_region_t *regions,
                                     uint32_t capacity)
 {
@@ -32,7 +33,7 @@ int npu_hal_soc_mmap_memory_regions(const npu_hal_soc_mmap_options_t *options,
 
     if (!options || !regions || !options->ddr_size)
         return -EINVAL;
-    entry_count = soc_layout_build(cores_per_cluster, entries,
+    entry_count = soc_layout_build(cores_per_cluster, uram_size, entries,
                                    SOC_LAYOUT_MAX_ENTRIES);
     if (entry_count < 0)
         return entry_count;

@@ -209,8 +209,8 @@ static int soc_open(const npu_hal_options_t *options, void **out)
     s->ddr_host_base = o->ddr_host_base;
     s->ddr_device_base = o->ddr_device_base;
     s->ddr_size = o->ddr_size;
-    status = soc_layout_build(options->cores_per_cluster, s->entries,
-                              SOC_LAYOUT_MAX_ENTRIES);
+    status = soc_layout_build(options->cores_per_cluster, options->uram_size,
+                              s->entries, SOC_LAYOUT_MAX_ENTRIES);
     if (status < 0)
         goto fail;
     s->entry_count = (uint32_t)status;

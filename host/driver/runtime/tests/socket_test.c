@@ -262,6 +262,61 @@ static void assert_package_cache(dayan_server_t *server, size_t entries,
     assert(observed_references == total_references);
 }
 
+static void test_uram_capacity(const dayan_server_options_t *base)
+{
+    const uint32_t sizes[] = { DAYAN_URAM_SIZE_1536K, DAYAN_URAM_SIZE_768K };
+    dayan_server_options_t options = *base;
+    npu_package_kernel_t metadata = {0};
+    struct server_package_cache package = {0};
+    struct server_module module = {.package = &package};
+    struct server_kernel kernel = {.module = &module, .metadata = &metadata};
+    struct server_command command = {.kind = SERVER_COMMAND_LAUNCH};
+    dayan_server_t *server = 0;
+
+    command.data.launch.kernel = &kernel;
+    assert(options.hal.uram_size == DAYAN_URAM_SIZE_1536K);
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        options.hal.uram_size = sizes[i];
+        assert(dayan_server_create(&server, &options) == 0);
+        for (size_t slot = 0; slot < server->slot_count; ++slot)
+            assert(server->slots[slot].uram_capacity == sizes[i]);
+        {
+            npu_runtime_options_t runtime_options;
+            npu_runtime_t *runtime = 0;
+            struct run_state run = {server, -1};
+            pthread_t thread;
+            uint64_t capacity = 0;
+
+            assert(pthread_create(&thread, 0, run_server, &run) == 0);
+            npu_runtime_options_init(&runtime_options);
+            runtime_options.server_socket = options.socket_path;
+            assert(npu_runtime_open(&runtime, &runtime_options) == 0);
+            assert(npu_runtime_get_uram_capacity(0, &capacity) == -EINVAL);
+            assert(npu_runtime_get_uram_capacity(runtime, 0) == -EINVAL);
+            assert(npu_runtime_get_uram_capacity(runtime, &capacity) == 0);
+            assert(capacity == sizes[i]);
+            assert(runtime_control_call(runtime, NPU_IPC_URAM_CAPACITY, 1,
+                                        0, 0, &capacity, sizeof(capacity), 0) ==
+                   -EINVAL);
+            assert(npu_runtime_close(runtime) == 0);
+            dayan_server_request_stop(server);
+            assert(pthread_join(thread, 0) == 0 && run.status == 0);
+        }
+        for (uint32_t mode = 1; mode <= 4; mode += 3) {
+            command.data.launch.config.task_mode = (NPUTaskMode)mode;
+            metadata.uram_size = sizes[i];
+            assert(server_launch_resources_valid(server, &command) == 0);
+            metadata.uram_size += NPU_PACKAGE_URAM_GRANULE;
+            assert(server_launch_resources_valid(server, &command) == -ENOSPC);
+            metadata.uram_size = DAYAN_URAM_SIZE_1536K;
+            assert(server_launch_resources_valid(server, &command) ==
+                   (sizes[i] == DAYAN_URAM_SIZE_1536K ? 0 : -ENOSPC));
+        }
+        dayan_server_destroy(server);
+        server = 0;
+    }
+}
+
 int main(void)
 {
     static const npu_hal_memory_region_t regions[] = {
@@ -313,6 +368,7 @@ int main(void)
     server_options.max_procs_per_hart = NPU_PACKAGE_HART_MAX_PROCS - 1U;
     server_options.socket_path = socket_path;
     xdma_options.device_directory = directory;
+    test_uram_capacity(&server_options);
     server_options.hal.memory_regions = regions;
     server_options.hal.memory_region_count =
         sizeof(regions) / sizeof(regions[0]);
@@ -350,6 +406,13 @@ int main(void)
         assert(topology.cores_per_cluster == server->hal_info.cores_per_cluster);
         assert(topology.enabled_cluster_mask == server->options.enabled_cluster_mask);
         assert(topology.enabled_core_mask == server->options.enabled_core_mask);
+        {
+            uint64_t capacity = UINT64_MAX;
+
+            /* This explicit region set has no URAM, despite the HAL default. */
+            assert(npu_runtime_get_uram_capacity(runtime, &capacity) == 0);
+            assert(capacity == 0);
+        }
         assert(runtime_control_call(runtime, NPU_IPC_TOPOLOGY, 1,
                                     0, 0, &topology, sizeof(topology), 0) == -EINVAL);
     }

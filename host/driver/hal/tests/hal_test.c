@@ -78,6 +78,62 @@ static void *write_irq(void *argument)
     return 0;
 }
 
+static void test_uram_capacity(const npu_hal_options_t *base)
+{
+    const uint32_t sizes[] = { DAYAN_URAM_SIZE_1536K, DAYAN_URAM_SIZE_768K };
+    npu_hal_options_t options = *base;
+    npu_hal_t *hal = 0;
+
+    assert(options.uram_size == DAYAN_URAM_SIZE_1536K);
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        options.uram_size = sizes[i];
+        assert(npu_hal_open(&hal, &options) == 0);
+        for (uint32_t cluster = 0; cluster < options.cluster_count; ++cluster) {
+            for (uint32_t core = 0; core < options.cores_per_cluster; ++core) {
+                npu_hal_core_t target = {cluster, core};
+                npu_hal_memory_request_t request;
+                npu_hal_allocation_t *full = 0;
+                npu_hal_allocation_t *extra = 0;
+                uint64_t capacity;
+                uint64_t address;
+
+                assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+                                               target, &capacity) == 0);
+                assert(capacity == sizes[i]);
+                npu_hal_memory_request_init(&request);
+                request.memory_class = NPU_HAL_MEMORY_URAM;
+                request.scope = NPU_HAL_MEMORY_CORE;
+                request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
+                request.location = target;
+                request.alignment = 0x8000;
+                request.size = capacity + 0x8000;
+                assert(npu_hal_memory_alloc(hal, &request, &extra) == -ENOMEM);
+                assert(!extra);
+                request.size = capacity;
+                assert(npu_hal_memory_alloc(hal, &request, &full) == 0);
+                assert(npu_hal_memory_address(hal, full, target, &address) == 0);
+                assert(address == DAYAN_URAM(core));
+                request.size = 0x8000;
+                assert(npu_hal_memory_alloc(hal, &request, &extra) == -ENOMEM);
+                assert(!extra);
+                assert(npu_hal_memory_free(hal, full) == 0);
+                request.fixed_address = DAYAN_URAM(core) + capacity;
+                assert(npu_hal_memory_reserve(hal, &request, &extra) == -ERANGE);
+                assert(!extra);
+                request.fixed_address -= request.size;
+                assert(npu_hal_memory_reserve(hal, &request, &extra) == 0);
+                assert(npu_hal_memory_free(hal, extra) == 0);
+            }
+        }
+        npu_hal_close(hal);
+        hal = 0;
+    }
+    options.uram_size = 0;
+    assert(npu_hal_open(&hal, &options) == -EINVAL && !hal);
+    options.uram_size = DAYAN_URAM_SIZE_768K + 0x8000;
+    assert(npu_hal_open(&hal, &options) == -EINVAL && !hal);
+}
+
 int main(void)
 {
     static const npu_hal_memory_region_t regions[] = {
@@ -153,6 +209,7 @@ int main(void)
     options.cluster_count = 2;
     options.cores_per_cluster = 4;
     xdma_options.cluster_device_stride = 2;
+    test_uram_capacity(&options);
     options.memory_regions = regions;
     options.memory_region_count = sizeof(regions) / sizeof(regions[0]);
     assert(npu_hal_open(&hal, &options) == 0);

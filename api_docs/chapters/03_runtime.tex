@@ -106,6 +106,7 @@ Runtime 不访问寄存器或中断设备。公开入口由
   \code{npu_runtime_open} & 建立控制连接和传输授权连接，导入 HAL 设备句柄，并启动传输线程。 \\
   \code{npu_runtime_close} & 依次关闭性能采样和全部 Context，等待数据传输结束，停止传输线程并关闭会话。 \\
   \code{npu_runtime_get_topology} & 查询 Server 的 Cluster/Core 数及启用 mask，返回 \code{npu_runtime_topology_t}。 \\
+  \code{npu_runtime_get_uram_capacity} & 查询启用 Core 中最小的每核 URAM 总容量，单位为字节；不扣除当前任务占用。用于启动前选择算子配置。 \\
   \code{npu_context_create} & 在 Session 内创建隔离 Context。 \\
   \code{npu_context_destroy} & 取消 Context 中的命令，并回收全部子对象和已授权传输。 \\
   \code{npu_buffer_create} & 按描述符向 Server 申请逻辑 Buffer。 \\

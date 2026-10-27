@@ -117,6 +117,8 @@ static int options_valid(const npu_hal_options_t *options)
            options->cluster_count <= NPU_HAL_MAX_CLUSTERS &&
            options->cores_per_cluster &&
            options->cores_per_cluster <= NPU_HAL_MAX_CORES_PER_CLUSTER &&
+           (options->uram_size == DAYAN_URAM_SIZE_768K ||
+            options->uram_size == DAYAN_URAM_SIZE_1536K) &&
            options->split_normal_memory <= 1U &&
            (!options->memory_region_count ||
             (options->memory_regions && !options->normal_memory_size_mib));

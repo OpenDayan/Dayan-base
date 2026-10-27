@@ -3,6 +3,7 @@
 #include "server.h"
 #include "backend/xilinx_dma/npu_hal_xilinx_dma.h"
 #include "backend/soc_mmap/npu_hal_soc_mmap.h"
+#include "platform_regs.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -94,6 +95,7 @@ static void usage(FILE *stream, const char *program)
             "                          the low --cores-per-cluster bits\n"
             "  --timeout-ms N          Device operation timeout in milliseconds\n"
             "  --normal-memory-size-mib N  default Normal memory size in MiB\n"
+            "  --uram-size N           per-Core URAM bytes: 0x180000 (default) or 0xc0000\n"
             "  --enable-mmu 0|1        route Device addresses through the ClusterMMU\n"
             "soc-mmap backend (one Cluster; Normal memory is --soc-ddr-*):\n"
             "  --soc-base PA           Host PA of the Cluster IP aperture (required)\n"
@@ -294,6 +296,13 @@ int main(int argc, char **argv)
             if (status == 0 && options.service.enable_mmu > 1U)
                 status = -EINVAL;
         }
+        else if (strcmp(argument, "--uram-size") == 0) {
+            status = parse_u32(value, &options.hal.uram_size);
+            if (status == 0 &&
+                options.hal.uram_size != DAYAN_URAM_SIZE_768K &&
+                options.hal.uram_size != DAYAN_URAM_SIZE_1536K)
+                status = -EINVAL;
+        }
         else if (strcmp(argument, "--normal-memory-size-mib") == 0) {
             status = parse_u32(value,
                                &options.hal.normal_memory_size_mib);
@@ -332,8 +341,8 @@ int main(int argc, char **argv)
             return 2;
         }
         soc_region_count = npu_hal_soc_mmap_memory_regions(
-            &soc, options.hal.cores_per_cluster, soc_regions,
-            NPU_HAL_SOC_MMAP_MAX_REGIONS);
+            &soc, options.hal.cores_per_cluster, options.hal.uram_size,
+            soc_regions, NPU_HAL_SOC_MMAP_MAX_REGIONS);
         if (soc_region_count < 0) {
             fprintf(stderr, "dayan_server: soc-mmap layout failed: %s\n",
                     strerror(-soc_region_count));

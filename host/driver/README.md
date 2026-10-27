@@ -134,8 +134,14 @@ QDMA 的 user IRQ 节点来自本地驱动扩展，原生驱动不保证提供�
 
 Server 的 Buffer 分配、调度目标选择、kernel image、BL1 固定段和反向 heap RPC 都使用
 HAL allocation handle。应用侧只有 `npu_buffer_t *`，不会取得物理地址。默认 HAL
-包含 device-scope DRAM/coherent region，以及每个 Core 一个 1.5 MiB URAM region；
-URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB。真实多 Cluster 平台可通过
+包含 device-scope DRAM/coherent region，以及每个 Core 一个 URAM region。
+`dayan_server --uram-size 0xc0000` 选择每 Core 768 KiB；省略该参数或指定
+`--uram-size 0x180000` 使用 1.5 MiB。参数单位为字节，只接受这两种容量，适用于
+XDMA、QDMA 和 SoC mmap。当前硬件尚无容量查询寄存器，需要按实际核心版本配置。
+程序化配置使用 `npu_hal_options_t.uram_size`，由 `npu_hal_options_init()` 默认设为
+`0x180000`；显式 `memory_regions` 则决定可分配的内存池。
+URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB，两种容量使用相同地址布局。
+真实多 Cluster 平台可通过
 `dayan_server_options_t.hal.memory_regions` 提供准确的物理布局。对同一 Cluster
 可见的 region 不得重叠；不同 Cluster 的局部地址空间可以使用相同数值地址。
 
@@ -146,6 +152,12 @@ Atomic Cache、URAM 及 LSU/MAT/VEC/MACRO TCSR 位图：每个 invocation 按
 proc 不计入）。URAM allocation 固定为 Core scope，以 32 KiB 为分配和释放粒度；
 Server 把 URAM 与 TCSR 物理范围压缩进 64-bit Context。物理 Cluster/Core 仍不会
 出现在 Runtime 启动接口中。
+
+Host Runtime 不单独配置容量；Server 按 HAL region 容量校验和调度，单个实例需求超过
+容量时 launch 返回 `-ENOSPC`。Device 的 `dayan_uram_size()` 返回当前实例获分配的
+大小，因此同一份受 Host 管理的 BL1 可用于两种容量。独立运行的裸机测试需用
+`make -C device URAM_SIZE=0xc0000` 构建 768 KiB 版本；该选项限制裸机测试描述符
+允许申请的容量，不改变 Host 下发的分配范围。
 
 `NPU_PACKAGE_KERNEL_LOCKED_TASK` 只允许 single-Core kernel。带该标记的一个 logical
 Task 只能派发到空 Hart；从 root Proc 建立到整个 family 终态期间，该 Hart 不接受任何

@@ -834,13 +834,14 @@ int dayan_server_create(dayan_server_t **server_out,
     server->options.service.callback_context = server;
     server_log("startup",
                "configuration: socket=%s backend=%u requested_clusters=%u "
-               "cores_per_cluster=%u normal_memory_mib=%u",
+               "cores_per_cluster=%u normal_memory_mib=%u uram_size=0x%x",
                options->socket_path,
                options->hal.backend_options ?
                    options->hal.backend_options->backend : 0U,
                server->options.hal.cluster_count,
                server->options.hal.cores_per_cluster,
-               server->options.hal.normal_memory_size_mib);
+               server->options.hal.normal_memory_size_mib,
+               server->options.hal.uram_size);
     server_log("startup",
                "requested masks: clusters=0x%08x cores=0x%08x; "
                "firmware=%s; api_elf=%s",
@@ -2190,6 +2191,25 @@ static int dispatch_control(dayan_server_t *server,
         topology->enabled_cluster_mask = server->options.enabled_cluster_mask;
         topology->enabled_core_mask = server->options.enabled_core_mask;
         *response_size = sizeof(*topology);
+        status = 0;
+        break;
+    }
+    case NPU_IPC_URAM_CAPACITY: {
+        uint64_t capacity = UINT64_MAX;
+        size_t index;
+
+        if (!payload_exact(header, 0) || header->object_id) {
+            status = -EINVAL;
+            break;
+        }
+        for (index = 0; index < server->slot_count; ++index) {
+            const struct server_core_slot *slot = &server->slots[index];
+
+            if (slot->enabled && slot->uram_capacity < capacity)
+                capacity = slot->uram_capacity;
+        }
+        *(uint64_t *)response = capacity == UINT64_MAX ? 0 : capacity;
+        *response_size = sizeof(capacity);
         status = 0;
         break;
     }

@@ -3,8 +3,8 @@
 
 /*
  * The Cluster IP aperture as the soc_mmap backend uses it: every module the
- * Host touches, with its access rule.  Offsets and sizes come from
- * platform_regs.h only; nothing else in the backend names a module address.
+ * Host touches, with its access rule.  Offsets and fixed sizes come from
+ * platform_regs.h; URAM size is selected by the Server configuration.
  * IP offsets anywhere else in the aperture (BootROM, the rest of CLINT,
  * reserved space) are not accessible.
  */
@@ -34,7 +34,8 @@ struct soc_layout_entry {
  * Fills entries for a Cluster with @cores Harts (1..DAYAN_CLUSTER_MAX_HARTS),
  * sorted by offset.  Returns the count, or a negative errno.
  */
-int soc_layout_build(uint32_t cores, struct soc_layout_entry *entries,
+int soc_layout_build(uint32_t cores, uint32_t uram_size,
+                     struct soc_layout_entry *entries,
                      uint32_t capacity);
 
 #endif

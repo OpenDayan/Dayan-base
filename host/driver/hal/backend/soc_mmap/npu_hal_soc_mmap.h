@@ -83,13 +83,15 @@ int npu_hal_soc_mmap_options_init(npu_hal_soc_mmap_options_t *options);
 
 /*
  * Memory regions matching the fixed layout and the DDR configuration: Normal
- * over the whole shared DDR, the Coherent window, and one URAM per core.  The
+ * over the whole shared DDR, the Coherent window, and one URAM per core.
+ * Pass npu_hal_options_t::uram_size so allocation and access bounds agree.  The
  * backend refuses any other region set, so a Server passes these to
  * npu_hal_options_t::memory_regions.  Returns the region count, or -E2BIG when
  * capacity is too small.
  */
 int npu_hal_soc_mmap_memory_regions(const npu_hal_soc_mmap_options_t *options,
                                     uint32_t cores_per_cluster,
+                                    uint32_t uram_size,
                                     npu_hal_memory_region_t *regions,
                                     uint32_t capacity);
 #define NPU_HAL_SOC_MMAP_MAX_REGIONS (2U + NPU_HAL_MAX_CORES_PER_CLUSTER)
