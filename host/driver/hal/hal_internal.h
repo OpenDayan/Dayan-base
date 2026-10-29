@@ -79,6 +79,7 @@ struct npu_hal {
 
 extern const struct npu_hal_backend_ops npu_hal_xilinx_dma_backend_ops;
 extern const struct npu_hal_backend_ops npu_hal_soc_mmap_backend_ops;
+extern const struct npu_hal_backend_ops npu_hal_inprocess_backend_ops;
 int npu_hal_memory_manager_init(npu_hal_t *hal,
                                 const npu_hal_options_t *options);
 void npu_hal_memory_manager_destroy(npu_hal_t *hal);

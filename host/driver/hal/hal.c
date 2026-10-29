@@ -20,6 +20,7 @@
 static const struct npu_hal_backend_ops *const backends[] = {
     &npu_hal_xilinx_dma_backend_ops,
     &npu_hal_soc_mmap_backend_ops,
+    &npu_hal_inprocess_backend_ops,
 };
 
 static const struct npu_hal_backend_ops *default_backend(void)

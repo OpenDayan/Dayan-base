@@ -101,6 +101,11 @@ $(BUILD)/tests/soc_mmap_test: hal/tests/soc_mmap_test.c $(HAL_IO_OBJECTS) \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+$(BUILD)/tests/inprocess_test: hal/tests/inprocess_test.c $(HAL_IO_OBJECTS) \
+		$(HAL_CONTROL_OBJECTS) $(HAL_DATA_OBJECTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
 $(BUILD)/tests/package_test: runtime/tests/package_test.c \
 		$(BUILD)/runtime/package.o $(BUILD)/server/package.o
 	@mkdir -p $(dir $@)
@@ -175,7 +180,7 @@ check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
 	$(BUILD)/tests/pcu_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
 	$(BUILD)/tests/mmu_pt_test $(BUILD)/tests/mmu_test \
-	$(BUILD)/tests/kernel_cache_test $(BUILD)/tests/profile_parallel_test $(BUILD)/tests/public_headers.o
+	$(BUILD)/tests/kernel_cache_test $(BUILD)/tests/profile_parallel_test $(BUILD)/tests/public_headers.o $(BUILD)/tests/inprocess_test
 	$(BUILD)/tests/hal_test
 	$(BUILD)/tests/soc_mmap_test
 	$(BUILD)/tests/pcu_test
@@ -185,6 +190,7 @@ check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
 	$(BUILD)/tests/mmu_test
 	$(BUILD)/tests/kernel_cache_test
 	$(BUILD)/tests/profile_parallel_test
+	$(BUILD)/tests/inprocess_test
 
 $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 	@mkdir -p $(dir $@)
