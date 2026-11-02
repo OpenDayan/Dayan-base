@@ -244,7 +244,10 @@ Verilator RTL 仿真仍明显慢于 cmodel；日常 bring-up 可先使用前面�
 case，完整数值验证可先运行：
 
 ```sh
-make -C ./demo run-matmul-4c
+# 终端一
+NPU_CMODEL_HARTS=4 ./run_cmodel_server.sh
+# 终端二
+./build/demo/matmul_bf16_4c
 ```
 
 ### 4.4 同时运行 dyperf 与算子

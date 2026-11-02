@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static int inprocess_open(const npu_hal_options_t *options, void **state_out)
+static int inprocess_open(npu_hal_options_t *options, void **state_out)
 {
     const npu_hal_inprocess_options_t *backend =
         (const npu_hal_inprocess_options_t *)options->backend_options;

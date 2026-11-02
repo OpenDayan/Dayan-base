@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "hal_internal.h"
+#include "backend/soc_mmap/npu_hal_soc_mmap.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -128,6 +129,7 @@ static int options_valid(const npu_hal_options_t *options)
 int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
 {
     npu_hal_options_t defaults;
+    npu_hal_memory_region_t soc_regions[NPU_HAL_SOC_MMAP_MAX_REGIONS];
     const struct npu_hal_backend_ops *ops;
     npu_hal_t *hal;
     int irq_mutex_initialized = 0;
@@ -149,6 +151,8 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
         return -ENOTSUP;
     if (!backend_ops_valid(ops))
         return -EPROTO;
+    defaults = *options;
+    options = &defaults;
     hal = calloc(1, sizeof(*hal));
     if (!hal)
         return -ENOMEM;
@@ -168,16 +172,30 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
         goto fail;
     }
     irq_mutex_initialized = 1;
-    status = npu_hal_memory_manager_init(hal, options);
+    status = hal->ops->open(&defaults, &hal->state);
     if (status < 0)
         goto fail;
-    status = hal->ops->open(options, &hal->state);
+    hal->cores_per_cluster = options->cores_per_cluster;
+    if (hal->backend == NPU_HAL_BACKEND_SOC_MMAP &&
+        !options->memory_region_count) {
+        status = npu_hal_soc_mmap_memory_regions(
+            (const void *)options->backend_options,
+            options->cores_per_cluster, options->uram_size,
+            soc_regions, NPU_HAL_SOC_MMAP_MAX_REGIONS);
+        if (status < 0)
+            goto fail;
+        defaults.memory_regions = soc_regions;
+        defaults.memory_region_count = (uint32_t)status;
+    }
+    status = npu_hal_memory_manager_init(hal, options);
     if (status < 0)
         goto fail;
     *hal_out = hal;
     return 0;
 
 fail:
+    if (hal->state)
+        hal->ops->close(hal->state);
     npu_hal_memory_manager_destroy(hal);
     if (irq_mutex_initialized)
         pthread_mutex_destroy(&hal->irq_mutex);

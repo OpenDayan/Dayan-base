@@ -1,5 +1,20 @@
 #include <dayan_kernel.h>
 #include <stdint.h>
+#ifndef FLASH_ATTENTION_TIMING
+#define FLASH_ATTENTION_TIMING 0
+#endif
+#ifndef FLASH_ATTENTION_OPT
+#define FLASH_ATTENTION_OPT 0
+#endif
+#ifndef FLASH_ATTENTION_BARRIER_ONLY
+#define FLASH_ATTENTION_BARRIER_ONLY 0
+#endif
+#ifndef FLASH_ATTENTION_SHARED_KV
+#define FLASH_ATTENTION_SHARED_KV 0
+#endif
+#ifndef FLASH_ATTENTION_RESOURCE_4C
+#define FLASH_ATTENTION_RESOURCE_4C 0
+#endif
 
 // Ported from llama.cpp/ggml/src/ggml-dayan/ggml-dayan-flash-attention.h.
 // Two Q slices (128 rows, or 32 on 768 KiB cores) share double-buffered
@@ -34,6 +49,9 @@ struct FlashAttentionConfig {
 // Device harts have noncoherent 64-byte cache lines; each status owns a line.
 struct alignas(64) FlashAttentionResult {
     int64_t status;
+#if FLASH_ATTENTION_TIMING
+    uint64_t entry_cycle = 0, first_qk_cycle = 0, end_cycle = 0;
+#endif
 };
 static_assert(sizeof(FlashAttentionResult) == 64, "Task status must own a cache line");
 
@@ -127,12 +145,15 @@ static inline void begin_vec_block(long instructions) {
     } while (free_entries < instructions);
 }
 
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 static inline void start_vec_block(long instructions) {
     // Keep CPU URAM stores before VEC submission.
     __asm__ volatile("" ::: "memory");
     __tx_vec_tcsr_write<kVecSync>(0);
     __tx_vec_tcsr_write<kVecControl>(vec_control(instructions));
 }
+
+#endif
 
 // Each kernel instantiates a fixed layout, so vector and MAT loops keep
 // compile-time tile sizes for both physical URAM capacities.
@@ -340,6 +361,7 @@ static inline bool ranges_overlap(uint64_t a, uint64_t a_bytes, uint64_t b, uint
 
 struct Cluster {
     dayan_cluster_barrier_t barrier;
+    dayan_cluster_barrier_t kv_barrier;
     uint64_t uram[4];
     uint32_t owner[4];
 };
@@ -347,13 +369,23 @@ static_assert(sizeof(Cluster) <= kAtomicBytes, "Attention shared metadata exceed
 
 struct State {
     const FlashAttentionConfig * cfg;
+#if FLASH_ATTENTION_TIMING
+    uint64_t *first_qk_cycle;
+#endif
     uint64_t q, k, v, out, uram;
     uint64_t blocks;
     uint32_t task, tasks, cores, lane, scale;
     long groups;
+#if FLASH_ATTENTION_BARRIER_ONLY || FLASH_ATTENTION_RESOURCE_4C
+    __device__ static constexpr bool split_kv = false;
+#else
     bool split_kv;
+#endif
 
-    uint64_t work(uint64_t block) const { return task + block / groups * tasks; }
+    uint64_t work(uint64_t block) const {
+        if constexpr (FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_SHARED_KV) return (task + block * tasks) / groups;
+        return task + block / groups * tasks;
+    }
     uint32_t batch(uint64_t block) const { return (uint32_t) (work(block) / (split_kv ? cfg->kv_heads : cfg->q_heads)); }
     uint32_t head(uint64_t block) const {
         return split_kv ? (work(block) % cfg->kv_heads) * (cfg->q_heads / cfg->kv_heads) + block % groups * kBr : work(block) % cfg->q_heads;
@@ -362,6 +394,7 @@ struct State {
         if (split_kv) {
             return 0;
         }
+        if constexpr (FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_SHARED_KV) return ((task + block * tasks) % groups * kSlices + slice) * kBr;
         return ((block % groups * kSlices + slice) * cores + core) * kBr;
     }
     long rows(uint64_t block, long slice) const {
@@ -407,6 +440,13 @@ struct State {
             count += ki < keys(block, slice, lane);
         }
         return count;
+    }
+    long kv_owner(uint64_t block, long ki) const {
+        for (long i = 0; i < cores; ++i) {
+            const long core = (ki + i) % cores;
+            if (ki < keys(block, 0, core) || ki < keys(block, 1, core)) return core;
+        }
+        return 0;
     }
     uint64_t q_address(uint64_t block, long slice) const {
         return q + batch(block) * cfg->q_batch_stride + head(block) * cfg->q_head_stride +
@@ -454,11 +494,13 @@ static void load_q(void * argument) {
     dayan_wait_lsu();
 }
 
+#if !FLASH_ATTENTION_SHARED_KV
 template <int Cores, bool Value> static void load_kv(void * argument) {
     const State & s = *(State *) argument;
     const long uram = (long) dayan_uram_base();
     uint64_t phases = 0;
     uint64_t generation = 0;
+    long copy_bytes = 0;
     if constexpr (Value) {
         configure_v_transpose<0>(s.cfg->head_dim, s.cfg->v_row_stride);
         __tx_lsu_tcsr_write<LSU_URAMWRITESWIZZLEMBS>(kVSwizzle);
@@ -496,6 +538,7 @@ template <int Cores, bool Value> static void load_kv(void * argument) {
                 if constexpr (Value) {
                     const long end = (cols + 31) / 32 * 64;
                     if (end < kBc * 2) {
+                        copy_bytes = 0;
                         configure_lsu_rows<1>(kBc * 2 - end, 0, kBc * 2);
                         set_lsu_rows<1>(s.cfg->head_dim);
                         __tx_lsu_tcsr_write<LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(kVSwizzle);
@@ -514,7 +557,11 @@ template <int Cores, bool Value> static void load_kv(void * argument) {
                 const Cluster & cluster = *(Cluster *) shared;
                 const long owner = cluster.owner[2 * Value + slot];
                 const long bytes = Value ? s.cfg->head_dim * kBc * 2 : cols * s.cfg->head_dim * 2;
-                configure_lsu_rows<1>(bytes, bytes, bytes);
+                // Group 1 retains peer-copy layout until tail zeroing changes it.
+                if (!FLASH_ATTENTION_OPT || copy_bytes != bytes) {
+                    configure_lsu_rows<1>(bytes, bytes, bytes);
+                    copy_bytes = bytes;
+                }
                 __tx_lsu_dma_d2u<1>(uram + offset, cluster.uram[owner] + offset);
                 check(dayan_resource_produce_lsu(local, users, shared_mask));
             } else {
@@ -525,6 +572,63 @@ template <int Cores, bool Value> static void load_kv(void * argument) {
     }
     dayan_wait_lsu();
 }
+
+#endif
+
+#if FLASH_ATTENTION_SHARED_KV
+// One DRAM producer per K/V tile. Local tokens protect each Core's MAT
+// readers; the two barriers protect remote readers and owner slot reuse.
+static void load_shared_kv(void * argument) {
+    const State &s = *(State *)argument;
+    Cluster &cluster = *(Cluster *)shared;
+    const long uram = (long)dayan_uram_base();
+    uint64_t generation = 0;
+    configure_lsu_rows<0>(s.cfg->head_dim * 2, s.cfg->k_row_stride, s.cfg->head_dim * 2);
+    __tx_lsu_tcsr_write<LSU_URAMWRITESWIZZLEMBS>(qk_swizzle(s.cfg->head_dim));
+    configure_v_transpose<1>(s.cfg->head_dim, s.cfg->v_row_stride);
+    __tx_lsu_tcsr_write<LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(kVSwizzle);
+    for (uint64_t block = 0; block < s.blocks; ++block) {
+        for (long ki = 0; ki < s.shared_keys(block); ++ki, ++generation) {
+            const long slot = generation & 1;
+            const long users = s.users(block, ki), cols = s.cols(ki);
+            const long owner = s.kv_owner(block, ki);
+            const long k_offset = kUramK0 + slot * kKBytes;
+            const long v_offset = kUramVt0 + slot * kVtBytes;
+            const auto kr = kv_resource(false, slot), vr = kv_resource(true, slot);
+            if (users) check(dayan_resource_wait(DAYAN_RESOURCE_MASK(kr) | DAYAN_RESOURCE_MASK(vr), 0, 0, 0));
+            if (s.lane == owner) {
+                set_lsu_rows<0>(cols);
+                __tx_lsu_dma_d2u<0>(uram + k_offset, s.kv_address(block, ki, false));
+                const long end = (cols + 31) / 32 * 64;
+                if (end < kBc * 2) {
+                    configure_lsu_rows<2>(kBc * 2 - end, 0, kBc * 2);
+                    set_lsu_rows<2>(s.cfg->head_dim);
+                    __tx_lsu_tcsr_write<2 * LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(kVSwizzle);
+                    __tx_lsu_dma_u2u<2>(uram + v_offset + end, uram + kUramZero);
+                }
+                load_v_transposed<1>(s.kv_address(block, ki, true), uram + v_offset, cols, s.cfg->v_row_stride);
+            }
+            dayan_wait_lsu();
+            check(dayan_cluster_barrier(4, &cluster.kv_barrier));
+            if (users && s.lane != owner) {
+                const long k_bytes = cols * s.cfg->head_dim * 2;
+                const long v_bytes = s.cfg->head_dim * kBc * 2;
+                configure_lsu_rows<2>(k_bytes, k_bytes, k_bytes);
+                __tx_lsu_dma_d2u<2>(uram + k_offset, cluster.uram[owner] + k_offset);
+                configure_lsu_rows<2>(v_bytes, v_bytes, v_bytes);
+                __tx_lsu_dma_d2u<2>(uram + v_offset, cluster.uram[owner] + v_offset);
+            }
+            dayan_wait_lsu();
+            if (users) {
+                check(dayan_resource_produce_lsu(kr, users, 0));
+                check(dayan_resource_produce_lsu(vr, users, 0));
+            }
+            check(dayan_cluster_barrier(4, &cluster.kv_barrier));
+        }
+    }
+    dayan_wait_lsu();
+}
+#endif
 
 template <typename Format> static void calculate_qk(const State & s) {
     uint64_t phases = 0;
@@ -552,6 +656,9 @@ template <typename Format> static void calculate_qk(const State & s) {
                 __tx_mat_tcsr_write<kMatQK * MAT_GROUPSZ + MAT_M>(s.rows(block, slice) - 1);
                 __tx_mat_tcsr_write<kMatQK * MAT_GROUPSZ + MAT_N>(s.cols(ki) - 1);
                 const long base = s.uram + slice * kContextBytes;
+                #if FLASH_ATTENTION_TIMING
+                if (!*s.first_qk_cycle) *s.first_qk_cycle = dayan_get_time();
+                #endif
                 __tx_mat_mm<kMatQK>(s.uram + tile_offset(slice, slot) + kTileScore, base + kCtxQ, s.uram + kUramK0 + (generation & 1) * kKBytes);
                 const bool last = ki + 1 == slice_keys;
                 // Q and K are reusable after their last MAT read, before softmax or PV.
@@ -714,7 +821,8 @@ static void softmax(void * argument) {
     uint64_t phases = 0;
     initialize_vec();
     for (uint64_t block = 0; block < s.blocks; ++block) {
-        for (long ki = 0; ki < s.shared_keys(block); ++ki) {
+        const long shared_keys = s.shared_keys(block);
+        for (long ki = 0; ki < (FLASH_ATTENTION_OPT ? shared_keys : s.shared_keys(block)); ++ki) {
             for (long slice = 0; slice < kSlices; ++slice) {
                 if (ki >= s.keys(block, slice, s.lane)) {
                     continue;
@@ -811,6 +919,7 @@ template <bool First, bool Last> static inline void update_output(long base, lon
     __tx_vec_tcsr_write<kVecControl>(vec_control(instructions));
 }
 
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 static void merge_decode(const State & s, long uram, long base, long rows) {
     Cluster & cluster = *(Cluster *) shared;
     // The unused second Q slice holds peer state and merge weights.
@@ -880,6 +989,8 @@ static void merge_decode(const State & s, long uram, long base, long rows) {
     check(dayan_cluster_barrier(4, &cluster.barrier));
 }
 
+#endif
+
 static void output(void * argument) {
     const State & s = *(State *) argument;
     const long uram = (long) dayan_uram_base();
@@ -892,7 +1003,8 @@ static void output(void * argument) {
             configure_vec_iterator<kVecV2Base>(0, 0, 32, 0);
             configure_lsu_rows<0>(s.cfg->head_dim * 4, s.cfg->head_dim * 4, s.cfg->q_heads * s.cfg->head_dim * 4);
         }
-        for (long ki = 0; ki < s.shared_keys(block); ++ki) {
+        const long shared_keys = s.shared_keys(block);
+        for (long ki = 0; ki < (FLASH_ATTENTION_OPT ? shared_keys : s.shared_keys(block)); ++ki) {
             for (long slice = 0; slice < kSlices; ++slice) {
                 const long keys = s.keys(block, slice, s.lane);
                 if (ki >= keys) {
@@ -924,19 +1036,23 @@ static void output(void * argument) {
                 o_phases ^= current_o;
                 if (last) {
                     check(dayan_resource_wait_ready(o, (o_phases & current_o) ? 0 : 1));
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
                     if (s.split_kv) {
                         merge_decode(s, uram, base, rows);
                         configure_lsu_rows<0>(s.cfg->head_dim * 4, s.cfg->head_dim * 4, s.cfg->head_dim * 4);
                     }
+#endif
                     if (!s.split_kv || s.lane == 0) {
                         set_lsu_rows<0>(rows);
                         __tx_lsu_dma_u2d<0>(s.output_address(block, slice), out);
                     }
                     check(dayan_resource_consume_lsu(current_o | merge_state));
-                    dayan_wait_lsu();
+                    if constexpr (!FLASH_ATTENTION_OPT) dayan_wait_lsu();
                 }
             }
         }
+        // The two slices have separate O buffers. Drain together before a new Q group.
+        if constexpr (FLASH_ATTENTION_OPT) dayan_wait_lsu();
     }
     dayan_wait_vec();
     dayan_wait_lsu();
@@ -952,7 +1068,7 @@ enum FlashAttentionError {
 };
 
 template <typename Format, int Cores, bool SplitKV = false>
-static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint16_t * k, const uint16_t * v, float * out) {
+static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint16_t * k, const uint16_t * v, float * out, [[maybe_unused]] uint64_t *first_qk_cycle) {
     static_assert(Cores == 1 || Cores == 4, "Attention supports one or four cores");
     if (!cfg) {
         return FA_INVALID_ARGUMENT;
@@ -1025,7 +1141,8 @@ static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint1
     uint64_t       out_bytes;
     uint64_t       traversal_generations;
     const uint64_t q_tiles  = (static_cast<uint64_t>(q_len) + kBr - 1) / kBr;
-    const uint64_t q_groups = (q_tiles + (kSlices * Cores) - 1) / (kSlices * Cores);
+    constexpr int SharingCores = FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_SHARED_KV ? 1 : Cores;
+    const uint64_t q_groups = (q_tiles + (kSlices * SharingCores) - 1) / (kSlices * SharingCores);
     const uint64_t kv_tiles = (static_cast<uint64_t>(kv_len) + kBc - 1) / kBc;
     if (!checked_strided_tensor_span(batch, q_heads, q_len, row_bytes, q_batch_stride, q_head_stride, q_row_stride,
                                      &q_span) ||
@@ -1053,7 +1170,12 @@ static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint1
 
     State s = {};
     s.cfg = cfg;
+#if FLASH_ATTENTION_TIMING
+    s.first_qk_cycle = first_qk_cycle;
+#endif
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
     s.split_kv = SplitKV;
+#endif
     s.q = q_base_addr;
     s.k = k_base_addr;
     s.v = v_base_addr;
@@ -1070,6 +1192,14 @@ static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint1
     s.groups = SplitKV ? (q_heads / kv_heads + kBr - 1) / kBr : q_groups;
     const uint64_t work = (uint64_t) batch * (SplitKV ? kv_heads : q_heads);
     s.blocks = (work > s.task ? (work - s.task + s.tasks - 1) / s.tasks : 0) * s.groups;
+    if constexpr (FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_SHARED_KV) {
+        s.cores = 1;
+        s.lane = 0;
+        s.task = task + (Cores == 4 ? 4 * dayan_task_id(DAYAN_TASK_Y) : 0);
+        s.tasks = tasks * dayan_task_dim(DAYAN_TASK_Y);
+        const uint64_t blocks = work * s.groups;
+        s.blocks = s.task < blocks ? (blocks - 1 - s.task) / s.tasks + 1 : 0;
+    }
     for (long i = 0; i < kVecLanes; ++i) {
         ((uint32_t *) (uram + kUramZero))[i] = 0;
         ((int32_t *) (uram + kUramMaskRows))[i] = i / 8;
@@ -1081,17 +1211,22 @@ static int run(const FlashAttentionConfig * cfg, const uint16_t * q, const uint1
             return FA_INVALID_ARGUMENT;
         }
         Cluster & cluster = *(Cluster *) shared;
-        cluster.uram[s.lane] = uram;
+        if constexpr (!FLASH_ATTENTION_BARRIER_ONLY || FLASH_ATTENTION_SHARED_KV) cluster.uram[s.lane] = uram;
         check(dayan_cluster_barrier(4, &cluster.barrier));
     }
     dayan_thread_resources_t resources = {};
     resources.local_resource_count = kLocalResources;
-    resources.shared_resource_count = Cores == 4 && !SplitKV ? kSharedResources : 0;
+    resources.shared_resource_count = Cores == 4 && !SplitKV && !FLASH_ATTENTION_BARRIER_ONLY ? kSharedResources : 0;
     resources.lsu_tcsr_count = 1;
     check(dayan_create_thread("attn-load-q", load_q, &s, &resources));
+#if FLASH_ATTENTION_SHARED_KV
+    resources.lsu_tcsr_count = 3;
+    check(dayan_create_thread("attn-load-kv", load_shared_kv, &s, &resources));
+#else
     resources.lsu_tcsr_count = 2;
-    check(dayan_create_thread("attn-load-k", load_kv<SplitKV ? 1 : Cores, false>, &s, &resources));
-    check(dayan_create_thread("attn-load-v", load_kv<SplitKV ? 1 : Cores, true>, &s, &resources));
+    check(dayan_create_thread("attn-load-k", load_kv<SplitKV || FLASH_ATTENTION_BARRIER_ONLY ? 1 : Cores, false>, &s, &resources));
+    check(dayan_create_thread("attn-load-v", load_kv<SplitKV || FLASH_ATTENTION_BARRIER_ONLY ? 1 : Cores, true>, &s, &resources));
+#endif
     resources.lsu_tcsr_count = 0;
     resources.vec_tcsr_count = 1;
     check(dayan_create_thread("attn-softmax", softmax, &s, &resources));
@@ -1114,10 +1249,22 @@ template <typename Format, int Cores, bool SplitKV>
 static void launch(const FlashAttentionConfig *config, const uint16_t *q,
                    const uint16_t *k, const uint16_t *v, float *out,
                    FlashAttentionResult *result) {
+    uint64_t first_qk_cycle = 0;
+#if FLASH_ATTENTION_TIMING
+    const uint64_t entry_cycle = dayan_get_time();
+#endif
     if (config) dayan_cache_invalidate(config, sizeof(*config));
-    const int status = run<Format, Cores, SplitKV>(config, q, k, v, out);
+    const int status = run<Format, Cores, SplitKV>(config, q, k, v, out, &first_qk_cycle);
+#if FLASH_ATTENTION_TIMING
+    const uint64_t end_cycle = dayan_get_time();
+#endif
     const uint32_t task = dayan_task_id(DAYAN_TASK_Y) *
                           dayan_task_dim(DAYAN_TASK_X) + dayan_task_id(DAYAN_TASK_X);
+#if FLASH_ATTENTION_TIMING
+    result[task].entry_cycle = entry_cycle;
+    result[task].first_qk_cycle = first_qk_cycle;
+    result[task].end_cycle = end_cycle;
+#endif
     result[task].status = status;
     dayan_cache_flush(&result[task], sizeof(result[task]));
 }
@@ -1128,6 +1275,7 @@ static void launch(const FlashAttentionConfig *config, const uint16_t *q,
 
 #endif // __DAYAN_DEVICE__
 
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_fp16_1c(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1135,7 +1283,9 @@ __kernel__ void flash_attention_fp16_1c(const FlashAttentionConfig *config,
     flash_attention_detail::Pipeline<128>::launch<
         flash_attention_detail::Fp16Format, 1, false>(config, q, k, v, output, result);
 }
+#endif
 
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_bf16_1c(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1143,6 +1293,7 @@ __kernel__ void flash_attention_bf16_1c(const FlashAttentionConfig *config,
     flash_attention_detail::Pipeline<128>::launch<
         flash_attention_detail::Bf16Format, 1, false>(config, q, k, v, output, result);
 }
+#endif
 
 __kernel__ void flash_attention_fp16_4c(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
@@ -1160,6 +1311,7 @@ __kernel__ void flash_attention_bf16_4c(const FlashAttentionConfig *config,
         flash_attention_detail::Bf16Format, 4, false>(config, q, k, v, output, result);
 }
 
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_fp16_decode_4c(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1167,7 +1319,9 @@ __kernel__ void flash_attention_fp16_decode_4c(const FlashAttentionConfig *confi
     flash_attention_detail::Pipeline<128>::launch<
         flash_attention_detail::Fp16Format, 4, true>(config, q, k, v, output, result);
 }
+#endif
 
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_bf16_decode_4c(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1175,7 +1329,9 @@ __kernel__ void flash_attention_bf16_decode_4c(const FlashAttentionConfig *confi
     flash_attention_detail::Pipeline<128>::launch<
         flash_attention_detail::Bf16Format, 4, true>(config, q, k, v, output, result);
 }
+#endif
 
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_fp16_1c_small(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1183,7 +1339,9 @@ __kernel__ void flash_attention_fp16_1c_small(const FlashAttentionConfig *config
     flash_attention_detail::Pipeline<32>::launch<
         flash_attention_detail::Fp16Format, 1, false>(config, q, k, v, output, result);
 }
+#endif
 
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_bf16_1c_small(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1191,6 +1349,7 @@ __kernel__ void flash_attention_bf16_1c_small(const FlashAttentionConfig *config
     flash_attention_detail::Pipeline<32>::launch<
         flash_attention_detail::Bf16Format, 1, false>(config, q, k, v, output, result);
 }
+#endif
 
 __kernel__ void flash_attention_fp16_4c_small(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
@@ -1208,6 +1367,7 @@ __kernel__ void flash_attention_bf16_4c_small(const FlashAttentionConfig *config
         flash_attention_detail::Bf16Format, 4, false>(config, q, k, v, output, result);
 }
 
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_fp16_decode_4c_small(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1215,7 +1375,9 @@ __kernel__ void flash_attention_fp16_decode_4c_small(const FlashAttentionConfig 
     flash_attention_detail::Pipeline<32>::launch<
         flash_attention_detail::Fp16Format, 4, true>(config, q, k, v, output, result);
 }
+#endif
 
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 __kernel__ void flash_attention_bf16_decode_4c_small(const FlashAttentionConfig *config,
     const uint16_t *q, const uint16_t *k, const uint16_t *v,
     float *output, FlashAttentionResult *result)
@@ -1223,32 +1385,49 @@ __kernel__ void flash_attention_bf16_decode_4c_small(const FlashAttentionConfig 
     flash_attention_detail::Pipeline<32>::launch<
         flash_attention_detail::Bf16Format, 4, true>(config, q, k, v, output, result);
 }
+#endif
 
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_1c, 1, 6,
     0, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
+#endif
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_1c, 1, 6,
     0, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
-DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_4c, 1, 6,
-    128, 1536U * 1024U, 6, 2, 2, 0, 30, 4);
-DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_4c, 1, 6,
-    128, 1536U * 1024U, 6, 2, 2, 0, 30, 4);
+#endif
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_4c, 1, FLASH_ATTENTION_SHARED_KV ? 5 : 6,
+    128, 1536U * 1024U, FLASH_ATTENTION_SHARED_KV ? 5 : 6, 2, 2, 0, 30, FLASH_ATTENTION_BARRIER_ONLY ? 0 : 4);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_4c, 1, FLASH_ATTENTION_SHARED_KV ? 5 : 6,
+    128, 1536U * 1024U, FLASH_ATTENTION_SHARED_KV ? 5 : 6, 2, 2, 0, 30, FLASH_ATTENTION_BARRIER_ONLY ? 0 : 4);
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_decode_4c, 1, 6,
     128, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
+#endif
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_decode_4c, 1, 6,
     128, 1536U * 1024U, 6, 2, 2, 0, 30, 0);
+#endif
 
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_1c_small, 1, 6,
     0, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+#endif
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_1c_small, 1, 6,
     0, 768U * 1024U, 6, 2, 2, 0, 30, 0);
-DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_4c_small, 1, 6,
-    128, 768U * 1024U, 6, 2, 2, 0, 30, 4);
-DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_4c_small, 1, 6,
-    128, 768U * 1024U, 6, 2, 2, 0, 30, 4);
+#endif
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_4c_small, 1, FLASH_ATTENTION_SHARED_KV ? 5 : 6,
+    128, 768U * 1024U, FLASH_ATTENTION_SHARED_KV ? 5 : 6, 2, 2, 0, 30, FLASH_ATTENTION_BARRIER_ONLY ? 0 : 4);
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_4c_small, 1, FLASH_ATTENTION_SHARED_KV ? 5 : 6,
+    128, 768U * 1024U, FLASH_ATTENTION_SHARED_KV ? 5 : 6, 2, 2, 0, 30, FLASH_ATTENTION_BARRIER_ONLY ? 0 : 4);
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_fp16_decode_4c_small, 1, 6,
     128, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+#endif
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(flash_attention_bf16_decode_4c_small, 1, 6,
     128, 768U * 1024U, 6, 2, 2, 0, 30, 0);
+#endif
 
 #if !defined(__DAYAN_DEVICE__)
 
@@ -1420,7 +1599,7 @@ __host__ int main(int argc, char **argv) {
     cfg.q_len = 256;
     cfg.kv_len = 512;
     cfg.head_dim = 128;
-    uint32_t cores = 1, tasks = 1, repeat = 1;
+    uint32_t cores = (FLASH_ATTENTION_SHARED_KV || FLASH_ATTENTION_RESOURCE_4C) ? 4 : 1, tasks = 1, repeat = 1;
     bool bf16 = false, padded = false, split_kv = false, offset_set = false;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -1457,7 +1636,7 @@ __host__ int main(int argc, char **argv) {
         }
         *value = static_cast<uint32_t>(parsed);
     }
-    if ((cores != 1 && cores != 4) || cfg.head_dim > 256 || cfg.head_dim % 64 ||
+    if (((FLASH_ATTENTION_SHARED_KV || FLASH_ATTENTION_RESOURCE_4C) && cores != 4) || (cores != 1 && cores != 4) || cfg.head_dim > 256 || cfg.head_dim % 64 ||
         cfg.q_heads % cfg.kv_heads || (cfg.flags && cfg.q_len > cfg.kv_len)) {
         std::fprintf(stderr, "unsupported core count, head dimension, head mapping or causal shape\n");
         return 2;
@@ -1467,7 +1646,23 @@ __host__ int main(int argc, char **argv) {
         std::fprintf(stderr, "causal-offset + q-len must not exceed kv-len\n");
         return 2;
     }
+#if FLASH_ATTENTION_RESOURCE_4C
+    if (split_kv) {
+        std::fprintf(stderr, "resource comparison uses four-core prefill; Split-KV is unsupported\n");
+        return 2;
+    }
+    std::printf("[host] shared K/V TGMT: Shared Resource producer election and completion-bound peer copies\n");
+#elif FLASH_ATTENTION_BARRIER_ONLY
+    if (split_kv) {
+        std::fprintf(stderr, "barrier-only comparison partitions independent Q groups; Split-KV is unsupported\n");
+        return 2;
+    }
+    std::printf(FLASH_ATTENTION_SHARED_KV ?
+                "[host] shared K/V TGMT: one DRAM producer per tile; peer URAM copies; barrier-only synchronization\n" :
+                "[host] barrier-only TGMT: independent Q groups and private K/V loads\n");
+#else
     split_kv |= cores == 4 && cfg.q_len == 1 && cfg.kv_len >= 512;
+#endif
     if (split_kv && (cores != 4 || cfg.q_len != 1 || (cfg.flags ? cfg.causal_offset + 1 : cfg.kv_len) < 4)) {
         std::fprintf(stderr, "Split-KV requires four cores, q-len=1 and at least four visible keys\n");
         return 2;
@@ -1535,13 +1730,23 @@ __host__ int main(int argc, char **argv) {
     for (size_t i = 0; i < 4 && status == 0; ++i) {
         status = upload(stream, buffers[i], inputs[i], bytes[i]);
     }
+#if FLASH_ATTENTION_SHARED_KV || FLASH_ATTENTION_RESOURCE_4C
+    auto launch = bf16 ? flash_attention_bf16_4c : flash_attention_fp16_4c;
+#else
     auto launch = bf16 ? flash_attention_bf16_1c : flash_attention_fp16_1c;
+#endif
     if (cores == 4) launch = bf16 ? flash_attention_bf16_4c : flash_attention_fp16_4c;
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
     if (split_kv) launch = bf16 ? flash_attention_bf16_decode_4c : flash_attention_fp16_decode_4c;
+#endif
     if (small_uram) {
+#if !FLASH_ATTENTION_SHARED_KV && !FLASH_ATTENTION_RESOURCE_4C
         launch = bf16 ? flash_attention_bf16_1c_small : flash_attention_fp16_1c_small;
+#endif
         if (cores == 4) launch = bf16 ? flash_attention_bf16_4c_small : flash_attention_fp16_4c_small;
+#if !FLASH_ATTENTION_BARRIER_ONLY && !FLASH_ATTENTION_RESOURCE_4C
         if (split_kv) launch = bf16 ? flash_attention_bf16_decode_4c_small : flash_attention_fp16_decode_4c_small;
+#endif
     }
     npu_kernel_launch_attrs_t attrs;
     npu_kernel_launch_attrs_init(&attrs, context, stream, "flash-attention");
@@ -1557,6 +1762,14 @@ __host__ int main(int argc, char **argv) {
         if (status == 0) status = download(stream, results.data(), buffers[5], bytes[5]);
         if (status == 0) {
             for (size_t task = 0; task < results.size(); ++task) {
+#if FLASH_ATTENTION_TIMING
+                const auto &time = results[task];
+                std::printf("[host] timing task=%zu begin=%llu first_qk=%llu end=%llu startup=%llu post_startup=%llu total=%llu\n",
+                    task, (unsigned long long)time.entry_cycle, (unsigned long long)time.first_qk_cycle,
+                    (unsigned long long)time.end_cycle, (unsigned long long)(time.first_qk_cycle - time.entry_cycle),
+                    (unsigned long long)(time.end_cycle - time.first_qk_cycle),
+                    (unsigned long long)(time.end_cycle - time.entry_cycle));
+#endif
                 if (results[task].status != 0) {
                     std::fprintf(stderr, "task %zu returned %lld\n", task, static_cast<long long>(results[task].status));
                     status = -1;

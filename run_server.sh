@@ -42,9 +42,9 @@ Environment:
   NPU_CLUSTER_COUNT          number of Clusters (default: 1)
   NPU_CLUSTER_STRIDE         XDMA index stride (default: 1)
   NPU_CLUSTER_MASK           optional enabled Cluster mask
-  NPU_CORES_PER_CLUSTER      Cores the hardware has per Cluster (default: the
-                             server's 4; use 1 for a 1c RTL). NPU_CORE_MASK
-                             is clipped to this many low bits.
+  NPU_CORES_PER_CLUSTER      optional manual Core count (default: auto from
+                             BootROM, fallback 4); warns on hardware mismatch.
+                             NPU_CORE_MASK is clipped to the Core count.
   NPU_CORE_MASK              enabled Core mask (default: 0xf)
   DAYAN_SERVER_SOCKET        Runtime socket (default: /tmp/dayan-server.sock)
   DAYAN_FIRMWARE             BL1 ELF path

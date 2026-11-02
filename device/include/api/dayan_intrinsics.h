@@ -379,8 +379,8 @@ enum LSU_TCSR {
 enum VEC_TCSR {
     VEC_CONTROL = 0,
     VEC_SYNC = 1,
-    VEC_DIM0 = 2,
-    VEC_DIM1 = 3,
+    VEC_DIM0 = 2,  /* Innermost fixed-control-flow loop; count minus one. */
+    VEC_DIM1 = 3,  /* Outer fixed-control-flow loop; count minus one. */
     VEC_DIM2 = 4,
     VEC_DIM3 = 5,
     VEC_DIM4 = 6,

@@ -135,11 +135,24 @@ QDMA 的 user IRQ 节点来自本地驱动扩展，原生驱动不保证提供�
 Server 的 Buffer 分配、调度目标选择、kernel image、BL1 固定段和反向 heap RPC 都使用
 HAL allocation handle。应用侧只有 `npu_buffer_t *`，不会取得物理地址。默认 HAL
 包含 device-scope DRAM/coherent region，以及每个 Core 一个 URAM region。
-`dayan_server --uram-size 0xc0000` 选择每 Core 768 KiB；省略该参数或指定
-`--uram-size 0x180000` 使用 1.5 MiB。参数单位为字节，只接受这两种容量，适用于
-XDMA、QDMA 和 SoC mmap。当前硬件尚无容量查询寄存器，需要按实际核心版本配置。
-程序化配置使用 `npu_hal_options_t.uram_size`，由 `npu_hal_options_init()` 默认设为
-`0x180000`；显式 `memory_regions` 则决定可分配的内存池。
+HAL 打开后端后、创建内存池前，读取各 Cluster BootROM `0x10100` 处的
+NUL 结尾版本字符串（最多 256 字节），格式为 `<BuildConfigKey>-<gitStr>`。
+启动日志逐个打印 Cluster 编号和原始配置串；配置名未识别时也会打印，空串或
+读取失败分别显示 `<empty>` / `<unavailable>`。
+支持当前 npu-cluster 的配置名：`Single` 为单核，`Qual` 为四核；`Tiny` 为每核
+768 KiB URAM（`0xc0000`），其余为 1.5 MiB（`0x180000`）。XDMA、QDMA 和
+SoC mmap 均使用该结果生成拓扑和默认 URAM 内存池，SoC 的读写范围同步更新。
+
+`--cores-per-cluster` 和 `--uram-size` 可手动覆盖各自的探查结果；与硬件不一致时
+输出包含 Cluster 编号、版本字符串、手动值和探查值的 `Warning`，保留手动值。
+未识别、无 NUL、读取失败或未提供版本字符串时，输出 `Warning` 并保留原配置
+（默认四核、每核 1.5 MiB）。当前 HAL 要求各 Cluster 使用统一拓扑；自动探查发现
+核数或容量不同会拒绝初始化；部分 Cluster 无有效标识时整体回退到原配置。
+
+程序化配置使用 `npu_hal_options_t.cores_per_cluster` / `uram_size`，非默认值视为
+手动配置。显式指定默认值时还需将 `manual_cores_per_cluster` / `manual_uram_size`
+置为 1，避免自动探查覆盖。显式 `memory_regions` 仍决定可分配的内存池，需要与
+最终拓扑一致。SoC 未提供 regions 时，HAL 根据探查结果和 SoC DDR 参数生成。
 URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB，两种容量使用相同地址布局。
 真实多 Cluster 平台可通过
 `dayan_server_options_t.hal.memory_regions` 提供准确的物理布局。对同一 Cluster

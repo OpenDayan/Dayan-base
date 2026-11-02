@@ -85,8 +85,8 @@ int npu_hal_soc_mmap_options_init(npu_hal_soc_mmap_options_t *options);
  * Memory regions matching the fixed layout and the DDR configuration: Normal
  * over the whole shared DDR, the Coherent window, and one URAM per core.
  * Pass npu_hal_options_t::uram_size so allocation and access bounds agree.  The
- * backend refuses any other region set, so a Server passes these to
- * npu_hal_options_t::memory_regions.  Returns the region count, or -E2BIG when
+ * HAL builds these after BootROM discovery when memory_regions is omitted.
+ * Explicit regions must fit the resolved layout. Returns the count, or -E2BIG when
  * capacity is too small.
  */
 int npu_hal_soc_mmap_memory_regions(const npu_hal_soc_mmap_options_t *options,

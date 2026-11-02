@@ -177,7 +177,18 @@ static int soc_platform_prepare(const npu_hal_soc_mmap_options_t *o)
         0 : -ENOTSUP;
 }
 
-static int soc_open(const npu_hal_options_t *options, void **out)
+static int soc_build_id(void *opaque, uint32_t cluster, char *id, size_t size)
+{
+    struct soc_state *s = opaque;
+    (void)cluster;
+    npu_hal_soc_mmap_io_fence();
+    npu_hal_soc_mmap_mem_read(id,
+        s->aperture.window + DAYAN_BOOTROM_BUILD_ID_ADDRESS, size);
+    npu_hal_soc_mmap_io_fence();
+    return 0;
+}
+
+static int soc_open(npu_hal_options_t *options, void **out)
 {
     const npu_hal_soc_mmap_options_t *o;
     long page = sysconf(_SC_PAGESIZE);
@@ -197,9 +208,6 @@ static int soc_open(const npu_hal_options_t *options, void **out)
         return -ENOTSUP;
     if (!soc_options_valid(o, (uint64_t)page))
         return -EINVAL;
-    /* The default regions describe a 4 GiB PCIe board, not this SoC. */
-    if (!options->memory_region_count || !options->memory_regions)
-        return -EINVAL;
     s = calloc(1, sizeof(*s));
     if (!s)
         return -ENOMEM;
@@ -209,17 +217,6 @@ static int soc_open(const npu_hal_options_t *options, void **out)
     s->ddr_host_base = o->ddr_host_base;
     s->ddr_device_base = o->ddr_device_base;
     s->ddr_size = o->ddr_size;
-    status = soc_layout_build(options->cores_per_cluster, options->uram_size,
-                              s->entries, SOC_LAYOUT_MAX_ENTRIES);
-    if (status < 0)
-        goto fail;
-    s->entry_count = (uint32_t)status;
-    for (i = 0; i < options->memory_region_count; ++i) {
-        if (!region_covered(s, &options->memory_regions[i])) {
-            status = -EINVAL;
-            goto fail;
-        }
-    }
     status = soc_platform_prepare(o);
     if (status < 0)
         goto fail;
@@ -242,6 +239,20 @@ static int soc_open(const npu_hal_options_t *options, void **out)
                                       &s->ddr);
     if (status < 0)
         goto fail;
+    status = npu_hal_detect_config(options, soc_build_id, s);
+    if (status < 0)
+        goto fail;
+    status = soc_layout_build(options->cores_per_cluster, options->uram_size,
+                              s->entries, SOC_LAYOUT_MAX_ENTRIES);
+    if (status < 0)
+        goto fail;
+    s->entry_count = (uint32_t)status;
+    for (i = 0; i < options->memory_region_count; ++i) {
+        if (!region_covered(s, &options->memory_regions[i])) {
+            status = -EINVAL;
+            goto fail;
+        }
+    }
     *out = s;
     return 0;
 

@@ -3,6 +3,8 @@
 
 /* Offsets relative to CONFIG_CONTROL_BASE, from the Dayan register list. */
 #define DAYAN_BOOTROM_RESET_VECTOR       0x00010000U
+#define DAYAN_BOOTROM_BUILD_ID_ADDRESS   (DAYAN_BOOTROM_RESET_VECTOR + 256U)
+#define DAYAN_BOOTROM_BUILD_ID_SIZE      256U
 #define DAYAN_DEVICE_MAILBOX_BASE       0x001000U
 #define DAYAN_IRQ_STATUS                0x002000U
 #define DAYAN_IRQ_STATUS_SET            0x002008U

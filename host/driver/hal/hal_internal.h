@@ -7,7 +7,8 @@
 
 struct npu_hal_backend_ops {
     uint32_t backend;
-    int (*open)(const npu_hal_options_t *options, void **state_out);
+    /* May resolve topology from ROM before the HAL creates its pools. */
+    int (*open)(npu_hal_options_t *options, void **state_out);
     void (*close)(void *state);
     int (*get_info)(void *state, npu_hal_info_t *info);
     int (*copy_to_address)(void *state, uint32_t cluster, uint64_t address,
@@ -41,6 +42,11 @@ struct npu_hal_backend_ops {
     /* Optional; absent means the backend cannot reset a Cluster. */
     int (*reset_cluster)(void *state, uint32_t cluster);
 };
+
+typedef int (*npu_hal_build_id_reader_t)(void *state, uint32_t cluster,
+                                         char *identifier, size_t size);
+int npu_hal_detect_config(npu_hal_options_t *options,
+                          npu_hal_build_id_reader_t read_id, void *state);
 
 struct npu_hal_arena;
 

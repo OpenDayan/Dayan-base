@@ -78,6 +78,104 @@ static void *write_irq(void *argument)
     return 0;
 }
 
+static void write_build_id(const char *directory, uint32_t device,
+                           uint64_t offset, const char *id)
+{
+    char rom[DAYAN_BOOTROM_BUILD_ID_SIZE] = {0};
+    int fd = endpoint_fd(directory, device, "c2h_0", O_RDWR);
+
+    assert(fd >= 0);
+    if (id)
+        memcpy(rom, id, strlen(id) + 1);
+    else
+        memset(rom, 'A', sizeof(rom)); /* No NUL within the ROM limit. */
+    assert(pwrite(fd, rom, sizeof(rom),
+                  offset + DAYAN_BOOTROM_BUILD_ID_ADDRESS) == sizeof(rom));
+    close(fd);
+}
+
+static void test_bootrom_discovery(const npu_hal_options_t *base,
+                                   const char *directory, uint64_t offset)
+{
+    const struct {
+        const char *id;
+        uint32_t cores, uram;
+    } cases[] = {
+        { "FpgaSingleTinyClusterConfig-v1-abc-dirty", 1, DAYAN_URAM_SIZE_768K },
+        { "SingleTinyClusterConfig-abc", 1, DAYAN_URAM_SIZE_768K },
+        { "VerifSingleFullClusterConfig-abc", 1, DAYAN_URAM_SIZE_1536K },
+        { "FpgaSingleSmallClusterConfig-abc", 1, DAYAN_URAM_SIZE_1536K },
+        { "FpgaQualFullClusterConfig-abc", 4, DAYAN_URAM_SIZE_1536K },
+        { "QualFullClusterConfig-SingleTiny", 4, DAYAN_URAM_SIZE_1536K },
+        { "FutureSingleTinyClusterConfig-abc", 4, DAYAN_URAM_SIZE_1536K },
+        { "SingleTinyClusterConfig", 4, DAYAN_URAM_SIZE_1536K },
+        { "", 4, DAYAN_URAM_SIZE_1536K },
+        { NULL, 4, DAYAN_URAM_SIZE_1536K },
+    };
+    npu_hal_options_t options = *base;
+    npu_hal_info_t info;
+    npu_hal_t *hal = NULL;
+    uint64_t capacity;
+
+    options.cluster_count = 1;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        write_build_id(directory, 0, offset, cases[i].id);
+        assert(npu_hal_open(&hal, &options) == 0);
+        assert(npu_hal_get_info(hal, &info) == 0);
+        assert(info.cores_per_cluster == cases[i].cores);
+        for (uint32_t core = 0; core < info.cores_per_cluster; ++core) {
+            assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+                       (npu_hal_core_t){0, core}, &capacity) == 0);
+            assert(capacity == cases[i].uram);
+        }
+        npu_hal_close(hal);
+    }
+    /* Each field can be overridden independently. */
+    write_build_id(directory, 0, offset, cases[0].id);
+    options.manual_cores_per_cluster = 1;
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_get_info(hal, &info) == 0 && info.cores_per_cluster == 4);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+               (npu_hal_core_t){0, 3}, &capacity) == 0);
+    assert(capacity == DAYAN_URAM_SIZE_768K);
+    npu_hal_close(hal);
+    /* Explicit defaults must warn as overrides too, rather than auto-detect. */
+    write_build_id(directory, 0, offset, cases[0].id);
+    options.manual_cores_per_cluster = 1;
+    options.manual_uram_size = 1;
+    {
+        FILE *log = tmpfile();
+        int saved = dup(STDERR_FILENO);
+        char message[1024] = {0};
+        assert(log && saved >= 0);
+        assert(dup2(fileno(log), STDERR_FILENO) >= 0);
+        assert(npu_hal_open(&hal, &options) == 0);
+        fflush(stderr);
+        assert(dup2(saved, STDERR_FILENO) >= 0);
+        close(saved);
+        rewind(log);
+        assert(fread(message, 1, sizeof(message) - 1, log) > 0);
+        assert(strstr(message, "Warning: Cluster 0 manual cores-per-cluster=4"));
+        assert(strstr(message, "Warning: Cluster 0 manual uram-size=0x180000"));
+        fclose(log);
+    }
+    assert(npu_hal_get_info(hal, &info) == 0 && info.cores_per_cluster == 4);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+               (npu_hal_core_t){0, 0}, &capacity) == 0);
+    assert(capacity == DAYAN_URAM_SIZE_1536K);
+    npu_hal_close(hal);
+    options = *base;
+    /* A uniform multi-Cluster layout works; heterogeneous auto config fails. */
+    write_build_id(directory, 2, offset, cases[0].id);
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_get_info(hal, &info) == 0 && info.cores_per_cluster == 1);
+    npu_hal_close(hal);
+    write_build_id(directory, 2, offset, cases[4].id);
+    assert(npu_hal_open(&hal, &options) == -ENOTSUP && !hal);
+    write_build_id(directory, 0, offset, "");
+    write_build_id(directory, 2, offset, "");
+}
+
 static void test_uram_capacity(const npu_hal_options_t *base)
 {
     const uint32_t sizes[] = { DAYAN_URAM_SIZE_1536K, DAYAN_URAM_SIZE_768K };
@@ -209,6 +307,7 @@ int main(void)
     options.cluster_count = 2;
     options.cores_per_cluster = 4;
     xdma_options.cluster_device_stride = 2;
+    test_bootrom_discovery(&options, directory, xdma_options.mmio_address_offset);
     test_uram_capacity(&options);
     options.memory_regions = regions;
     options.memory_region_count = sizeof(regions) / sizeof(regions[0]);

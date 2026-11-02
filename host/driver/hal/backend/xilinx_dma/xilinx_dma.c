@@ -80,7 +80,15 @@ static int open_endpoint(struct dma_endpoint *e,
     return 0;
 }
 
-static int dma_open(const npu_hal_options_t *options, void **out)
+static int dma_read(void *state, uint32_t cluster, void *data,
+                     uint64_t address, size_t size);
+
+static int dma_build_id(void *state, uint32_t cluster, char *id, size_t size)
+{
+    return dma_read(state, cluster, id, DAYAN_BOOTROM_BUILD_ID_ADDRESS, size);
+}
+
+static int dma_open(npu_hal_options_t *options, void **out)
 {
     npu_hal_xilinx_dma_options_t defaults;
     const npu_hal_xilinx_dma_options_t *o;
@@ -119,6 +127,8 @@ static int dma_open(const npu_hal_options_t *options, void **out)
         status = open_endpoint(&s->endpoints[i], o, i);
         if (status < 0) { dma_close(s); return status; }
     }
+    status = npu_hal_detect_config(options, dma_build_id, s);
+    if (status < 0) { dma_close(s); return status; }
     *out = s;
     return 0;
 }

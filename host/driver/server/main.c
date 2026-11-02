@@ -90,12 +90,12 @@ static void usage(FILE *stream, const char *program)
             "  --cluster-count N       number of Clusters\n"
             "  --cluster-stride N      XDMA index stride per Cluster\n"
             "  --cluster-mask MASK     enabled Cluster mask\n"
-            "  --cores-per-cluster N   Cores in each Cluster (default 4; 1 for a 1c RTL)\n"
+            "  --cores-per-cluster N   Cores per Cluster (auto from BootROM; fallback 4)\n"
             "  --core-mask MASK        enabled Core mask within Cluster, clipped to\n"
             "                          the low --cores-per-cluster bits\n"
             "  --timeout-ms N          Device operation timeout in milliseconds\n"
             "  --normal-memory-size-mib N  default Normal memory size in MiB\n"
-            "  --uram-size N           per-Core URAM bytes: 0x180000 (default) or 0xc0000\n"
+            "  --uram-size N           per-Core URAM bytes (auto): 0x180000 or 0xc0000\n"
             "  --enable-mmu 0|1        route Device addresses through the ClusterMMU\n"
             "soc-mmap backend (one Cluster; Normal memory is --soc-ddr-*):\n"
             "  --soc-base PA           Host PA of the Cluster IP aperture (required)\n"
@@ -116,8 +116,6 @@ int main(int argc, char **argv)
     dayan_server_options_t options;
     npu_hal_xilinx_dma_options_t dma;
     npu_hal_soc_mmap_options_t soc;
-    npu_hal_memory_region_t soc_regions[NPU_HAL_SOC_MMAP_MAX_REGIONS];
-    int soc_region_count;
     int soc_backend = 0;
     int dma_arguments = 0;
     int soc_arguments = 0;
@@ -277,6 +275,7 @@ int main(int argc, char **argv)
         else if (strcmp(argument, "--cluster-mask") == 0)
             status = parse_u32(value, &options.enabled_cluster_mask);
         else if (strcmp(argument, "--cores-per-cluster") == 0) {
+            options.hal.manual_cores_per_cluster = 1;
             status = parse_u32(value, &options.hal.cores_per_cluster);
             if (status == 0 &&
                 (!options.hal.cores_per_cluster ||
@@ -297,6 +296,7 @@ int main(int argc, char **argv)
                 status = -EINVAL;
         }
         else if (strcmp(argument, "--uram-size") == 0) {
+            options.hal.manual_uram_size = 1;
             status = parse_u32(value, &options.hal.uram_size);
             if (status == 0 &&
                 options.hal.uram_size != DAYAN_URAM_SIZE_768K &&
@@ -340,16 +340,6 @@ int main(int argc, char **argv)
                     "--soc-ddr-size, not --normal-memory-size-mib\n");
             return 2;
         }
-        soc_region_count = npu_hal_soc_mmap_memory_regions(
-            &soc, options.hal.cores_per_cluster, options.hal.uram_size,
-            soc_regions, NPU_HAL_SOC_MMAP_MAX_REGIONS);
-        if (soc_region_count < 0) {
-            fprintf(stderr, "dayan_server: soc-mmap layout failed: %s\n",
-                    strerror(-soc_region_count));
-            return 2;
-        }
-        options.hal.memory_regions = soc_regions;
-        options.hal.memory_region_count = (uint32_t)soc_region_count;
         options.hal.backend_options = &soc.base;
         fprintf(stderr, "dayan_server: backend=soc-mmap npu_base=0x%llx "
                 "ddr_host=0x%llx ddr_npu=0x%llx ddr_size=0x%llx coherence=%s "

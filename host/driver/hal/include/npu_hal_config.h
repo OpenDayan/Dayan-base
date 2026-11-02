@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define NPU_HAL_OPTIONS_VERSION         6U
+#define NPU_HAL_OPTIONS_VERSION         7U
 #define NPU_HAL_MAX_CLUSTERS            32U
 #define NPU_HAL_MAX_CORES_PER_CLUSTER   32U
 
@@ -62,6 +62,10 @@ typedef struct npu_hal_options {
     /* Per-core URAM bytes: 0x180000 (default) or 0xc0000.  Used by default
      * regions and SoC access bounds; explicit memory_regions define pools. */
     uint32_t uram_size;
+    /* Mark explicit overrides, including values equal to the defaults.
+     * Non-default cores_per_cluster/uram_size are also treated as overrides. */
+    uint32_t manual_cores_per_cluster;
+    uint32_t manual_uram_size;
     /*
      * Split the Normal region into a firmware pool and a Buffer pool.  Only the
      * MMU needs the split - it is what keeps a Buffer's physical pages out of

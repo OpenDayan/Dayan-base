@@ -34,7 +34,7 @@ dayan_server --backend soc-mmap \
 | `--soc-memory-device` | Server 映射用的设备 | `/dev/mem` |
 | `--soc-data-device` | 传给 Runtime 的设备，DDR 偏移须与前者相同 | 同上 |
 | `--soc-platform-control` | 只有 `external`：clock/reset/电源由 BSP 负责 | `external` |
-| `--uram-size` | 每 Core 的 URAM 字节数，只接受 `0x180000` 或 `0xc0000` | `0x180000` |
+| `--uram-size` | 手动覆盖每 Core 的 URAM 字节数：`0x180000` 或 `0xc0000` | BootROM 自动探查，失败回退 `0x180000` |
 
 在 soc-mmap 后端下：
 - `--cluster-count` 只能为 1；
@@ -71,7 +71,8 @@ Normal DDR 不属于 IP 窗口，而是独立的 SoC 共享内存。依据是：
 
 ## 固定布局
 
-模块地址和固定大小来源于 `platform_regs.h`，URAM 大小由 `--uram-size` 选择。
+模块地址和固定大小来源于 `platform_regs.h`，核数与 URAM 大小从 BootROM `0x10100` 的版本字符串探查，
+`--cores-per-cluster` / `--uram-size` 可手动覆盖，冲突时输出 Warning。
 `layout.c` 把它们转成访问规则，`hal/memory.c` 使用相同的地址常量和容量配置。
 
 | 模块 | IP offset | 大小（4 核） | 规则 |

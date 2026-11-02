@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 // A[M][K] BF16 * BT[N][K] BF16 -> C[M][N] FP32; strides are bytes.
-// Each single-Core Task owns complete output tiles and loads both operands.
+// Each Core's root Task owns complete output tiles and loads both operands.
 // One operand has four slices, the other two physical buffers. Each slice
 // has its own C tile. Two Loader Threads, the root Calc Proc, and one Post
 // Thread coordinate through Local Resources only; Tasks never exchange data.
@@ -240,13 +240,15 @@ static bool config_valid(const MatmulBf16Config *c)
 static void run(const MatmulBf16Config *config,
                 const uint16_t *a, const uint16_t *bt, float *c, int tile_m)
 {
+    const bool four_core = dayan_task_mode() == 4;
     // Host DMA may reuse a config address still cached by this Hart.
     if (config)
         dayan_cache_invalidate(config, sizeof(*config));
     if (!config_valid(config) || !a || !bt || !c ||
         ((uintptr_t)a & 1) || ((uintptr_t)bt & 1) || ((uintptr_t)c & 63) ||
-        dayan_task_mode() != 1 || !dayan_task_dim(DAYAN_TASK_X) ||
-        dayan_task_dim(DAYAN_TASK_Y) != 1 || dayan_task_dim(DAYAN_TASK_Z) != 1)
+        (!four_core && dayan_task_mode() != 1) || !dayan_task_dim(DAYAN_TASK_X) ||
+        (four_core ? dayan_task_dim(DAYAN_TASK_X) != 4 : dayan_task_dim(DAYAN_TASK_Y) != 1) ||
+        !dayan_task_dim(DAYAN_TASK_Y) || dayan_task_dim(DAYAN_TASK_Z) != 1)
         dayan_thread_exit(-22);
     State s = {};
     s.tile_m = tile_m;
@@ -254,8 +256,8 @@ static void run(const MatmulBf16Config *config,
     s.input[0] = (uintptr_t)a;
     s.input[1] = (uintptr_t)bt;
     s.output = (uintptr_t)c;
-    s.task = dayan_task_id(DAYAN_TASK_X);
-    s.tasks = dayan_task_dim(DAYAN_TASK_X);
+    s.task = dayan_task_id(DAYAN_TASK_X) + (four_core ? 4 * dayan_task_id(DAYAN_TASK_Y) : 0);
+    s.tasks = dayan_task_dim(DAYAN_TASK_X) * dayan_task_dim(DAYAN_TASK_Y);
     s.nt = (int)((config->n + TN - 1) / TN);
     s.kt = (int)((config->k + TK - 1) / TK);
     const uint64_t outputs = (config->m + s.tile_m - 1) / s.tile_m * s.nt;
@@ -305,29 +307,40 @@ static void run(const MatmulBf16Config *config,
     check(dayan_thread_join_all());
 }
 
+// Independent complete output tiles; the only inter-core operation is barrier.
+static void launch(const MatmulBf16Config *config, const uint16_t *a,
+                   const uint16_t *bt, float *c, int tile_m)
+{
+    const bool four_core = dayan_task_mode() == 4;
+    auto *barrier = (dayan_cluster_barrier_t *)shared;
+    if (four_core && dayan_cluster_barrier(4, barrier) < 0) dayan_thread_exit(-22);
+    run(config, a, bt, c, tile_m);
+    if (four_core && dayan_cluster_barrier(4, barrier) < 0) dayan_thread_exit(-22);
+}
+
 } // namespace matmul_bf16_1c_detail
 #endif
 
 __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
                               const uint16_t *a, const uint16_t *bt, float *c)
 {
-    matmul_bf16_1c_detail::run(config, a, bt, c, MatmulBf16Shape::kTileM);
+    matmul_bf16_1c_detail::launch(config, a, bt, c, MatmulBf16Shape::kTileM);
 }
 
 __kernel__ void matmul_bf16_1c_small(const MatmulBf16Config *config,
                               const uint16_t *a, const uint16_t *bt, float *c)
 {
-    matmul_bf16_1c_detail::run(config, a, bt, c, MatmulBf16Shape::kSmallTileM);
+    matmul_bf16_1c_detail::launch(config, a, bt, c, MatmulBf16Shape::kSmallTileM);
 }
 
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
     matmul_bf16_1c, 1, MatmulBf16Shape::kWorkers,
-    0, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
+    64, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
     2 * MatmulBf16Shape::kSlices + 2, 0);
 
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
     matmul_bf16_1c_small, 1, MatmulBf16Shape::kWorkers,
-    0, MatmulBf16Shape::kSmallUramBytes, 3, 1, 0, 0,
+    64, MatmulBf16Shape::kSmallUramBytes, 3, 1, 0, 0,
     2 * MatmulBf16Shape::kSlices + 2, 0);
 
 #if !defined(__DAYAN_DEVICE__)
@@ -345,10 +358,10 @@ extern "C" __host__ char *getenv(const char *name);
 
 __host__ static void usage(const char *program)
 {
-    std::printf("usage: %s [M N K [TASKS]]\n", program);
-    std::printf("  defaults: M=1024 N=1536 K=1536 TASKS=1\n");
+    std::printf("usage: %s [M N K [TASKS [CORES]]]\n", program);
+    std::printf("  defaults: M=1024 N=1536 K=1024 TASKS=1 CORES=1\n");
     std::printf("  N must be a multiple of 16.\n");
-    std::printf("  TASKS are independent single-Core shards, scheduled on available Cores.\n");
+    std::printf("  CORES=1|4; TASKS is the number of launch groups; four-Core groups use barriers only.\n");
     std::printf("  B is generated/stored as BT[N][K], and C is FP32.\n");
 }
 
@@ -554,8 +567,9 @@ __host__ int main(int argc, char **argv)
 {
     uint64_t m = 1024;
     uint64_t n = 1536;
-    uint64_t k = 1536;
+    uint64_t k = 1024;
     uint64_t tasks = 1;
+    uint64_t cores = 1;
     size_t a_elements = 0;
     size_t bt_elements = 0;
     size_t c_elements = 0;
@@ -568,7 +582,7 @@ __host__ int main(int argc, char **argv)
         usage(argv[0]);
         return 0;
     }
-    if (argc != 1 && argc != 4 && argc != 5) {
+    if (argc != 1 && (argc < 4 || argc > 6)) {
         usage(argv[0]);
         return 2;
     }
@@ -579,9 +593,10 @@ __host__ int main(int argc, char **argv)
         std::printf("M, N and K must be positive decimal integers\n");
         return 2;
     }
-    if (argc == 5 &&
-        (parse_dimension(argv[4], &tasks) < 0 || tasks > UINT32_MAX)) {
-        std::printf("TASKS must be a positive 32-bit integer\n");
+    if ((argc >= 5 && parse_dimension(argv[4], &tasks) < 0) ||
+        (argc >= 6 && parse_dimension(argv[5], &cores) < 0) ||
+        (cores != 1 && cores != 4) || tasks > UINT32_MAX / cores) {
+        std::printf("require CORES=1|4 and 0<TASKS<=UINT32_MAX/CORES\n");
         return 2;
     }
     if (m > UINT64_C(0x7ffff000) || n > UINT64_C(0x7ffff000) ||
@@ -666,8 +681,11 @@ __host__ int main(int argc, char **argv)
 
         npu_kernel_launch_attrs_init(&launch_attrs, context, stream,
                                      "matmul-bf16-1c");
-        launch_attrs.config.task_dim = NPUTaskDim3{(uint32_t)tasks, 1, 1};
-        launch_attrs.config.task_mode = NPUTaskMode::kSingleCore;
+        launch_attrs.config.task_dim = cores == 4 ? NPUTaskDim3{4, (uint32_t)tasks, 1}
+                                                 : NPUTaskDim3{(uint32_t)tasks, 1, 1};
+        launch_attrs.config.task_mode = cores == 4 ? NPUTaskMode::kFourCore : NPUTaskMode::kSingleCore;
+        std::printf("[host] cores=%llu groups=%llu, independent tiles, inter-core barrier only\n",
+                    (unsigned long long)cores, (unsigned long long)tasks);
         launch_attrs.timeout_ms = timeout_ms;
         std::printf("[host] launch matmul_bf16_1c: A[%llu,%llu] x "
                     "BT[%llu,%llu] -> C[%llu,%llu], tile=%ux%ux%u, "

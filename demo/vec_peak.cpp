@@ -60,8 +60,8 @@ struct VecPeakConfig {
     uint64_t tasks;         /* VEC_DIM2: forked FlexVec tasks */
     uint64_t distance;      /* dependency distance in pushes: 1,2,4,8,15 */
     uint64_t body;          /* loop-body instructions */
-    uint64_t inner;         /* VEC_DIM1 count */
-    uint64_t outer_short;   /* VEC_DIM0 count; flat: VFork count */
+    uint64_t inner;         /* VEC_DIM0 count */
+    uint64_t outer_short;   /* VEC_DIM1 count; flat: VFork count */
     uint64_t outer_long;
     uint64_t reserved;
 };
@@ -136,8 +136,8 @@ template <long Base> static inline void configure_vec_iterator()
 static inline void configure_vec(uint64_t outer, uint64_t inner,
                                  uint64_t tasks)
 {
-    __tx_vec_tcsr_write<VEC_DIM0>((long)outer - 1);
-    __tx_vec_tcsr_write<VEC_DIM1>((long)inner - 1);
+    __tx_vec_tcsr_write<VEC_DIM0>((long)inner - 1);
+    __tx_vec_tcsr_write<VEC_DIM1>((long)outer - 1);
     __tx_vec_tcsr_write<VEC_DIM2>((long)tasks - 1);
     __tx_vec_tcsr_write<VEC_DIM3>(0);
     __tx_vec_tcsr_write<VEC_DIM4>(0);

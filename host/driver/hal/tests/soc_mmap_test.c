@@ -158,6 +158,35 @@ static void soc_defaults(npu_hal_soc_mmap_options_t *soc)
     soc->ddr_coherence = NPU_HAL_SOC_MMAP_DDR_UNCACHED;
 }
 
+static void test_bootrom_discovery(void)
+{
+    const char id[] = "FpgaSingleTinyClusterConfig-abc123-dirty";
+    char empty[sizeof(id)] = {0};
+    npu_hal_soc_mmap_options_t soc;
+    npu_hal_options_t options;
+    npu_hal_info_t info;
+    npu_hal_t *hal = 0;
+    uint64_t capacity;
+
+    soc_defaults(&soc);
+    npu_hal_options_init(&options);
+    options.backend_options = &soc.base;
+    assert(pwrite(memory_fd, id, sizeof(id),
+                  NPU_BASE + DAYAN_BOOTROM_BUILD_ID_ADDRESS) == sizeof(id));
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_get_info(hal, &info) == 0);
+    assert(info.cores_per_cluster == 1 && info.memory_region_count == 3);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+               (npu_hal_core_t){0, 0}, &capacity) == 0);
+    assert(capacity == DAYAN_URAM_SIZE_768K);
+    /* The SoC access bounds must follow the detected size too. */
+    assert(npu_hal_copy_from_address(hal, 0, empty,
+               DAYAN_URAM(0) + capacity, 1) == -EFAULT);
+    npu_hal_close(hal);
+    assert(pwrite(memory_fd, empty, sizeof(empty),
+                  NPU_BASE + DAYAN_BOOTROM_BUILD_ID_ADDRESS) == sizeof(empty));
+}
+
 static int open_with(npu_hal_t **hal, const npu_hal_soc_mmap_options_t *soc,
                      const npu_hal_memory_region_t *regions, uint32_t count)
 {
@@ -201,7 +230,9 @@ static void test_configuration(void)
 
     /* The regions used to be the 4 GiB PCIe defaults while only the mapped
      * DDR existed: now the backend refuses anything not fully mapped. */
-    assert(open_with(&hal, &soc, 0, 0) == -EINVAL && !hal);
+    assert(open_with(&hal, &soc, 0, 0) == 0);
+    npu_hal_close(hal);
+    hal = 0;
     memcpy(bad, regions, sizeof(regions));
     bad[0].size = UINT64_C(0x100000000);
     assert(open_with(&hal, &soc, bad, (uint32_t)count) == -EINVAL && !hal);
@@ -595,6 +626,7 @@ int main(void)
     memory_fd = mkstemp(path);
     assert(memory_fd >= 0);
     assert(ftruncate(memory_fd, (off_t)FILE_SIZE) == 0);
+    test_bootrom_discovery();
     test_configuration();
     test_uram_capacity();
 
