@@ -306,7 +306,8 @@ create-proc 只使用静态 slot 和栈，不扩堆、不等待其它线程。�
 异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
 稳定的 328-byte `struct trap_record`，Host 默认 trap 回调会原子地打印线程身份、
 `mstatus/mepc/mcause/mtval/fcsr` 和 x0–x31；后者直接指向 472-byte
-`struct tensor_interrupt_record`。tensor 报告由 send Thread 使用双缓冲直接同步发送，
+`struct tensor_interrupt_record`。硬件中断源编号与 Server 日志名称见
+[张量中断源编号](host/driver/README.md#张量中断源编号)。tensor 报告由 send Thread 使用双缓冲直接同步发送，
 不创建通用 RPC transaction。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte

@@ -235,6 +235,56 @@ opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
 
+### 张量中断源编号
+
+`dayan_server` 默认报告中的 `source=N(name)` 使用以下硬件中断源编号表，
+依据 `interrupts-20261103.csv` 更新。实现位于
+`server/device.c` 的 `tensor_interrupt_source_name()`；未列出的编号打印 `unknown`。
+`source` 取最近一条中断记录的 bits 47:32，`info` 为 bits 31:0 的原始硬件信息；
+该 CSV 仅定义编号和名称，没有定义 `info` 的各位含义。
+
+| source_id | source_name |
+| --- | --- |
+| 0 | `neomat_uram_a_read_range` |
+| 1 | `neomat_uram_a_read_align` |
+| 2 | `neomat_uram_b_read_range` |
+| 3 | `neomat_uram_b_read_align` |
+| 4 | `neomat_uram_a_scale_read_range` |
+| 5 | `neomat_uram_a_scale_read_align` |
+| 6 | `neomat_uram_b_scale_read_range` |
+| 7 | `neomat_uram_b_scale_read_align` |
+| 8 | `neomat_uram_c_read_range` |
+| 9 | `neomat_uram_c_read_align` |
+| 10 | `neomat_uram_c_write_range` |
+| 11 | `neomat_uram_c_write_align` |
+| 12 | `neomat_tcsr_access_error` |
+| 13 | `neomat_decode_error` |
+| 14 | `neomat_datatype_error` |
+| 15 | `neodma_tcsr_access_error` |
+| 16 | `neodma_uram_table_range` |
+| 17 | `neodma_uram_table_align` |
+| 18 | `neodma_uram_read_range` |
+| 19 | `neodma_uram_read_align` |
+| 20 | `neodma_uram_write_range` |
+| 21 | `neodma_uram_write_align` |
+| 22 | `neodma_decode_error` |
+| 23 | `flexvec_decode_error` |
+| 24 | `flexvec_uram_group_0_range` |
+| 25 | `flexvec_uram_group_0_align` |
+| 26 | `neovec_uram_lda_range` |
+| 27 | `neovec_uram_lda_align` |
+| 28 | `neovec_uram_ldb_range` |
+| 29 | `neovec_uram_ldb_align` |
+| 30 | `neovec_uram_store_range` |
+| 31 | `neovec_uram_store_align` |
+| 32 | `neovec_tcsr_access_error` |
+| 33 | `neovec_decode_error` |
+| 34 | `instruction_decode_error` |
+| 35 | `tensor_inst_watchdog_timeout` |
+| 36 | `resource_scheduler_error` |
+
+### Proc 创建 ABI
+
 create-proc ABI 使用 64-byte 对齐的 `rpc_proc_create_request`：前 11 个 RV64 word
 依次为 entry、cookie、shared offset/size、启动配置、Tensor Context、Resource Context、
 三个 task ID/dimension word 和两个 name word。启动配置依次打包

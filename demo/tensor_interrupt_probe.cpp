@@ -27,7 +27,8 @@ __kernel__ void tensor_interrupt_probe(TensorInterruptResult *result)
 
     /*
      * The Proc owns one logical LSU group, so group 1 is deliberately out of
-     * range. The access must raise source 12 and remain resumable.
+     * range. The access must raise source 15 (neodma_tcsr_access_error)
+     * and remain resumable.
      */
     __tx_lsu_tcsr_write<LSU_GROUPSZ + LSU_DIM0>(0x2aU);
 

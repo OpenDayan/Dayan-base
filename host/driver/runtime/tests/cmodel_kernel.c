@@ -223,7 +223,8 @@ void interrupt_kernel(uint64_t *output, uint64_t base)
     __asm__ volatile("csrr %0, mstatus" : "=r"(mstatus));
     if (!(mstatus & 8U))
         dayan_thread_exit(-1);
-    /* LSU group 1, DIM0: outside the single assigned group, raises source 12. */
+    /* LSU group 1, DIM0: outside the assigned group, raises source 15
+     * (neodma_tcsr_access_error). */
     __builtin_riscv_tx_lsu_tcsr_write(0x2aU, 33);
     output[x] = expected;
     dayan_thread_exit((int64_t)expected);
