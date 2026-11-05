@@ -18,6 +18,15 @@ int npu_runtime_get_topology(npu_runtime_t *runtime,
                                 0, 0, topology, sizeof(*topology), 0);
 }
 
+int npu_runtime_get_uram_capacity(npu_runtime_t *runtime, uint64_t *bytes)
+{
+    if (!runtime || !bytes)
+        return -EINVAL;
+    *bytes = 0;
+    return runtime_control_call(runtime, NPU_IPC_URAM_CAPACITY, 0,
+                                0, 0, bytes, sizeof(*bytes), 0);
+}
+
 void npu_context_desc_init(npu_context_desc_t *desc)
 {
     if (!desc)

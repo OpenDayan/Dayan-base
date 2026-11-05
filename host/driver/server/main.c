@@ -2,6 +2,8 @@
 
 #include "server.h"
 #include "backend/xilinx_dma/npu_hal_xilinx_dma.h"
+#include "backend/soc_mmap/npu_hal_soc_mmap.h"
+#include "platform_regs.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -72,7 +74,7 @@ static void usage(FILE *stream, const char *program)
             "  --socket PATH           Unix socket path\n"
             "  --firmware PATH         BL1 ELF\n"
             "  --api-elf PATH          public BL1 API ELF\n"
-            "  --backend NAME          xilinx-dma\n"
+            "  --backend NAME          xilinx-dma (default) or soc-mmap\n"
             "  --dma-driver NAME       xdma (default) or qdma\n"
             "  --dma-profile NAME      simulator (default) or fpga\n"
             "  --dma-device-dir PATH   override profile directory\n"
@@ -88,10 +90,23 @@ static void usage(FILE *stream, const char *program)
             "  --cluster-count N       number of Clusters\n"
             "  --cluster-stride N      XDMA index stride per Cluster\n"
             "  --cluster-mask MASK     enabled Cluster mask\n"
-            "  --core-mask MASK        enabled Core mask within Cluster\n"
+            "  --cores-per-cluster N   Cores per Cluster (auto from BootROM; fallback 4)\n"
+            "  --core-mask MASK        enabled Core mask within Cluster, clipped to\n"
+            "                          the low --cores-per-cluster bits\n"
             "  --timeout-ms N          Device operation timeout in milliseconds\n"
             "  --normal-memory-size-mib N  default Normal memory size in MiB\n"
+            "  --uram-size N           per-Core URAM bytes (auto): 0x180000 or 0xc0000\n"
             "  --enable-mmu 0|1        route Device addresses through the ClusterMMU\n"
+            "soc-mmap backend (one Cluster; Normal memory is --soc-ddr-*):\n"
+            "  --soc-base PA           Host PA of the Cluster IP aperture (required)\n"
+            "  --soc-ddr-base PA       Host PA of the shared DDR reserved for the NPU\n"
+            "                          (required; must be reserved from Linux)\n"
+            "  --soc-ddr-size N        size of that DDR in bytes (required)\n"
+            "  --soc-ddr-npu-base A    NPU-side address of that DDR (default 0x80000000)\n"
+            "  --soc-ddr-coherence M   uncached or coherent (required, see README)\n"
+            "  --soc-memory-device PATH  device mapped by the Server (default /dev/mem)\n"
+            "  --soc-data-device PATH  device passed to Runtime (default: memory device)\n"
+            "  --soc-platform-control MODE  external (clock/reset owned by BSP)\n"
             "  --help                  show this text\n",
             program);
 }
@@ -100,6 +115,10 @@ int main(int argc, char **argv)
 {
     dayan_server_options_t options;
     npu_hal_xilinx_dma_options_t dma;
+    npu_hal_soc_mmap_options_t soc;
+    int soc_backend = 0;
+    int dma_arguments = 0;
+    int soc_arguments = 0;
     int xdma_arguments = 0;
     int qdma_arguments = 0;
     int new_arguments = 0;
@@ -112,6 +131,7 @@ int main(int argc, char **argv)
     dayan_server_options_init(&options);
     (void)npu_hal_xilinx_dma_options_init(
         &dma, NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR);
+    (void)npu_hal_soc_mmap_options_init(&soc);
     options.hal.backend_options = &dma.base;
     options.firmware_path = DAYAN_DEFAULT_FIRMWARE;
     options.api_elf_path = DAYAN_DEFAULT_API_ELF;
@@ -156,6 +176,14 @@ int main(int argc, char **argv)
             xdma_arguments = 1;
         if (strncmp(argument, "--dma-", 6) == 0 || strcmp(argument, "--backend") == 0)
             new_arguments = 1;
+        if (strncmp(argument, "--dma-", 6) == 0 ||
+            strncmp(argument, "--xdma-", 7) == 0 ||
+            strcmp(argument, "--device-prefix") == 0 ||
+            strcmp(argument, "--device-index") == 0 ||
+            strcmp(argument, "--cluster-stride") == 0)
+            dma_arguments = 1;
+        if (strncmp(argument, "--soc-", 6) == 0)
+            soc_arguments = 1;
         if (strcmp(argument, "--socket") == 0)
             options.socket_path = value;
         else if (strcmp(argument, "--firmware") == 0)
@@ -163,7 +191,37 @@ int main(int argc, char **argv)
         else if (strcmp(argument, "--api-elf") == 0)
             options.api_elf_path = value;
         else if (strcmp(argument, "--backend") == 0) {
-            if (strcmp(value, "xilinx-dma") != 0)
+            if (strcmp(value, "xilinx-dma") == 0)
+                soc_backend = 0;
+            else if (strcmp(value, "soc-mmap") == 0)
+                soc_backend = 1;
+            else
+                status = -EINVAL;
+        }
+        else if (strcmp(argument, "--soc-base") == 0)
+            status = parse_u64(value, &soc.npu_base);
+        else if (strcmp(argument, "--soc-ddr-base") == 0)
+            status = parse_u64(value, &soc.ddr_host_base);
+        else if (strcmp(argument, "--soc-ddr-size") == 0)
+            status = parse_u64(value, &soc.ddr_size);
+        else if (strcmp(argument, "--soc-ddr-npu-base") == 0)
+            status = parse_u64(value, &soc.ddr_device_base);
+        else if (strcmp(argument, "--soc-ddr-coherence") == 0) {
+            if (strcmp(value, "uncached") == 0)
+                soc.ddr_coherence = NPU_HAL_SOC_MMAP_DDR_UNCACHED;
+            else if (strcmp(value, "coherent") == 0)
+                soc.ddr_coherence = NPU_HAL_SOC_MMAP_DDR_COHERENT;
+            else
+                status = -EINVAL;
+        }
+        else if (strcmp(argument, "--soc-memory-device") == 0)
+            soc.memory_device = value;
+        else if (strcmp(argument, "--soc-data-device") == 0)
+            soc.data_device = value;
+        else if (strcmp(argument, "--soc-platform-control") == 0) {
+            if (strcmp(value, "external") == 0)
+                soc.platform_control = NPU_HAL_SOC_MMAP_PLATFORM_EXTERNAL;
+            else
                 status = -EINVAL;
         }
         else if (strcmp(argument, "--dma-driver") == 0) {
@@ -216,6 +274,15 @@ int main(int argc, char **argv)
                                &dma.cluster_device_stride);
         else if (strcmp(argument, "--cluster-mask") == 0)
             status = parse_u32(value, &options.enabled_cluster_mask);
+        else if (strcmp(argument, "--cores-per-cluster") == 0) {
+            options.hal.manual_cores_per_cluster = 1;
+            status = parse_u32(value, &options.hal.cores_per_cluster);
+            if (status == 0 &&
+                (!options.hal.cores_per_cluster ||
+                 options.hal.cores_per_cluster >
+                     NPU_HAL_MAX_CORES_PER_CLUSTER))
+                status = -EINVAL;
+        }
         else if (strcmp(argument, "--core-mask") == 0)
             status = parse_u32(value, &options.enabled_core_mask);
         else if (strcmp(argument, "--timeout-ms") == 0) {
@@ -226,6 +293,14 @@ int main(int argc, char **argv)
         else if (strcmp(argument, "--enable-mmu") == 0) {
             status = parse_u32(value, &options.service.enable_mmu);
             if (status == 0 && options.service.enable_mmu > 1U)
+                status = -EINVAL;
+        }
+        else if (strcmp(argument, "--uram-size") == 0) {
+            options.hal.manual_uram_size = 1;
+            status = parse_u32(value, &options.hal.uram_size);
+            if (status == 0 &&
+                options.hal.uram_size != DAYAN_URAM_SIZE_768K &&
+                options.hal.uram_size != DAYAN_URAM_SIZE_1536K)
                 status = -EINVAL;
         }
         else if (strcmp(argument, "--normal-memory-size-mib") == 0) {
@@ -244,18 +319,53 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if ((dma.driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA && xdma_arguments) ||
-        (dma.driver == NPU_HAL_XILINX_DMA_DRIVER_XDMA && qdma_arguments)) {
-        fprintf(stderr, "dayan_server: options do not match selected DMA driver\n");
+    if (soc_backend ? dma_arguments : soc_arguments) {
+        fprintf(stderr, "dayan_server: options do not match selected backend\n");
         return 2;
     }
-    if (!new_arguments)
-        dma.completion = NPU_HAL_XILINX_DMA_COMPLETION_LEGACY;
-    fprintf(stderr, "dayan_server: DMA backend=xilinx-dma driver=%s profile=%s completion=%s\n",
-            dma.driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA ? "qdma" : "xdma",
-            dma.profile == NPU_HAL_XILINX_DMA_PROFILE_FPGA ? "fpga" : "simulator",
-            dma.completion == NPU_HAL_XILINX_DMA_COMPLETION_IRQ ? "irq" :
-            dma.completion == NPU_HAL_XILINX_DMA_COMPLETION_POLLING ? "polling (1 us requested sleep)" : "legacy");
+    if (soc_backend) {
+        if (!soc.npu_base || !soc.ddr_host_base || !soc.ddr_size ||
+            !soc.ddr_coherence) {
+            fprintf(stderr, "dayan_server: soc-mmap needs --soc-base, "
+                    "--soc-ddr-base, --soc-ddr-size and --soc-ddr-coherence\n");
+            return 2;
+        }
+        if (options.hal.cluster_count != 1U) {
+            fprintf(stderr, "dayan_server: soc-mmap supports one Cluster; the "
+                    "platform defines no address relation between Clusters\n");
+            return 2;
+        }
+        if (options.hal.normal_memory_size_mib) {
+            fprintf(stderr, "dayan_server: soc-mmap takes Normal memory from "
+                    "--soc-ddr-size, not --normal-memory-size-mib\n");
+            return 2;
+        }
+        options.hal.backend_options = &soc.base;
+        fprintf(stderr, "dayan_server: backend=soc-mmap npu_base=0x%llx "
+                "ddr_host=0x%llx ddr_npu=0x%llx ddr_size=0x%llx coherence=%s "
+                "memory=%s data=%s platform=external completion=polling\n",
+                (unsigned long long)soc.npu_base,
+                (unsigned long long)soc.ddr_host_base,
+                (unsigned long long)soc.ddr_device_base,
+                (unsigned long long)soc.ddr_size,
+                soc.ddr_coherence == NPU_HAL_SOC_MMAP_DDR_UNCACHED ?
+                    "uncached" : "coherent",
+                soc.memory_device,
+                soc.data_device ? soc.data_device : soc.memory_device);
+    } else {
+        if ((dma.driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA && xdma_arguments) ||
+            (dma.driver == NPU_HAL_XILINX_DMA_DRIVER_XDMA && qdma_arguments)) {
+            fprintf(stderr, "dayan_server: options do not match selected DMA driver\n");
+            return 2;
+        }
+        if (!new_arguments)
+            dma.completion = NPU_HAL_XILINX_DMA_COMPLETION_LEGACY;
+        fprintf(stderr, "dayan_server: DMA backend=xilinx-dma driver=%s profile=%s completion=%s\n",
+                dma.driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA ? "qdma" : "xdma",
+                dma.profile == NPU_HAL_XILINX_DMA_PROFILE_FPGA ? "fpga" : "simulator",
+                dma.completion == NPU_HAL_XILINX_DMA_COMPLETION_IRQ ? "irq" :
+                dma.completion == NPU_HAL_XILINX_DMA_COMPLETION_POLLING ? "polling (1 us requested sleep)" : "legacy");
+    }
     memset(&action, 0, sizeof(action));
     action.sa_handler = stop_signal;
     sigemptyset(&action.sa_mask);

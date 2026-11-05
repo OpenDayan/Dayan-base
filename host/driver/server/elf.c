@@ -500,12 +500,16 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
     const char *stage = "validating the BL1 request";
     int status;
 
-    if (!device || !image || cluster >= device->hal_info.cluster_count)
-        return -EINVAL;
+    if (!device || !image || cluster >= device->hal_info.cluster_count) {
+        status = -EINVAL;
+        goto out;
+    }
     valid_mask = device->hal_info.cores_per_cluster == 32U ? UINT32_MAX :
         (UINT32_C(1) << device->hal_info.cores_per_cluster) - 1U;
-    if (!core_mask || (core_mask & ~valid_mask))
-        return -EINVAL;
+    if (!core_mask || (core_mask & ~valid_mask)) {
+        status = -EINVAL;
+        goto out;
+    }
     firmware_log(cluster, "loading BL1 ELF: image=%zu bytes core_mask=0x%08x",
                  size, core_mask);
     stage = "checking the Cluster firmware state";
@@ -513,7 +517,8 @@ int npu_service_load_bl1_elf(npu_service_device_t *device, uint32_t cluster,
     if (device->clusters[cluster].firmware_loaded ||
         device->clusters[cluster].booted_cores) {
         pthread_mutex_unlock(&device->mutex);
-        return -EBUSY;
+        status = -EBUSY;
+        goto out;
     }
     pthread_mutex_unlock(&device->mutex);
     stage = "parsing the BL1 ELF";

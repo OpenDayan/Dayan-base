@@ -729,14 +729,19 @@ static int initialize_slots(dayan_server_t *server)
 {
     uint32_t cluster_mask = server->options.enabled_cluster_mask;
     uint32_t core_mask = server->options.enabled_core_mask;
+    uint32_t core_all = all_mask(server->hal_info.cores_per_cluster);
     size_t index;
 
     if (!cluster_mask)
         cluster_mask = all_mask(server->hal_info.cluster_count);
+    /* Cores beyond cores_per_cluster do not exist (a 1c RTL has no Core 1-3),
+     * so the mask is clipped to them. A request that names only absent Cores
+     * is an error, not "all Cores". */
     if (!core_mask)
-        core_mask = all_mask(server->hal_info.cores_per_cluster);
-    if ((cluster_mask & ~all_mask(server->hal_info.cluster_count)) ||
-        (core_mask & ~all_mask(server->hal_info.cores_per_cluster)))
+        core_mask = core_all;
+    else if (!(core_mask &= core_all))
+        return -EINVAL;
+    if (cluster_mask & ~all_mask(server->hal_info.cluster_count))
         return -EINVAL;
     server->options.enabled_cluster_mask = cluster_mask;
     server->options.enabled_core_mask = core_mask;
@@ -782,15 +787,17 @@ int dayan_server_create(dayan_server_t **server_out,
                         const dayan_server_options_t *options)
 {
     dayan_server_options_t defaults;
-    dayan_server_t *server;
+    dayan_server_t *server = 0;
     uint32_t cluster;
     const char *stage = "validating options";
     int mutex_initialized = 0;
     int condition_initialized = 0;
     int status;
 
-    if (!server_out)
-        return -EINVAL;
+    if (!server_out) {
+        status = -EINVAL;
+        goto fail;
+    }
     *server_out = 0;
     if (!options) {
         dayan_server_options_init(&defaults);
@@ -808,11 +815,16 @@ int dayan_server_create(dayan_server_t **server_out,
         !options->macro_tcsr_count_per_hart ||
         options->macro_tcsr_count_per_hart > 64U ||
         !options->socket_path ||
-        !*options->socket_path)
-        return -EINVAL;
+        !*options->socket_path) {
+        status = -EINVAL;
+        goto fail;
+    }
+    stage = "allocating the Server state";
     server = calloc(1, sizeof(*server));
-    if (!server)
-        return -ENOMEM;
+    if (!server) {
+        status = -ENOMEM;
+        goto fail;
+    }
     server->listen_fd = -1;
     server->options = *options;
     server->service_trap = options->service.trap;
@@ -829,13 +841,14 @@ int dayan_server_create(dayan_server_t **server_out,
     server->options.service.callback_context = server;
     server_log("startup",
                "configuration: socket=%s backend=%u requested_clusters=%u "
-               "cores_per_cluster=%u normal_memory_mib=%u",
+               "cores_per_cluster=%u normal_memory_mib=%u uram_size=0x%x",
                options->socket_path,
                options->hal.backend_options ?
                    options->hal.backend_options->backend : 0U,
                server->options.hal.cluster_count,
                server->options.hal.cores_per_cluster,
-               server->options.hal.normal_memory_size_mib);
+               server->options.hal.normal_memory_size_mib,
+               server->options.hal.uram_size);
     server_log("startup",
                "requested masks: clusters=0x%08x cores=0x%08x; "
                "firmware=%s; api_elf=%s",
@@ -899,8 +912,10 @@ int dayan_server_create(dayan_server_t **server_out,
                server->hal_info.cores_per_cluster,
                server->hal_info.memory_region_count,
                (unsigned long long)server->hal_info.max_transfer_size);
-    /* NPUTaskMode::kFourCore is defined by the current 4-core Cluster ABI. */
-    if (server->hal_info.cores_per_cluster != 4U) {
+    /* NPUTaskMode::kFourCore is defined by the current 4-core Cluster ABI, so
+     * a Cluster cannot have more Cores; with fewer, only kSingleCore launches
+     * are accepted. */
+    if (server->hal_info.cores_per_cluster > 4U) {
         status = -ENOTSUP;
         goto fail;
     }
@@ -971,21 +986,23 @@ int dayan_server_create(dayan_server_t **server_out,
 fail:
     server_log("error", "startup failed while %s: %s (%d)", stage,
                server_status_string(status), status);
-    if (server->listen_fd >= 0)
-        close(server->listen_fd);
-    if (server->socket_path)
-        (void)unlink(server->socket_path);
-    free(server->shared_resource_used);
-    free(server->slots);
-    if (server->device)
-        (void)npu_service_close(server->device);
-    npu_hal_close(server->hal);
-    if (condition_initialized)
-        pthread_cond_destroy(&server->condition);
-    if (mutex_initialized)
-        pthread_mutex_destroy(&server->mutex);
-    free(server->socket_path);
-    free(server);
+    if (server) {
+        if (server->listen_fd >= 0)
+            close(server->listen_fd);
+        if (server->socket_path)
+            (void)unlink(server->socket_path);
+        free(server->shared_resource_used);
+        free(server->slots);
+        if (server->device)
+            (void)npu_service_close(server->device);
+        npu_hal_close(server->hal);
+        if (condition_initialized)
+            pthread_cond_destroy(&server->condition);
+        if (mutex_initialized)
+            pthread_mutex_destroy(&server->mutex);
+        free(server->socket_path);
+        free(server);
+    }
     return status;
 }
 
@@ -1108,12 +1125,14 @@ static int memory_request_for_buffer(dayan_server_t *server,
     memory.size = request->size;
     memory.alignment = request->alignment;
     /*
-     * With translation on, a Buffer has to be mappable, and the smallest thing
-     * the ClusterMMU can map is one 4 KiB page.  The Runtime's default
-     * alignment is far smaller than that, so without this the allocator hands
-     * back an unaligned physical address and buffer_map_locked() has no page
-     * to install.  Rounding the size up too keeps a page from spanning two
-     * Buffers, which would leak one Buffer's permissions onto the other.
+     * With translation on, a Buffer has to be mappable, and Buffers are mapped
+     * with 2 MiB leaves, whose physical base the walker requires to be 2 MiB
+     * aligned.  The Runtime's default alignment is far smaller than that, so
+     * without this the allocator hands back an unaligned physical address and
+     * buffer_map_locked() has no leaf to install.  Rounding the size up too
+     * keeps a leaf from spanning two Buffers, which would leak one Buffer's
+     * permissions onto the other - at the cost of every Buffer occupying at
+     * least 2 MiB of Normal memory.
      */
     if (server->options.service.enable_mmu) {
         if (memory.alignment < NPU_SERVICE_MMU_PAGE_SIZE)
@@ -2181,6 +2200,25 @@ static int dispatch_control(dayan_server_t *server,
         topology->enabled_cluster_mask = server->options.enabled_cluster_mask;
         topology->enabled_core_mask = server->options.enabled_core_mask;
         *response_size = sizeof(*topology);
+        status = 0;
+        break;
+    }
+    case NPU_IPC_URAM_CAPACITY: {
+        uint64_t capacity = UINT64_MAX;
+        size_t index;
+
+        if (!payload_exact(header, 0) || header->object_id) {
+            status = -EINVAL;
+            break;
+        }
+        for (index = 0; index < server->slot_count; ++index) {
+            const struct server_core_slot *slot = &server->slots[index];
+
+            if (slot->enabled && slot->uram_capacity < capacity)
+                capacity = slot->uram_capacity;
+        }
+        *(uint64_t *)response = capacity == UINT64_MAX ? 0 : capacity;
+        *response_size = sizeof(capacity);
         status = 0;
         break;
     }

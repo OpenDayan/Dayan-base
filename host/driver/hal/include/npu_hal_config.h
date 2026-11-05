@@ -9,11 +9,13 @@
 extern "C" {
 #endif
 
-#define NPU_HAL_OPTIONS_VERSION         5U
+#define NPU_HAL_OPTIONS_VERSION         7U
 #define NPU_HAL_MAX_CLUSTERS            32U
 #define NPU_HAL_MAX_CORES_PER_CLUSTER   32U
 
 #define NPU_HAL_BACKEND_XILINX_DMA      1U
+#define NPU_HAL_BACKEND_SOC_MMAP        2U
+#define NPU_HAL_BACKEND_INPROCESS       3U
 /* Source compatibility for existing simulator/HAL callers. */
 #define NPU_HAL_BACKEND_XDMA            NPU_HAL_BACKEND_XILINX_DMA
 #define NPU_HAL_ANY_CLUSTER             UINT32_MAX
@@ -57,6 +59,13 @@ typedef struct npu_hal_options {
     uint32_t cluster_count;
     uint32_t cores_per_cluster;
     uint32_t normal_memory_size_mib;
+    /* Per-core URAM bytes: 0x180000 (default) or 0xc0000.  Used by default
+     * regions and SoC access bounds; explicit memory_regions define pools. */
+    uint32_t uram_size;
+    /* Mark explicit overrides, including values equal to the defaults.
+     * Non-default cores_per_cluster/uram_size are also treated as overrides. */
+    uint32_t manual_cores_per_cluster;
+    uint32_t manual_uram_size;
     /*
      * Split the Normal region into a firmware pool and a Buffer pool.  Only the
      * MMU needs the split - it is what keeps a Buffer's physical pages out of

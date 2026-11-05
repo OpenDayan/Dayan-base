@@ -109,7 +109,7 @@ DAYAN_TEST(tensor_test, {
         .macro_tcsr_count = DAYAN_TCSR_LOGICAL_GROUPS,
         .resource_counts = 0,
         .atomic_cache_size = 64,
-        .uram_size = 0x180000,
+        .uram_size = 0xC0000,
     },
     .args = {0},
     .argc = 0,

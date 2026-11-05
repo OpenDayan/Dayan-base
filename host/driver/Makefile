@@ -96,6 +96,16 @@ $(BUILD)/tests/hal_test: hal/tests/hal_test.c $(HAL_IO_OBJECTS) \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
+$(BUILD)/tests/soc_mmap_test: hal/tests/soc_mmap_test.c $(HAL_IO_OBJECTS) \
+		$(HAL_CONTROL_OBJECTS) $(HAL_DATA_OBJECTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
+$(BUILD)/tests/inprocess_test: hal/tests/inprocess_test.c $(HAL_IO_OBJECTS) \
+		$(HAL_CONTROL_OBJECTS) $(HAL_DATA_OBJECTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+
 $(BUILD)/tests/package_test: runtime/tests/package_test.c \
 		$(BUILD)/runtime/package.o $(BUILD)/server/package.o
 	@mkdir -p $(dir $@)
@@ -105,11 +115,21 @@ $(BUILD)/tests/pcu_test: hal/tests/pcu_test.c $(BUILD)/hal/pcu.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@
 
-# Links server/mmu.c against stub HAL and allocator definitions in the test
-# itself, so the page-table logic is exercised without a device.
-$(BUILD)/tests/mmu_test: server/tests/mmu_test.c $(BUILD)/server/mmu.o
+# The MMU tests link the real page-table code (hal/mmu_pt.c) against a fake
+# HAL rather than the HAL proper, so tables, registers and allocations can be
+# inspected without a device.  mmu_pt_test covers the HAL mechanism alone;
+# mmu_test puts the Service policy (server/mmu.c) on top of it.
+MMU_FAKE_HAL := hal/tests/mmu_fake_hal.c
+
+$(BUILD)/tests/mmu_pt_test: hal/tests/mmu_pt_test.c $(MMU_FAKE_HAL) \
+		$(BUILD)/hal/mmu_pt.o
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
+	$(CC) $(CPPFLAGS) -Ihal/tests $(CFLAGS) -pthread $^ -o $@
+
+$(BUILD)/tests/mmu_test: server/tests/mmu_test.c $(MMU_FAKE_HAL) \
+		$(BUILD)/server/mmu.o $(BUILD)/hal/mmu_pt.o
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -Ihal/tests $(CFLAGS) -pthread $^ -o $@
 
 $(BUILD)/tests/kernel_cache_test: server/tests/kernel_cache_test.c $(BUILD)/server/kernel.o $(BUILD)/server/parallel.o
 	@mkdir -p $(dir $@)
@@ -156,16 +176,21 @@ layer-check: $(RUNTIME_STATIC)
 		grep -E ' (dayan_server_|npu_service_|npu_hal_(open|close|get_info|register_|irq_|boot_|memory_))'
 
 check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
+	$(BUILD)/tests/soc_mmap_test \
 	$(BUILD)/tests/pcu_test \
 	$(BUILD)/tests/package_test $(BUILD)/tests/socket_test \
-	$(BUILD)/tests/mmu_test $(BUILD)/tests/kernel_cache_test $(BUILD)/tests/profile_parallel_test $(BUILD)/tests/public_headers.o
+	$(BUILD)/tests/mmu_pt_test $(BUILD)/tests/mmu_test \
+	$(BUILD)/tests/kernel_cache_test $(BUILD)/tests/profile_parallel_test $(BUILD)/tests/public_headers.o $(BUILD)/tests/inprocess_test
 	$(BUILD)/tests/hal_test
+	$(BUILD)/tests/soc_mmap_test
 	$(BUILD)/tests/pcu_test
 	$(BUILD)/tests/package_test
 	$(BUILD)/tests/socket_test
+	$(BUILD)/tests/mmu_pt_test
 	$(BUILD)/tests/mmu_test
 	$(BUILD)/tests/kernel_cache_test
 	$(BUILD)/tests/profile_parallel_test
+	$(BUILD)/tests/inprocess_test
 
 $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 	@mkdir -p $(dir $@)

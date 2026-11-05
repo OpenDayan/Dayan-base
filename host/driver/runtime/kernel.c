@@ -79,8 +79,12 @@ int npu_module_load_file(npu_context_t *context, const char *path,
         fclose(file);
         return -ENOMEM;
     }
-    if (fread(image, 1, (size_t)length, file) != (size_t)length ||
-        fclose(file) != 0) {
+    if (fread(image, 1, (size_t)length, file) != (size_t)length) {
+        fclose(file);
+        free(image);
+        return -EIO;
+    }
+    if (fclose(file) != 0) {
         free(image);
         return -EIO;
     }

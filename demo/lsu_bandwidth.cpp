@@ -7,6 +7,7 @@ enum : uint64_t {
     kResultMagic = 0x4c535542574d3031ULL,
     kSampleCount = 5,
     kUramBytes = 1024U * 1024U,
+    kSmallUramBytes = 768U * 1024U,
     kSourceBytes = kUramBytes,
     kVerificationBytes = 64U * 1024U,
 };
@@ -79,7 +80,8 @@ static void measure_d2u(const uint8_t *source, uint64_t local_uram,
     const uint64_t source_base = (uint64_t)(uintptr_t)source;
 
     for (uint64_t sample = 0; sample < kSampleCount; ++sample) {
-        const uint64_t bytes = sizes[sample];
+        const uint64_t bytes = sizes[sample] < dayan_uram_size() ?
+                                   sizes[sample] : dayan_uram_size();
 
         configure_contiguous<0>(bytes);
         uint64_t begin = dayan_get_time();
@@ -104,7 +106,8 @@ static void measure_remote_u2d(uint64_t local_uram, uint64_t remote_uram,
     };
 
     for (uint64_t sample = 0; sample < kSampleCount; ++sample) {
-        const uint64_t bytes = sizes[sample];
+        const uint64_t bytes = sizes[sample] < dayan_uram_size() ?
+                                   sizes[sample] : dayan_uram_size();
 
         configure_contiguous<0>(bytes);
         uint64_t begin = dayan_get_time();
@@ -117,16 +120,10 @@ static void measure_remote_u2d(uint64_t local_uram, uint64_t remote_uram,
     }
 }
 
-} // namespace lsu_bandwidth_detail
-
-#endif /* __DAYAN_DEVICE__ */
-
-__kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
+static void run(uint64_t mode, const uint8_t *source,
                               uint8_t *verification,
-                              LsuBandwidthResults *results)
+                              LsuBandwidthResults *results, uint64_t uram_bytes)
 {
-    using namespace lsu_bandwidth_detail;
-
     const uint32_t lane = dayan_task_id(DAYAN_TASK_X);
 
     if ((mode != kModeD2U && mode != kModeRemoteU2D) || !source ||
@@ -138,14 +135,14 @@ __kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
         dayan_thread_exit(-22);
 
     void *uram = dayan_uram_base();
-    if (!uram || dayan_uram_size() < kUramBytes)
+    if (!uram || dayan_uram_size() < uram_bytes)
         dayan_thread_exit(-12);
 
     const uint64_t physical_uram = (uint64_t)(uintptr_t)uram;
     const uint64_t expected_window =
         kUramWindowBase + (uint64_t)lane * kUramWindowStride;
     if (physical_uram < expected_window ||
-        physical_uram - expected_window > kUramWindowStride - kUramBytes)
+        physical_uram - expected_window > kUramWindowStride - uram_bytes)
         dayan_thread_exit(-22);
 
     ClusterShared *cluster = (ClusterShared *)shared;
@@ -165,7 +162,7 @@ __kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
 
         if (mode == kModeRemoteU2D) {
             /* Prepare the U2D source before starting the timed region. */
-            configure_contiguous<0>(kUramBytes);
+            configure_contiguous<0>(uram_bytes);
             issue_d2u(local_uram, (uint64_t)(uintptr_t)source);
             dayan_wait_lsu();
             measure_remote_u2d(local_uram, cluster->uram_base[1], results);
@@ -191,9 +188,30 @@ __kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
         dayan_thread_exit(status);
 }
 
+} // namespace lsu_bandwidth_detail
+
+#endif /* __DAYAN_DEVICE__ */
+
+__kernel__ void lsu_bandwidth(uint64_t mode, const uint8_t *source,
+                              uint8_t *verification,
+                              LsuBandwidthResults *results)
+{
+    lsu_bandwidth_detail::run(mode, source, verification, results, kUramBytes);
+}
+
+__kernel__ void lsu_bandwidth_small(uint64_t mode, const uint8_t *source,
+                              uint8_t *verification,
+                              LsuBandwidthResults *results)
+{
+    lsu_bandwidth_detail::run(mode, source, verification, results, kSmallUramBytes);
+}
+
 DAYAN_KERNEL_DESC(lsu_bandwidth, 0, 1024, kUramBytes, 1, 0, 0, 0);
+DAYAN_KERNEL_DESC(lsu_bandwidth_small, 0, 1024, kSmallUramBytes, 1, 0, 0, 0);
 
 #if !defined(__DAYAN_DEVICE__)
+
+#include "uram_config.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -323,7 +341,7 @@ __host__ static int print_and_validate_results(
 }
 
 __host__ static int run_mode(
-    uint64_t mode, npu_context_t *context, npu_stream_t *stream,
+    uint64_t mode, bool small_uram, npu_context_t *context, npu_stream_t *stream,
     npu_buffer_t *source_buffer, npu_buffer_t *verification_buffer,
     npu_buffer_t *results_buffer, const std::vector<uint8_t> &source,
     uint32_t timeout_ms)
@@ -345,9 +363,11 @@ __host__ static int run_mode(
         attrs.config.task_mode = NPUTaskMode::kFourCore;
         attrs.timeout_ms = timeout_ms;
         std::printf("[host] launch isolated %s benchmark: one issuer, "
-                    "one immediate-wait DMA per size, 4 KiB..1 MiB\n",
-                    mode == kModeD2U ? "D2U" : "remote-U2D");
-        status = lsu_bandwidth(mode, source_buffer, verification_buffer,
+                    "one immediate-wait DMA per size, 4 KiB..%llu KiB\n",
+                    mode == kModeD2U ? "D2U" : "remote-U2D",
+                    (unsigned long long)((small_uram ? kSmallUramBytes : kUramBytes) / 1024));
+        auto launch = small_uram ? lsu_bandwidth_small : lsu_bandwidth;
+        status = launch(mode, source_buffer, verification_buffer,
                                results_buffer, &attrs);
     }
     if (status == 0)
@@ -406,7 +426,13 @@ __host__ int main(int argc, char **argv)
     if (socket_path && *socket_path)
         runtime_options.server_socket = socket_path;
 
+    uint64_t uram_capacity = 0;
     status = npu_runtime_open(&runtime, &runtime_options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, kSmallUramBytes, &uram_capacity);
+    const bool small_uram = uram_capacity < kUramBytes;
+    if (small_uram)
+        source.resize(kSmallUramBytes);
     if (status == 0)
         status = npu_context_create(runtime, nullptr, &context);
     if (status == 0)
@@ -423,11 +449,11 @@ __host__ int main(int argc, char **argv)
         status = upload(stream, source_buffer, source.data(), source.size(),
                         timeout_ms);
     if (status == 0 && run_d2u)
-        status = run_mode(kModeD2U, context, stream, source_buffer,
+        status = run_mode(kModeD2U, small_uram, context, stream, source_buffer,
                           verification_buffer, results_buffer, source,
                           timeout_ms);
     if (status == 0 && run_u2d)
-        status = run_mode(kModeRemoteU2D, context, stream, source_buffer,
+        status = run_mode(kModeRemoteU2D, small_uram, context, stream, source_buffer,
                           verification_buffer, results_buffer, source,
                           timeout_ms);
     if (status < 0)

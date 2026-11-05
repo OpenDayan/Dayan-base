@@ -1,6 +1,8 @@
 #ifndef NPU_CONFIG_H
 #define NPU_CONFIG_H
 
+#include "platform_regs.h"
+
 #ifndef CONFIG_HART_COUNT
 #define CONFIG_HART_COUNT 4
 #endif
@@ -66,7 +68,12 @@
 #endif
 
 #ifndef CONFIG_URAM_SIZE
-#define CONFIG_URAM_SIZE 0x00180000
+#define CONFIG_URAM_SIZE DAYAN_URAM_SIZE
+#endif
+
+#if CONFIG_URAM_SIZE != DAYAN_URAM_SIZE_768K && \
+    CONFIG_URAM_SIZE != DAYAN_URAM_SIZE_1536K
+#error "CONFIG_URAM_SIZE must be 0xc0000 (768 KiB) or 0x180000 (1.5 MiB)"
 #endif
 
 #ifndef CONFIG_URAM_STRIDE

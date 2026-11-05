@@ -302,6 +302,9 @@ int npu_runtime_close(npu_runtime_t *runtime);
 /* Core mask applies to each enabled Cluster. Masks include only enabled slots. */
 int npu_runtime_get_topology(npu_runtime_t *runtime,
                              npu_runtime_topology_t *topology);
+/* Total allocatable URAM bytes per Core, minimum over enabled Cores.
+ * This is the installed capacity, not the transient free space. */
+int npu_runtime_get_uram_capacity(npu_runtime_t *runtime, uint64_t *bytes);
 
 /* Destroying a Context cancels its queued work and reclaims all child objects. */
 int npu_context_create(npu_runtime_t *runtime,

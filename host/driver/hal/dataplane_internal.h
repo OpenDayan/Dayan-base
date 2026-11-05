@@ -13,5 +13,7 @@ struct npu_hal_data_plane_ops {
 };
 
 extern const struct npu_hal_data_plane_ops npu_hal_xilinx_dma_data_plane_ops;
+extern const struct npu_hal_data_plane_ops npu_hal_soc_mmap_data_plane_ops;
+extern const struct npu_hal_data_plane_ops npu_hal_inprocess_data_plane_ops;
 
 #endif

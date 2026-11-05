@@ -306,7 +306,8 @@ create-proc 只使用静态 slot 和栈，不扩堆、不等待其它线程。�
 异常与张量中断报告不使用 packet：前者的低 48 位参数直接指向一份
 稳定的 328-byte `struct trap_record`，Host 默认 trap 回调会原子地打印线程身份、
 `mstatus/mepc/mcause/mtval/fcsr` 和 x0–x31；后者直接指向 472-byte
-`struct tensor_interrupt_record`。tensor 报告由 send Thread 使用双缓冲直接同步发送，
+`struct tensor_interrupt_record`。硬件中断源编号与 Server 日志名称见
+[张量中断源编号](host/driver/README.md#张量中断源编号)。tensor 报告由 send Thread 使用双缓冲直接同步发送，
 不创建通用 RPC transaction。输出和清空操作的 packet request 指向固定
 24-byte 的 `rpc_print_request`，其中包含 hart ID、proc ID、数据地址和长度，Host 因而
 可以分别管理每个 proc 的输出。堆申请及释放分别使用固定 8-byte 请求和 16-byte
@@ -423,8 +424,11 @@ token，不再编码 Resource 指针或软件事件类型。
 新 Thread 的栈、PC、Context1 和 Context2。软件 ready/resource 链表与扫描循环已经删除。
 
 `dayan_uram_base()` 和 `dayan_uram_size()` 返回 Service 为当前 kernel 实例在本 Core
-分配的私有 URAM；默认每 Core 容量为 1.5 MiB，地址窗口从 `0x00800000` 起并以 2 MiB
-为 Core stride。声明、分配和释放大小以 32 KiB 为粒度。
+分配的私有 URAM；每 Core 容量默认 1.5 MiB（`0x180000`），768 KiB 核心需在
+`dayan_server` 启动时指定 `--uram-size 0xc0000`。两种容量的地址窗口均从
+`0x00800000` 起并以 2 MiB 为 Core stride。声明、分配和释放大小以 32 KiB 为粒度。
+Host 管理的 BL1 从 Context 获取分配范围；独立裸机测试则用
+`make -C device URAM_SIZE=0xc0000` 选择 768 KiB，默认仍为 1.5 MiB。
 `dayan_create_thread(name, entry, arg, resources)` 使用 kernel 描述符预留的 slot 在同
 Core 创建一个有名称的单参数子 Thread；子 Thread 继承 URAM，TCSR 必须显式申请，达到
 声明上限或 TCSR 池耗尽时返回失败。

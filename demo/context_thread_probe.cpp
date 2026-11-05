@@ -192,6 +192,8 @@ DAYAN_KERNEL_NAMED_RESOURCE_DESC(
 
 #if !defined(__DAYAN_DEVICE__)
 
+#include "uram_config.h"
+
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -261,7 +263,10 @@ __host__ int main(int argc, char **argv)
     const char *socket_path = getenv("DAYAN_SERVER_SOCKET");
     if (socket_path && *socket_path)
         options.server_socket = socket_path;
+    uint64_t uram_capacity = 0;
     status = npu_runtime_open(&runtime, &options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, 32U * 1024U, &uram_capacity);
     if (status == 0)
         status = npu_context_create(runtime, nullptr, &context);
     if (status == 0)

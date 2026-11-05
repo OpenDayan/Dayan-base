@@ -112,6 +112,7 @@ int operator_api_compile(dayan_resource_t resource,
     compile_intrinsics((long)buffer, (long)memory, (long)resource);
 #endif
     status = dayan_resource_wait_free(resource);
+    status |= dayan_set_proc_name("compile-proc");
     status |= dayan_resource_produce_lsu(resource, 1, 0);
     status |= dayan_resource_wait_ready(resource, 0);
     status |= dayan_resource_wait(DAYAN_RESOURCE_MASK(next),

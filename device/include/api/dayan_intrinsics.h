@@ -16,6 +16,7 @@
  */
 #if defined(__riscv)
 #define __tx_vec_vv_fp32_max __dayan_builtin_tx_vec_vv_fp32_max
+#define __tx_vec_s_bitwise __dayan_builtin_tx_vec_s_bitwise
 #define __tx_vec_cvt_fp32_int32 __dayan_builtin_tx_vec_cvt_fp32_int32
 #define __tx_vec_cvt_s32_fp32 __dayan_builtin_tx_vec_cvt_s32_fp32
 #define __tx_vec_cvt_fp32_fp16 __dayan_builtin_tx_vec_cvt_fp32_fp16
@@ -25,6 +26,7 @@
 #define __tx_vec_cvt_mxfp4_bf16 __dayan_builtin_tx_vec_cvt_mxfp4_bf16
 #include <rvt_intrinsics.h>
 #undef __tx_vec_vv_fp32_max
+#undef __tx_vec_s_bitwise
 #undef __tx_vec_cvt_fp32_int32
 #undef __tx_vec_cvt_s32_fp32
 #undef __tx_vec_cvt_fp32_fp16
@@ -274,6 +276,19 @@ __attribute__((always_inline)) static inline void emit_vec_vv_fp32()
 } // namespace BaseNPUInstBuilder
 
 #if defined(__riscv)
+template <long Sd, long S1, long S2, long Lut>
+__attribute__((always_inline)) static inline void __tx_vec_s_bitwise()
+{
+    static_assert(Sd >= 0 && Sd < 8);
+    static_assert(S1 >= 0 && S1 < 8);
+    static_assert(S2 >= 0 && S2 < 8);
+    static_assert(Lut >= 0 && Lut < 16);
+    // The LUT spans func8[1:0] and func2.
+    constexpr long encoding = BaseNPUInstBuilder::OPCODE_CUSTOM_32B |
+        (S1 << 7) | ((Lut & 3) << 10) | (S2 << 12) | ((4 | (Lut >> 2)) << 15) | (Sd << 23) | (0x3eL << 26);
+    BaseNPUInstBuilder::detail::emit_void_32<encoding>();
+}
+
 template <long Vb, long Vrs1, long Op>
 __attribute__((always_inline)) static inline void __tx_vec_v_fp32_eru()
 {
@@ -364,8 +379,8 @@ enum LSU_TCSR {
 enum VEC_TCSR {
     VEC_CONTROL = 0,
     VEC_SYNC = 1,
-    VEC_DIM0 = 2,
-    VEC_DIM1 = 3,
+    VEC_DIM0 = 2,  /* Innermost fixed-control-flow loop; count minus one. */
+    VEC_DIM1 = 3,  /* Outer fixed-control-flow loop; count minus one. */
     VEC_DIM2 = 4,
     VEC_DIM3 = 5,
     VEC_DIM4 = 6,

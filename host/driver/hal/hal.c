@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "hal_internal.h"
+#include "backend/soc_mmap/npu_hal_soc_mmap.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -19,6 +20,8 @@
 
 static const struct npu_hal_backend_ops *const backends[] = {
     &npu_hal_xilinx_dma_backend_ops,
+    &npu_hal_soc_mmap_backend_ops,
+    &npu_hal_inprocess_backend_ops,
 };
 
 static const struct npu_hal_backend_ops *default_backend(void)
@@ -116,6 +119,8 @@ static int options_valid(const npu_hal_options_t *options)
            options->cluster_count <= NPU_HAL_MAX_CLUSTERS &&
            options->cores_per_cluster &&
            options->cores_per_cluster <= NPU_HAL_MAX_CORES_PER_CLUSTER &&
+           (options->uram_size == DAYAN_URAM_SIZE_768K ||
+            options->uram_size == DAYAN_URAM_SIZE_1536K) &&
            options->split_normal_memory <= 1U &&
            (!options->memory_region_count ||
             (options->memory_regions && !options->normal_memory_size_mib));
@@ -124,6 +129,7 @@ static int options_valid(const npu_hal_options_t *options)
 int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
 {
     npu_hal_options_t defaults;
+    npu_hal_memory_region_t soc_regions[NPU_HAL_SOC_MMAP_MAX_REGIONS];
     const struct npu_hal_backend_ops *ops;
     npu_hal_t *hal;
     int irq_mutex_initialized = 0;
@@ -145,6 +151,8 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
         return -ENOTSUP;
     if (!backend_ops_valid(ops))
         return -EPROTO;
+    defaults = *options;
+    options = &defaults;
     hal = calloc(1, sizeof(*hal));
     if (!hal)
         return -ENOMEM;
@@ -164,16 +172,30 @@ int npu_hal_open(npu_hal_t **hal_out, const npu_hal_options_t *options)
         goto fail;
     }
     irq_mutex_initialized = 1;
-    status = npu_hal_memory_manager_init(hal, options);
+    status = hal->ops->open(&defaults, &hal->state);
     if (status < 0)
         goto fail;
-    status = hal->ops->open(options, &hal->state);
+    hal->cores_per_cluster = options->cores_per_cluster;
+    if (hal->backend == NPU_HAL_BACKEND_SOC_MMAP &&
+        !options->memory_region_count) {
+        status = npu_hal_soc_mmap_memory_regions(
+            (const void *)options->backend_options,
+            options->cores_per_cluster, options->uram_size,
+            soc_regions, NPU_HAL_SOC_MMAP_MAX_REGIONS);
+        if (status < 0)
+            goto fail;
+        defaults.memory_regions = soc_regions;
+        defaults.memory_region_count = (uint32_t)status;
+    }
+    status = npu_hal_memory_manager_init(hal, options);
     if (status < 0)
         goto fail;
     *hal_out = hal;
     return 0;
 
 fail:
+    if (hal->state)
+        hal->ops->close(hal->state);
     npu_hal_memory_manager_destroy(hal);
     if (irq_mutex_initialized)
         pthread_mutex_destroy(&hal->irq_mutex);
@@ -306,7 +328,21 @@ int npu_hal_copy_address(npu_hal_t *hal, uint32_t cluster,
 
     if (!hal || cluster >= hal->cluster_count)
         return -EINVAL;
-    if (!size || destination == source)
+    if (!size)
+        return 0;
+    if (destination > UINT64_MAX - size || source > UINT64_MAX - size)
+        return -EOVERFLOW;
+    status = npu_hal_device_status(hal);
+    if (status < 0)
+        return status;
+    if (hal->ops->copy_address_check) {
+        status = record_backend_status(
+            hal, hal->ops->copy_address_check(hal->state, cluster,
+                                              destination, source, size));
+        if (status < 0)
+            return status;
+    }
+    if (destination == source)
         return 0;
     buffer = malloc(size < NPU_HAL_COPY_CHUNK ? size : NPU_HAL_COPY_CHUNK);
     if (!buffer)
@@ -548,6 +584,21 @@ int npu_hal_boot_core(npu_hal_t *hal, npu_hal_core_t core, uint64_t entry,
     if (status < 0)
         return status;
     return npu_hal_wait_command_consumed(hal, core, timeout_ms);
+}
+
+int npu_hal_cluster_reset(npu_hal_t *hal, uint32_t cluster)
+{
+    int status;
+
+    if (!hal || cluster >= hal->cluster_count)
+        return -EINVAL;
+    if (!hal->ops->reset_cluster)
+        return -ENOTSUP;
+    status = npu_hal_device_status(hal);
+    if (status < 0)
+        return status;
+    return record_backend_status(
+        hal, hal->ops->reset_cluster(hal->state, cluster));
 }
 
 int npu_hal_data_plane_export(npu_hal_t *hal,

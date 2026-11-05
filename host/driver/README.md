@@ -51,6 +51,8 @@ HAL 使用 `npu_hal_core_t { cluster, core }` 指定寄存器、RPC、内存可�
 执行目标。Server 启动时读取 HAL topology，并为每个启用的物理 Core 建立内部 slot。
 当前 ABI 固定每个 Cluster 有 4 个 Core。
 
+`--cores-per-cluster N`（默认 4）告诉 HAL 硬件实际有几个 Core，例如 1c RTL 用 `--cores-per-cluster 1`。`--core-mask` 会被裁剪为低 N 位（`mask & ((1 << N) - 1)`）；只选了不存在的 Core 时 Server 启动失败。少于 4 个 Core 时只接受单核（`kSingleCore`）launch。
+
 `npu_runtime_get_topology(runtime, &topology)` 返回 HAL 的 `cluster_count`、`cores_per_cluster` 和 Server 实际启用的 `enabled_cluster_mask`、`enabled_core_mask`。Core mask 对每个启用的 Cluster 都适用。应用可据此选择协作模式和逻辑网格大小；查询不暴露寄存器或分配物理 Core。旧 Server 不支持此查询时返回负 errno。
 
 公开 Runtime 使用下列逻辑配置：
@@ -132,8 +134,27 @@ QDMA 的 user IRQ 节点来自本地驱动扩展，原生驱动不保证提供�
 
 Server 的 Buffer 分配、调度目标选择、kernel image、BL1 固定段和反向 heap RPC 都使用
 HAL allocation handle。应用侧只有 `npu_buffer_t *`，不会取得物理地址。默认 HAL
-包含 device-scope DRAM/coherent region，以及每个 Core 一个 1.5 MiB URAM region；
-URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB。真实多 Cluster 平台可通过
+包含 device-scope DRAM/coherent region，以及每个 Core 一个 URAM region。
+HAL 打开后端后、创建内存池前，读取各 Cluster BootROM `0x10100` 处的
+NUL 结尾版本字符串（最多 256 字节），格式为 `<BuildConfigKey>-<gitStr>`。
+启动日志逐个打印 Cluster 编号和原始配置串；配置名未识别时也会打印，空串或
+读取失败分别显示 `<empty>` / `<unavailable>`。
+支持当前 npu-cluster 的配置名：`Single` 为单核，`Qual` 为四核；`Tiny` 为每核
+768 KiB URAM（`0xc0000`），其余为 1.5 MiB（`0x180000`）。XDMA、QDMA 和
+SoC mmap 均使用该结果生成拓扑和默认 URAM 内存池，SoC 的读写范围同步更新。
+
+`--cores-per-cluster` 和 `--uram-size` 可手动覆盖各自的探查结果；与硬件不一致时
+输出包含 Cluster 编号、版本字符串、手动值和探查值的 `Warning`，保留手动值。
+未识别、无 NUL、读取失败或未提供版本字符串时，输出 `Warning` 并保留原配置
+（默认四核、每核 1.5 MiB）。当前 HAL 要求各 Cluster 使用统一拓扑；自动探查发现
+核数或容量不同会拒绝初始化；部分 Cluster 无有效标识时整体回退到原配置。
+
+程序化配置使用 `npu_hal_options_t.cores_per_cluster` / `uram_size`，非默认值视为
+手动配置。显式指定默认值时还需将 `manual_cores_per_cluster` / `manual_uram_size`
+置为 1，避免自动探查覆盖。显式 `memory_regions` 仍决定可分配的内存池，需要与
+最终拓扑一致。SoC 未提供 regions 时，HAL 根据探查结果和 SoC DDR 参数生成。
+URAM 从 `0x00800000` 起、Core 间窗口 stride 为 2 MiB，两种容量使用相同地址布局。
+真实多 Cluster 平台可通过
 `dayan_server_options_t.hal.memory_regions` 提供准确的物理布局。对同一 Cluster
 可见的 region 不得重叠；不同 Cluster 的局部地址空间可以使用相同数值地址。
 
@@ -144,6 +165,12 @@ Atomic Cache、URAM 及 LSU/MAT/VEC/MACRO TCSR 位图：每个 invocation 按
 proc 不计入）。URAM allocation 固定为 Core scope，以 32 KiB 为分配和释放粒度；
 Server 把 URAM 与 TCSR 物理范围压缩进 64-bit Context。物理 Cluster/Core 仍不会
 出现在 Runtime 启动接口中。
+
+Host Runtime 不单独配置容量；Server 按 HAL region 容量校验和调度，单个实例需求超过
+容量时 launch 返回 `-ENOSPC`。Device 的 `dayan_uram_size()` 返回当前实例获分配的
+大小，因此同一份受 Host 管理的 BL1 可用于两种容量。独立运行的裸机测试需用
+`make -C device URAM_SIZE=0xc0000` 构建 768 KiB 版本；该选项限制裸机测试描述符
+允许申请的容量，不改变 Host 下发的分配范围。
 
 `NPU_PACKAGE_KERNEL_LOCKED_TASK` 只允许 single-Core kernel。带该标记的一个 logical
 Task 只能派发到空 Hart；从 root Proc 建立到整个 family 终态期间，该 Hart 不接受任何
@@ -207,6 +234,56 @@ opcode、argument 和 status；使用 `DAYAN_RPC_DEBUG=0 ./run_server.sh` 可关
 - Host→Device：`RPC_PROC_CREATE`、`RPC_DCACHE_FLUSH`、`RPC_FENCEI`、`RPC_PROC_PS`、
   `RPC_PROC_KILL_ALL` 与 `RPC_PROFILE_CONFIG`；每个 Core 同时至多一笔，不同 Core 可并行。Service 管理接口
   `npu_service_rpc_ps/kill_all/kill_family` 显式接收 Cluster/Core，Runtime launch 接口不暴露物理拓扑。
+
+### 张量中断源编号
+
+`dayan_server` 默认报告中的 `source=N(name)` 使用以下硬件中断源编号表，
+依据 `interrupts-20261103.csv` 更新。实现位于
+`server/device.c` 的 `tensor_interrupt_source_name()`；未列出的编号打印 `unknown`。
+`source` 取最近一条中断记录的 bits 47:32，`info` 为 bits 31:0 的原始硬件信息；
+该 CSV 仅定义编号和名称，没有定义 `info` 的各位含义。
+
+| source_id | source_name |
+| --- | --- |
+| 0 | `neomat_uram_a_read_range` |
+| 1 | `neomat_uram_a_read_align` |
+| 2 | `neomat_uram_b_read_range` |
+| 3 | `neomat_uram_b_read_align` |
+| 4 | `neomat_uram_a_scale_read_range` |
+| 5 | `neomat_uram_a_scale_read_align` |
+| 6 | `neomat_uram_b_scale_read_range` |
+| 7 | `neomat_uram_b_scale_read_align` |
+| 8 | `neomat_uram_c_read_range` |
+| 9 | `neomat_uram_c_read_align` |
+| 10 | `neomat_uram_c_write_range` |
+| 11 | `neomat_uram_c_write_align` |
+| 12 | `neomat_tcsr_access_error` |
+| 13 | `neomat_decode_error` |
+| 14 | `neomat_datatype_error` |
+| 15 | `neodma_tcsr_access_error` |
+| 16 | `neodma_uram_table_range` |
+| 17 | `neodma_uram_table_align` |
+| 18 | `neodma_uram_read_range` |
+| 19 | `neodma_uram_read_align` |
+| 20 | `neodma_uram_write_range` |
+| 21 | `neodma_uram_write_align` |
+| 22 | `neodma_decode_error` |
+| 23 | `flexvec_decode_error` |
+| 24 | `flexvec_uram_group_0_range` |
+| 25 | `flexvec_uram_group_0_align` |
+| 26 | `neovec_uram_lda_range` |
+| 27 | `neovec_uram_lda_align` |
+| 28 | `neovec_uram_ldb_range` |
+| 29 | `neovec_uram_ldb_align` |
+| 30 | `neovec_uram_store_range` |
+| 31 | `neovec_uram_store_align` |
+| 32 | `neovec_tcsr_access_error` |
+| 33 | `neovec_decode_error` |
+| 34 | `instruction_decode_error` |
+| 35 | `tensor_inst_watchdog_timeout` |
+| 36 | `resource_scheduler_error` |
+
+### Proc 创建 ABI
 
 create-proc ABI 使用 64-byte 对齐的 `rpc_proc_create_request`：前 11 个 RV64 word
 依次为 entry、cookie、shared offset/size、启动配置、Tensor Context、Resource Context、

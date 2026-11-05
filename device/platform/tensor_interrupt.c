@@ -7,6 +7,15 @@
 #include "tensor_interrupt.h"
 #include "trap.h"
 
+/*
+ * Interrupt TCSRs: 0 control, 1-16 first records, 17-32 recent records,
+ * 33 interrupt count.  The register list places them in the Global unit at
+ * 256 + n.  Earlier RTL (and the rvtng cmodel) decoded them as a separate
+ * unit 5 at n; on RTL that follows the list, a unit 5 read never retires and
+ * stalls the Hart inside this handler.
+ */
+#define TENSOR_INTERRUPT_TCSR(n) (256U + (n))
+
 void tensor_interrupt_handle(const struct trap_frame *frame)
 {
     struct tensor_interrupt_state *state;
@@ -17,11 +26,11 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     /* A failed unit may never retire its queue. Capture the error without
      * waiting for unit barriers, so reporting and Host recovery can proceed. */
     state = &cpu_self()->tensor_interrupt;
-    control = __builtin_riscv_tx_base_tcsr_read(5, 0);
+    control = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(0));
     if (state->pending) {
         record = &state->records[state->pending - 1U].record;
         ++record->dropped_reports;
-        __builtin_riscv_tx_base_tcsr_write(1, 5, 0);
+        __builtin_riscv_tx_base_tcsr_write(1, 0, TENSOR_INTERRUPT_TCSR(0));
         return;
     }
     state->pending = state->outbound == 1U ? 2U : 1U;
@@ -37,23 +46,23 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     }
     record->recent_count = (uint32_t)((control >> 9) & 0x1fU);
     record->control = control;
-    record->interrupt_count = __builtin_riscv_tx_base_tcsr_read(5, 33);
-    record->recent[0] = __builtin_riscv_tx_base_tcsr_read(5, 17);
-    record->recent[1] = __builtin_riscv_tx_base_tcsr_read(5, 18);
-    record->recent[2] = __builtin_riscv_tx_base_tcsr_read(5, 19);
-    record->recent[3] = __builtin_riscv_tx_base_tcsr_read(5, 20);
-    record->recent[4] = __builtin_riscv_tx_base_tcsr_read(5, 21);
-    record->recent[5] = __builtin_riscv_tx_base_tcsr_read(5, 22);
-    record->recent[6] = __builtin_riscv_tx_base_tcsr_read(5, 23);
-    record->recent[7] = __builtin_riscv_tx_base_tcsr_read(5, 24);
-    record->recent[8] = __builtin_riscv_tx_base_tcsr_read(5, 25);
-    record->recent[9] = __builtin_riscv_tx_base_tcsr_read(5, 26);
-    record->recent[10] = __builtin_riscv_tx_base_tcsr_read(5, 27);
-    record->recent[11] = __builtin_riscv_tx_base_tcsr_read(5, 28);
-    record->recent[12] = __builtin_riscv_tx_base_tcsr_read(5, 29);
-    record->recent[13] = __builtin_riscv_tx_base_tcsr_read(5, 30);
-    record->recent[14] = __builtin_riscv_tx_base_tcsr_read(5, 31);
-    record->recent[15] = __builtin_riscv_tx_base_tcsr_read(5, 32);
+    record->interrupt_count = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(33));
+    record->recent[0] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(17));
+    record->recent[1] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(18));
+    record->recent[2] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(19));
+    record->recent[3] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(20));
+    record->recent[4] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(21));
+    record->recent[5] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(22));
+    record->recent[6] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(23));
+    record->recent[7] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(24));
+    record->recent[8] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(25));
+    record->recent[9] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(26));
+    record->recent[10] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(27));
+    record->recent[11] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(28));
+    record->recent[12] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(29));
+    record->recent[13] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(30));
+    record->recent[14] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(31));
+    record->recent[15] = __builtin_riscv_tx_base_tcsr_read(0, TENSOR_INTERRUPT_TCSR(32));
     record->mstatus = frame->mstatus;
     record->mepc = frame->mepc;
     record->mcause = frame->mcause;
@@ -61,7 +70,7 @@ void tensor_interrupt_handle(const struct trap_frame *frame)
     record->fcsr = frame->fcsr;
     for (i = 0; i < 32; ++i)
         record->x[i] = frame->x[i];
-    __builtin_riscv_tx_base_tcsr_write(1, 5, 0);
+    __builtin_riscv_tx_base_tcsr_write(1, 0, TENSOR_INTERRUPT_TCSR(0));
     rpc_send_notify();
 }
 

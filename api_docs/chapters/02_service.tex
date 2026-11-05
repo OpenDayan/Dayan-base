@@ -39,7 +39,7 @@ Socket 协议不属于公开 API。
 \begin{dayantable}{Service 常量与枚举}{tab:api-service-constants}{X[47,l] X[53,l]}
   API & 含义 \\
   \code{NPU_SERVICE_OPTIONS_VERSION} / \code{NPU_SERVICE_LAUNCH_DESC_VERSION} & Service 配置版本为 8，启动描述符版本为 6。 \\
-  \code{DAYAN_SERVER_OPTIONS_VERSION} & Server 配置版本为 11。 \\
+  \code{DAYAN_SERVER_OPTIONS_VERSION} & Server 配置版本为 12。 \\
   \code{NPU_SERVICE_TIMEOUT_INFINITE} & 无限等待。 \\
   \code{NPU_SERVICE_LAUNCH_MAX_ARGS} & 一个根 Proc 最多接收 32 个 64 位参数。 \\
   \code{NPU_SERVICE_PROC_NAME_SIZE} & Proc 名称占 16 字节，其中必须包含结尾空字符。 \\
@@ -50,8 +50,8 @@ Socket 协议不属于公开 API。
   \code{NPU_SERVICE_LAUNCH_EXITED} / \code{NPU_SERVICE_LAUNCH_FAILED} & Proc 已正常退出，或创建和执行过程失败。 \\
   \code{NPU_SERVICE_PROC_SYSTEM} / \code{NPU_SERVICE_PROC_HOST_ROOT} / \code{NPU_SERVICE_PROC_CHILD} & 系统 Proc、Host 创建的根 Proc，以及 Device 创建的子 Thread。 \\
   \code{NPU_SERVICE_PROC_ZOMBIE} / \code{NPU_SERVICE_PROC_KILL_WAIT_PRODUCE} & 已退出但尚未回收的 Proc，或终止后仍在等待异步执行单元完成的 Proc。 \\
-  \code{NPU_SERVICE_MMU_READ} / \code{NPU_SERVICE_MMU_WRITE} / \code{NPU_SERVICE_MMU_EXEC} & ClusterMMU 映射的读、写和执行权限位。 \\
-  \code{NPU_SERVICE_MMU_PAGE_SIZE} / \code{NPU_SERVICE_MMU_PAGE_MASK} & Service 使用的 4 KiB 页大小和页内偏移掩码。 \\
+  \code{NPU_SERVICE_MMU_READ} / \code{NPU_SERVICE_MMU_WRITE} / \code{NPU_SERVICE_MMU_EXEC} & ClusterMMU 映射的读、写和执行权限位，与 \code{NPU_HAL_MMU_*} 相同。 \\
+  \code{NPU_SERVICE_MMU_PAGE_SIZE} / \code{NPU_SERVICE_MMU_PAGE_MASK} & Buffer 映射粒度（2 MiB Sv39 level-1 leaf，即 \code{NPU_HAL_MMU_LEAF_SIZE}）及其掩码；va、pa、size 均须 2 MiB 对齐。 \\
 \end{dayantable}
 
 \subsection{Service 生命周期}

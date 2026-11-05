@@ -17,6 +17,8 @@ struct MatmulFp4Shape {
     enum : int {
         kTileM = 512, kTileN = 512, kTileK = 640, kSlices = 2,
         kInputRowBytes = kTileK / 2,
+        // Keep row strides; reduce A/C buffers to fit both pipeline layouts.
+        kSmallTileM = 192, kSmallUramBytes = 768 * 1024,
         kWorkers = 3, kAtomicBytes = 64, kUramBytes = 1536 * 1024,
     };
 };
@@ -31,6 +33,7 @@ namespace matmul_fp4_4c_detail {
 // Local: sliced operand + two buffered tiles + C slices. Shared: each pair's
 // input-ready resources, consumed once after the peer's copy completes.
 enum : int {
+    SmallTM = MatmulFp4Shape::kSmallTileM,
     TM = MatmulFp4Shape::kTileM, TN = MatmulFp4Shape::kTileN,
     TK = MatmulFp4Shape::kTileK,
     InputRowBytes = MatmulFp4Shape::kInputRowBytes,
@@ -60,6 +63,14 @@ static_assert((TM + 2 * TN) * InputRowBytes + TM * TN * 4 <=
               MatmulFp4Shape::kUramBytes);
 static_assert(SharedResources <= 32);
 
+static_assert(SmallTM % Slices == 0);
+static_assert((2ULL * SmallTM + TN) * InputRowBytes +
+              4ULL * SmallTM * TN <=
+              MatmulFp4Shape::kSmallUramBytes);
+static_assert((SmallTM + 2ULL * TN) * InputRowBytes +
+              4ULL * SmallTM * TN <=
+              MatmulFp4Shape::kSmallUramBytes);
+
 struct Cluster {
     dayan_cluster_barrier_t barrier;
     uint64_t uram[4];
@@ -73,7 +84,7 @@ struct Buffer {
 struct State {
     const MatmulFp4Config *cfg;
     uint64_t input[2], output, uram, generations;
-    int lane, nt, kt, slice_m, slice_n;
+    int tile_m, lane, nt, kt, slice_m, slice_n;
     bool buffer_a;
     Buffer a[Slices], b[Slices], c[Slices];
 };
@@ -100,9 +111,9 @@ static Node node(const State &s, uint64_t generation, int slice, int lane)
     const int phase = (int)(generation & 1);
     const uint64_t begin = s.cfg->m * (lane >> 1) / 2;
     const uint64_t end = s.cfg->m * ((lane >> 1) + 1) / 2;
-    const uint64_t row = begin + out / s.nt * TM;
+    const uint64_t row = begin + out / s.nt * s.tile_m;
     const uint64_t col = (out % s.nt * 2 + (lane & 1)) * TN;
-    const int rows = extent((int64_t)end - (int64_t)row, TM);
+    const int rows = extent((int64_t)end - (int64_t)row, s.tile_m);
     const int cols = extent((int64_t)s.cfg->n - (int64_t)col, TN);
     const int row_offset = s.buffer_a ? 0 : slice * s.slice_m;
     const int col_offset = s.buffer_a ? slice * s.slice_n : 0;
@@ -284,13 +295,12 @@ static bool config_valid(const MatmulFp4Config *c)
     return !(c->c_stride & 63);
 }
 
-} // namespace matmul_fp4_4c_detail
-#endif
-
-__kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
-                              const uint8_t *a, const uint8_t *bt, float *c)
+static void run(const MatmulFp4Config *config,
+                const uint8_t *a, const uint8_t *bt, float *c, int tile_m)
 {
-    using namespace matmul_fp4_4c_detail;
+    // Every Hart reads Host-written config through its own noncoherent cache.
+    if (config)
+        dayan_cache_invalidate(config, sizeof(*config));
     const int lane = dayan_task_id(DAYAN_TASK_X);
     if (!config_valid(config) || !a || !bt || !c || !shared ||
         ((uintptr_t)c & 63) ||
@@ -299,6 +309,7 @@ __kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
         dayan_task_dim(DAYAN_TASK_Y) != 1 || dayan_task_dim(DAYAN_TASK_Z) != 1)
         dayan_thread_exit(-22);
     State s = {};
+    s.tile_m = tile_m;
     s.cfg = config;
     s.input[0] = (uintptr_t)a;
     s.input[1] = (uintptr_t)bt;
@@ -306,12 +317,12 @@ __kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
     s.lane = lane;
     s.nt = (int)((config->n + 2 * TN - 1) / (2 * TN));
     s.kt = (int)((config->k + TK - 1) / TK);
-    const uint64_t outputs = (config->m + 2 * TM - 1) / (2 * TM) * s.nt;
+    const uint64_t outputs = (config->m + 2 * s.tile_m - 1) / (2 * s.tile_m) * s.nt;
     if (outputs > UINT64_MAX / s.kt)
         dayan_thread_exit(-22);
     s.generations = outputs * s.kt;
     s.buffer_a = config->m < config->n;
-    s.slice_m = s.buffer_a ? TM : TM / Slices;
+    s.slice_m = s.buffer_a ? s.tile_m : s.tile_m / Slices;
     s.slice_n = s.buffer_a ? TN / Slices : TN;
     const int counts[] = {s.buffer_a ? 2 : Slices, s.buffer_a ? Slices : 2, Slices};
     const uint64_t bytes[] = {(uint64_t)s.slice_m * InputRowBytes,
@@ -361,13 +372,36 @@ __kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
     check(dayan_cluster_barrier(4, &cluster.barrier));
 }
 
+} // namespace matmul_fp4_4c_detail
+#endif
+
+__kernel__ void matmul_fp4_4c(const MatmulFp4Config *config,
+                              const uint8_t *a, const uint8_t *bt, float *c)
+{
+    matmul_fp4_4c_detail::run(config, a, bt, c, MatmulFp4Shape::kTileM);
+}
+
+__kernel__ void matmul_fp4_4c_small(const MatmulFp4Config *config,
+                              const uint8_t *a, const uint8_t *bt, float *c)
+{
+    matmul_fp4_4c_detail::run(config, a, bt, c, MatmulFp4Shape::kSmallTileM);
+}
+
 DAYAN_KERNEL_NAMED_RESOURCE_DESC(
     matmul_fp4_4c, MatmulFp4Shape::kWorkers,
     MatmulFp4Shape::kAtomicBytes, MatmulFp4Shape::kUramBytes,
     3, 1, 0, 0, 2 * MatmulFp4Shape::kSlices + 2,
     2 * (MatmulFp4Shape::kSlices + 2));
 
+DAYAN_KERNEL_NAMED_RESOURCE_DESC(
+    matmul_fp4_4c_small, MatmulFp4Shape::kWorkers,
+    MatmulFp4Shape::kAtomicBytes, MatmulFp4Shape::kSmallUramBytes,
+    3, 1, 0, 0, 2 * MatmulFp4Shape::kSlices + 2,
+    2 * (MatmulFp4Shape::kSlices + 2));
+
 #if !defined(__DAYAN_DEVICE__)
+
+#include "uram_config.h"
 
 #include <cmath>
 #include <cstdio>
@@ -672,6 +706,7 @@ __host__ int main(int argc, char **argv)
     npu_buffer_t *bt_buffer = nullptr;
     npu_buffer_t *c_buffer = nullptr;
     const char *socket_path;
+    uint64_t uram_capacity = 0;
     int status = 0;
 
     npu_runtime_options_init(&runtime_options);
@@ -681,6 +716,12 @@ __host__ int main(int argc, char **argv)
         runtime_options.server_socket = socket_path;
 
     status = npu_runtime_open(&runtime, &runtime_options);
+    if (status == 0)
+        status = demo_uram_capacity(runtime, MatmulFp4Shape::kSmallUramBytes,
+                                    &uram_capacity);
+    const bool small_uram = uram_capacity < MatmulFp4Shape::kUramBytes;
+    const unsigned tile_m = small_uram ? MatmulFp4Shape::kSmallTileM :
+                                         MatmulFp4Shape::kTileM;
     if (status == 0)
         status = npu_context_create(runtime, nullptr, &context);
     if (status == 0)
@@ -711,8 +752,8 @@ __host__ int main(int argc, char **argv)
 
     if (status == 0) {
         const uint64_t cluster_tiles_m =
-            (m + 2U * MatmulFp4Shape::kTileM - 1U) /
-            (2U * MatmulFp4Shape::kTileM);
+            (m + 2U * tile_m - 1U) /
+            (2U * tile_m);
         const uint64_t cluster_tiles_n =
             (n + 2U * MatmulFp4Shape::kTileN - 1U) /
             (2U * MatmulFp4Shape::kTileN);
@@ -728,7 +769,7 @@ __host__ int main(int argc, char **argv)
                     (unsigned long long)m, (unsigned long long)k,
                     (unsigned long long)n, (unsigned long long)k,
                     (unsigned long long)m, (unsigned long long)n,
-                    (unsigned)MatmulFp4Shape::kTileM,
+                    (unsigned)tile_m,
                     (unsigned)MatmulFp4Shape::kTileN,
                     (unsigned)MatmulFp4Shape::kTileK,
                     (unsigned)MatmulFp4Shape::kSlices,
@@ -739,7 +780,8 @@ __host__ int main(int argc, char **argv)
                     "from a 16 KiB-aligned allocation\n",
                     (unsigned long long)config.a_stride,
                     (unsigned long long)config.c_stride);
-        status = matmul_fp4_4c(config_buffer, a_buffer, bt_buffer,
+        auto launch = small_uram ? matmul_fp4_4c_small : matmul_fp4_4c;
+        status = launch(config_buffer, a_buffer, bt_buffer,
                                 c_buffer, &launch_attrs);
     }
     if (status == 0)

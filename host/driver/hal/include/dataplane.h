@@ -22,6 +22,8 @@ extern "C" {
 
 #define NPU_HAL_DATA_PROVIDER_XILINX_DMA 1U
 #define NPU_HAL_DATA_PROVIDER_XDMA NPU_HAL_DATA_PROVIDER_XILINX_DMA
+#define NPU_HAL_DATA_PROVIDER_SOC_MMAP   2U
+#define NPU_HAL_DATA_PROVIDER_INPROCESS  3U
 
 typedef struct npu_hal_data_plane npu_hal_data_plane_t;
 

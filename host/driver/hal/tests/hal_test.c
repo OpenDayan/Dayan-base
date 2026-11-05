@@ -78,6 +78,160 @@ static void *write_irq(void *argument)
     return 0;
 }
 
+static void write_build_id(const char *directory, uint32_t device,
+                           uint64_t offset, const char *id)
+{
+    char rom[DAYAN_BOOTROM_BUILD_ID_SIZE] = {0};
+    int fd = endpoint_fd(directory, device, "c2h_0", O_RDWR);
+
+    assert(fd >= 0);
+    if (id)
+        memcpy(rom, id, strlen(id) + 1);
+    else
+        memset(rom, 'A', sizeof(rom)); /* No NUL within the ROM limit. */
+    assert(pwrite(fd, rom, sizeof(rom),
+                  offset + DAYAN_BOOTROM_BUILD_ID_ADDRESS) == sizeof(rom));
+    close(fd);
+}
+
+static void test_bootrom_discovery(const npu_hal_options_t *base,
+                                   const char *directory, uint64_t offset)
+{
+    const struct {
+        const char *id;
+        uint32_t cores, uram;
+    } cases[] = {
+        { "FpgaSingleTinyClusterConfig-v1-abc-dirty", 1, DAYAN_URAM_SIZE_768K },
+        { "SingleTinyClusterConfig-abc", 1, DAYAN_URAM_SIZE_768K },
+        { "VerifSingleFullClusterConfig-abc", 1, DAYAN_URAM_SIZE_1536K },
+        { "FpgaSingleSmallClusterConfig-abc", 1, DAYAN_URAM_SIZE_1536K },
+        { "FpgaQualFullClusterConfig-abc", 4, DAYAN_URAM_SIZE_1536K },
+        { "QualFullClusterConfig-SingleTiny", 4, DAYAN_URAM_SIZE_1536K },
+        { "FutureSingleTinyClusterConfig-abc", 4, DAYAN_URAM_SIZE_1536K },
+        { "SingleTinyClusterConfig", 4, DAYAN_URAM_SIZE_1536K },
+        { "", 4, DAYAN_URAM_SIZE_1536K },
+        { NULL, 4, DAYAN_URAM_SIZE_1536K },
+    };
+    npu_hal_options_t options = *base;
+    npu_hal_info_t info;
+    npu_hal_t *hal = NULL;
+    uint64_t capacity;
+
+    options.cluster_count = 1;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        write_build_id(directory, 0, offset, cases[i].id);
+        assert(npu_hal_open(&hal, &options) == 0);
+        assert(npu_hal_get_info(hal, &info) == 0);
+        assert(info.cores_per_cluster == cases[i].cores);
+        for (uint32_t core = 0; core < info.cores_per_cluster; ++core) {
+            assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+                       (npu_hal_core_t){0, core}, &capacity) == 0);
+            assert(capacity == cases[i].uram);
+        }
+        npu_hal_close(hal);
+    }
+    /* Each field can be overridden independently. */
+    write_build_id(directory, 0, offset, cases[0].id);
+    options.manual_cores_per_cluster = 1;
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_get_info(hal, &info) == 0 && info.cores_per_cluster == 4);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+               (npu_hal_core_t){0, 3}, &capacity) == 0);
+    assert(capacity == DAYAN_URAM_SIZE_768K);
+    npu_hal_close(hal);
+    /* Explicit defaults must warn as overrides too, rather than auto-detect. */
+    write_build_id(directory, 0, offset, cases[0].id);
+    options.manual_cores_per_cluster = 1;
+    options.manual_uram_size = 1;
+    {
+        FILE *log = tmpfile();
+        int saved = dup(STDERR_FILENO);
+        char message[1024] = {0};
+        assert(log && saved >= 0);
+        assert(dup2(fileno(log), STDERR_FILENO) >= 0);
+        assert(npu_hal_open(&hal, &options) == 0);
+        fflush(stderr);
+        assert(dup2(saved, STDERR_FILENO) >= 0);
+        close(saved);
+        rewind(log);
+        assert(fread(message, 1, sizeof(message) - 1, log) > 0);
+        assert(strstr(message, "Warning: Cluster 0 manual cores-per-cluster=4"));
+        assert(strstr(message, "Warning: Cluster 0 manual uram-size=0x180000"));
+        fclose(log);
+    }
+    assert(npu_hal_get_info(hal, &info) == 0 && info.cores_per_cluster == 4);
+    assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+               (npu_hal_core_t){0, 0}, &capacity) == 0);
+    assert(capacity == DAYAN_URAM_SIZE_1536K);
+    npu_hal_close(hal);
+    options = *base;
+    /* A uniform multi-Cluster layout works; heterogeneous auto config fails. */
+    write_build_id(directory, 2, offset, cases[0].id);
+    assert(npu_hal_open(&hal, &options) == 0);
+    assert(npu_hal_get_info(hal, &info) == 0 && info.cores_per_cluster == 1);
+    npu_hal_close(hal);
+    write_build_id(directory, 2, offset, cases[4].id);
+    assert(npu_hal_open(&hal, &options) == -ENOTSUP && !hal);
+    write_build_id(directory, 0, offset, "");
+    write_build_id(directory, 2, offset, "");
+}
+
+static void test_uram_capacity(const npu_hal_options_t *base)
+{
+    const uint32_t sizes[] = { DAYAN_URAM_SIZE_1536K, DAYAN_URAM_SIZE_768K };
+    npu_hal_options_t options = *base;
+    npu_hal_t *hal = 0;
+
+    assert(options.uram_size == DAYAN_URAM_SIZE_1536K);
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        options.uram_size = sizes[i];
+        assert(npu_hal_open(&hal, &options) == 0);
+        for (uint32_t cluster = 0; cluster < options.cluster_count; ++cluster) {
+            for (uint32_t core = 0; core < options.cores_per_cluster; ++core) {
+                npu_hal_core_t target = {cluster, core};
+                npu_hal_memory_request_t request;
+                npu_hal_allocation_t *full = 0;
+                npu_hal_allocation_t *extra = 0;
+                uint64_t capacity;
+                uint64_t address;
+
+                assert(npu_hal_memory_capacity(hal, NPU_HAL_MEMORY_URAM,
+                                               target, &capacity) == 0);
+                assert(capacity == sizes[i]);
+                npu_hal_memory_request_init(&request);
+                request.memory_class = NPU_HAL_MEMORY_URAM;
+                request.scope = NPU_HAL_MEMORY_CORE;
+                request.usage = NPU_HAL_MEMORY_KERNEL_URAM;
+                request.location = target;
+                request.alignment = 0x8000;
+                request.size = capacity + 0x8000;
+                assert(npu_hal_memory_alloc(hal, &request, &extra) == -ENOMEM);
+                assert(!extra);
+                request.size = capacity;
+                assert(npu_hal_memory_alloc(hal, &request, &full) == 0);
+                assert(npu_hal_memory_address(hal, full, target, &address) == 0);
+                assert(address == DAYAN_URAM(core));
+                request.size = 0x8000;
+                assert(npu_hal_memory_alloc(hal, &request, &extra) == -ENOMEM);
+                assert(!extra);
+                assert(npu_hal_memory_free(hal, full) == 0);
+                request.fixed_address = DAYAN_URAM(core) + capacity;
+                assert(npu_hal_memory_reserve(hal, &request, &extra) == -ERANGE);
+                assert(!extra);
+                request.fixed_address -= request.size;
+                assert(npu_hal_memory_reserve(hal, &request, &extra) == 0);
+                assert(npu_hal_memory_free(hal, extra) == 0);
+            }
+        }
+        npu_hal_close(hal);
+        hal = 0;
+    }
+    options.uram_size = 0;
+    assert(npu_hal_open(&hal, &options) == -EINVAL && !hal);
+    options.uram_size = DAYAN_URAM_SIZE_768K + 0x8000;
+    assert(npu_hal_open(&hal, &options) == -EINVAL && !hal);
+}
+
 int main(void)
 {
     static const npu_hal_memory_region_t regions[] = {
@@ -153,6 +307,8 @@ int main(void)
     options.cluster_count = 2;
     options.cores_per_cluster = 4;
     xdma_options.cluster_device_stride = 2;
+    test_bootrom_discovery(&options, directory, xdma_options.mmio_address_offset);
+    test_uram_capacity(&options);
     options.memory_regions = regions;
     options.memory_region_count = sizeof(regions) / sizeof(regions[0]);
     assert(npu_hal_open(&hal, &options) == 0);
@@ -620,6 +776,22 @@ int main(void)
     options.normal_memory_size_mib = 0;
     assert(npu_hal_open(&hal, &options) == 0);
     {
+        /* The default 4 GiB region is far above twice the cap, so the firmware
+         * pool takes the whole 64 MiB cap and Buffers get the rest. */
+        uint64_t pool_base = 0;
+        uint64_t pool_size = 0;
+
+        assert(npu_hal_firmware_pool(hal, &pool_base, &pool_size) == 0);
+        assert(pool_base == UINT64_C(0x80000000));
+        assert(pool_size == UINT64_C(0x04000000));
+    }
+    npu_hal_close(hal);
+    hal = 0;
+    /* Explicit, because the default size has changed before (64 MiB to 4 GiB)
+     * and silently turned this case into the one above. */
+    options.normal_memory_size_mib = 64;
+    assert(npu_hal_open(&hal, &options) == 0);
+    {
         /* A region smaller than twice the cap is halved, so the firmware still
          * gets room and Buffers still get a pool. */
         uint64_t pool_base = 0;
@@ -631,6 +803,7 @@ int main(void)
     }
     npu_hal_close(hal);
     hal = 0;
+    options.normal_memory_size_mib = 0;
     options.memory_regions = overlapping_regions;
     options.memory_region_count =
         sizeof(overlapping_regions) / sizeof(overlapping_regions[0]);

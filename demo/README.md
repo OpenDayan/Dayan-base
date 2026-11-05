@@ -1,27 +1,35 @@
 # Dayan kernel demos
 
 该目录放置最小、可独立构建的 Dayan kernel 示例。目前包含 Device `printf`、
-FP32 Add、单 Core BF16 矩阵乘和四 Core 协作 BF16/FP8/FP4 矩阵乘。
+FP32 Add、FP16/BF16 FlashAttention、Gated DeltaNet、BF16/FP8/FP4 矩阵乘，
+以及吞吐、延迟和调度探针。
 
 ## 目录
 
 ```text
 demo/
 ├── Makefile
+├── README.md
+├── check_device_isa.sh          # 检查 Device 目标文件不含 LR/SC
+├── uram_config.h               # 运行时 URAM 容量查询
+├── print_demo.cpp              # Device printf 与完整 Host launcher
 ├── add_fp32_macro.cpp          # 最小 FP32 Add：LSU + MACRO
 ├── add_fp32_vec.cpp            # 最小 FP32 Add：LSU + VEC
-├── flash_attention_1c.cpp      # 128-row FP16 FlashAttention / FP8 softmax pipeline
-├── lsu_bandwidth.cpp            # 单核 D2U / 远端 U2D 带宽微基准
-├── shared_notify_latency.cpp    # core 0 -> core 1 Shared Resource 通知延迟
-├── launch_latency.cpp          # 连续同步启动及设备循环间隔
-├── matmul_bf16_1c.cpp           # 非协作 BF16：4 个 slice、双缓冲、独立 Task 分片
-├── matmul_bf16_4c.cpp           # 2x2 Cluster：4 个 slice、共享输入双缓冲、独立 Post
-├── matmul_fp8_4c.cpp            # 相同四核流水线，E4M3 输入，K tile=512
-├── matmul_fp4_4c.cpp            # 四核流水线，打包 E2M1，512×512×640 tile、2 个 slice
-├── run_matmul_cmodel.sh
-├── run_matmul_4c_cmodel.sh
-├── run_cmodel.sh
-└── print_demo.cpp   # __kernel__ Device 实现与 Runtime Host launcher
+├── flash_attention.cpp         # FP16/BF16、1c/4c、Split-KV 及 TGMT 变体
+├── gdn.cpp                     # GDN Host 输入、启动与 CPU 参考校验
+├── gdn_chunk.h                 # GDN TGMT / SW + Vec TGMT / SW 共用实现
+├── matmul_bf16_1c.cpp           # 独立分片 BF16，支持 1c/4c Task group
+├── matmul_bf16_4c.cpp           # 四核协作 BF16
+├── matmul_fp8_4c.cpp            # 四核协作 E4M3
+├── matmul_fp4_4c.cpp            # 四核协作打包 E2M1
+├── lsu_bandwidth.cpp           # LSU 带宽
+├── vec_peak.cpp                # VEC 稳态吞吐
+├── launch_latency.cpp          # 连续算子启动延迟
+├── shared_notify_latency.cpp   # 跨核 Shared Resource 通知
+├── scheduler_yield_bench.cpp   # 跨 Hart 调度通知
+├── context_thread_probe.cpp    # Context/Thread 探针
+├── task_grid_probe.cpp         # Task 网格探针
+└── tensor_interrupt_probe.cpp  # 张量中断探针
 ```
 
 `print_demo.cpp` 由 dycc 编译。dycc 在 Device 侧保留 kernel，在 Host 侧生成同名
@@ -34,22 +42,60 @@ Core。
 make -C demo
 ```
 
-产物为 `build/demo/print_demo`、`build/demo/add_fp32_macro`、
-`build/demo/add_fp32_vec`、`build/demo/lsu_bandwidth`、
-`build/demo/shared_notify_latency`、`build/demo/launch_latency`、
-`build/demo/flash_attention_1c`、
-`build/demo/matmul_bf16_1c`、`build/demo/matmul_bf16_4c`、
-`build/demo/matmul_fp8_4c`、`build/demo/matmul_fp4_4c` 和
-`build/demo/matmul_bf16_broadcast_4c`。Device 自定义指令由 Clang 的
+产物位于 `build/demo/`。Makefile 显式列出普通示例、六个 FlashAttention 变体和
+三个 GDN 变体；查看完整目标及执行 Host 启动参数检查：
+
+```sh
+make -C demo list
+make -C demo check
+```
+
+`check` 先构建所有目标并检查 Device ISA，再执行各目标的 `--help`，无需启动 Server。
+它不进行设备数值验证；算子运行时的 CPU 参考校验仍需连接 Server。
+单独构建可指定 `../build/demo/<目标名>`，也可用 `BUILD=/绝对路径` 隔离输出。
+每个目标的 Device 中间文件保存在其 `<目标名>-temps/` 目录中。
+历史软流水 FlashAttention、软流水 Matmul 和广播性能模型在当前目录没有源码，
+因此不再提供对应构建入口。
+
+Device 自定义指令由 Clang 的
 `<rvt_intrinsics.h>`（`__builtin_riscv_tx_*`）提供；`dayan_intrinsics.h` 包含该头文件，
 并保留 LSU/MAT TCSR 编号和 `set_lsu_matrix` 等 Dayan 辅助接口。dycc 会启用 TX
 扩展并把 Clang resource dir 加入 Device 编译，构建 demo 不需要 npu-kernels。
+
+## FlexVec 固定控制流
+
+`DIM0` 是最内层循环，`DIM1` 是外层循环；两者写入的值均为执行次数减一。
+TCSR 地址仍是 `VEC_DIM0 = 2`、`VEC_DIM1 = 3`，迭代器参数按 Dim0、Dim1、
+Dim2、Dim3 的顺序传递。Dim2..5 用于硬件任务划分。
+五段 Control 边界编码仍为 `(prologue0, prologue1, loop, epilogue1, epilogue0)`。
+每次 Dim0 循环结束，epilogue1 在 `(d0, d1) = (0, 当前外层索引)` 执行；
+Dim1 循环结束后，epilogue0 在 `(0, 0)` 执行。
 
 ## 选择设备后端
 
 demo 通过 `DAYAN_SERVER_SOCKET` 连接已经启动的 Server，不接收 DMA driver/profile 参数。
 Server 的统一后端使用 `--backend xilinx-dma`，`--dma-driver xdma|qdma` 选择驱动，
 `--dma-profile simulator|fpga` 选择默认目录与 MMIO 偏移。
+
+使用 URAM 的算子在创建 Buffer、启动 kernel 前调用
+`npu_runtime_get_uram_capacity()`。返回值是启用核心中最小的每核总容量，单位为字节，
+不随正在运行的任务占用而变化。Server 默认配置为 1.5 MiB；768 KiB 核心启动时指定
+`--uram-size 0xc0000`，demo 自动选择小容量入口及对应的资源描述符。
+查询失败或容量不足时直接报错，不猜测容量。
+
+| 算子 | 1.5 MiB 配置 | 768 KiB 配置 |
+| --- | --- | --- |
+| BF16 Matmul，1c / 4c | 512×384×256 | 192×384×256 |
+| FP8 Matmul，4c | 512×384×512 | 192×384×512 |
+| FP4 Matmul，4c | 512×512×640 | 192×512×640 |
+| FlashAttention，所有入口 | Q/KV tile 128×128 | Q/KV tile 32×128 |
+| LSU bandwidth | 最大 DMA 1 MiB | 最大 DMA 768 KiB |
+| FP32 Add、VEC peak、Context probe | 32 KiB | 相同配置 |
+
+小容量 Matmul 保留 N/K、slice 数和行跨度，缩小 A/C Buffer；BF16/FP8 两种
+缓冲方向实际占用 672 / 768 KiB，FP4 占用 664 / 764 KiB，均声明 768 KiB。
+按实际 Buffer 基地址重算 VisualSwizzle，所有 A/B/C 每拍 Bank 峰值仍为 1x，
+重排地址不跨 Buffer 边界。容量选择不改变输入矩阵的尺寸和数值参考计算。
 
 例如，在已启动双向 MM queue 0 的 QDMA FPGA 上：
 
@@ -143,71 +189,205 @@ DAYAN_SERVER_SOCKET=/tmp/my-dayan.sock \
   build/demo/print_demo 1 2 3 4 5 6 7
 ```
 
-## 单 Core FP8/FP16 FlashAttention tile
+## FP16/BF16 FlashAttention 优化流水线
 
-`flash_attention_1c` 固定处理 128 行、`D=128` 和 4 个 256-column KV tile。同一份 Device
-object 同时提供 `flash_attention_fp16_1c` 和 `flash_attention_fp8_1c` 两个 kernel，
-共享 tile、Resource 和 online-softmax 实现，不再通过编译宏二选一：
+`flash_attention.cpp` 将 llama.cpp 的
+`ggml/src/ggml-dayan/ggml-dayan-flash-attention.h` 移植为单文件 demo，
+包含配置、Device kernel、Host launcher 和 CPU 参考校验，不依赖 llama.cpp 头文件。
+同一模块支持单核和四核，默认使用单核 FP16；`--cores 1 --bf16` 选择单核 BF16。
+单核入口实例化 `run<Format, 1, false>`，使用 30 个 Local Resource、0 个 Shared
+Resource，不执行跨核 barrier 或远端 K/V 复制。单核指每个 Task 使用一颗 Core，
+不绑定物理 Core 0；`--tasks` 可配置多个独立单核 Task。Split-KV 仅支持四核。
 
-```text
-S       = Q[128][128] FP16 x KT[4][256][128] FP16
-P       = exp2(S - M_new)
-L_new   = alpha * L_old + rowsum(P)
-O_acc   = alpha * O_acc + FP16(P) x VT[4][128][256] FP16
-O       = O_acc / L
-```
+1.5 MiB 配置下，每个 Core 使用两个 128-row Q slice，共享双缓冲的 128-column K/V tile。
+root 执行 QK，六个子 Thread 分别负责 Q/K/V 加载、softmax、PV 和输出更新，
+通过 30 个 Local Resource 管理缓冲区和状态版本。score 原地转为 FP32 P，
+PV 使用 `TF32 × FP16/BF16 -> FP32`，省去单独的 P16 缓冲区和格式转换。
+alpha、M/L、PV 存在 URAM 中供不同阶段或下一轮使用；O 在最后一块更新时归一化。
+softmax 和 output 各用一组单消费者 State Resource；复用 M/L/alpha 存储前，
+两组都必须 FREE。softmax 自己消费末 tile 的 State，每个 Resource 都逐代消费，
+不再与 output 共用消费计数或跳过尾代。Split-KV 的 output State 保留到合并结束。
+该配置每核申请 1536 KiB URAM，布局实际占用 1489 KiB。768 KiB 配置将 Q slice
+缩到 32 行，布局实际占用 565 KiB；KV 仍为 128 列，softmax 的 VEC 指令序列不变。
 
-Device 创建 LSU、MAT、VEC 三个 DAPI worker，并用 Resource 串联数据生命周期。
-KT/VT 双缓冲，score/P 三缓冲。MAT worker 使用两个常驻配置组，按
-`QK(0), QK(1), PV(0), QK(2), PV(1), ...` 交错执行，QK 和 PV 都各用一条覆盖
-128 row 的大 MAT 指令。Vec worker 在 softmax 流中原地计算 `alpha * O_acc`，随后
-在同一个 VFork 尾部用 VEC 将 P 从 FP32 转成连续 FP16；PV 直接以 `mma`
-累加到 URAM 中的 FP32 O_acc。
-LSU 的通用配置只写一次，循环中没有重复刷新整组 TCSR。
+四核 prefill 用四个 Shared Resource 选出 K/V loader，其余 Core 从 loader 的
+URAM 复制；Shared Resource 的消费完成后才允许复用源缓冲区。
+四核 decode 按 KV 维度切分工作，把同一 KV head 对应的 Q heads 打包为 MAT 行，
+最后在 lane 0 根据各核 M/L 合并输出。跨核 barrier 保护归并期间的远端数据。
 
-唯一的 Vec worker 每个 KV tile 发射一次 `DIM2=15` 的 VFork，生成 16 个
-FlexVec task。硬件将 task 分配到两个 Vec Group，每组最多同时运行 8 个 thread，
-因此一次覆盖 `16 x 8 = 128` 行。每个 task 执行与 RVTNG
-`FlashAttentionVecFlowSpec` 的 online-softmax 流，并追加 O_acc 缩放及逐行
-FP32-to-FP16 convert/compress，共 421 条 FlexVec 指令；最终 normalization 使用
-另一个 50 条指令的 VFork。`KT` 和 `VT`
-分别按 key row 与 output-channel row 转置存储。Q 必须预先折叠 attention scale
-和 `log2(e)`，因为向量阶段直接计算 `exp2(score - newM)`。M/L 使用 Vec 的物理
-布局，每行标量复制 8 份。
+Q/K/V 接收 FP16 或 BF16 的 `[batch, head, row, D]`，支持 64B 对齐的行、head、
+batch stride；V 转置在 LSU 内完成。输出为连续的 FP32 `[batch, row, q_head, D]`。
+Q 不需要预先缩放，配置中的 `scale_bits` 是普通 attention scale，demo 使用
+`1/sqrt(D)`，Device 再乘 `log2(e)`。支持 `D=64/128/192/256`、GQA、
+因果掩码和 Q/KV 尾块。因果条件为 `key <= causal_offset + query_row`。
 
-FP16 URAM 实际使用 936 KiB，descriptor 申请 960 KiB：Q 32 KiB、KT/VT 双缓冲
-256 KiB、score/P 三缓冲 576 KiB、O_acc 64 KiB、M/L 8 KiB，低于单 Core
-1.5 MiB 容量。
+使用 VisualSwizzle 对实际基址、stride 和 32-bank 配置重新检查后，保留源实现的映射：
 
-Q/KT 的 swizzle 由 `host/visual_swizzle` 穷举选择，并在 LSU 写入和 MAT A/B
-读取两端配置相同的 M/B/S。FP8 的 128B stride 在线性布局下已经无冲突，采用显式
-identity `M=5,B=0,S=1`；FP16 Q/KT 的 256B stride 采用 `M=7,B=1,S=3`，VT 的
-512B stride 采用 `M=7,B=2,S=3`，模型中的每拍 Bank 峰值降为 1x。score/P
-目前保持 identity，因为 FlexVec TCSR
-尚未提供 swizzle 字段；MAT C、FlexVec 和 LSU 回写必须保持一致。
+| MAT 数据 | 字节 stride | M/B/S | 线性 / 采用映射的 Bank 峰值 |
+| --- | --- | --- | --- |
+| QK A/B，D=64/192 | 128 / 384 | identity | 1 / 1 |
+| QK A/B，D=128 | 256 | 5/1/5 | 2 / 1 |
+| QK A/B，D=256 | 512 | 5/2/5 | 4 / 1 |
+| PV B，即 Vt | 256 | 5/1/5 | 2 / 1 |
+| QK C / PV A，即 score/P | 512 | identity | 4 / 4 |
+| PV C，D=64/128/192/256 | 256/512/768/1024 | identity | 2/4/2/8，保持不变 |
 
-`flash_attention_fp8_1c` kernel 暂时保留原来的 QK + online-softmax 路径，只校验
-P/M/L，不执行低精度 P 转换、PV 和 O normalization。Host 使用确定性输入并逐元素
-校验 FP16 O 或 FP8 P/M/L；可执行文件默认运行 FP16，`--fp8` 选择 FP8：
+工具按四块 Bank 覆盖率进一步排序时，256B/512B stride 的候选最优分别为
+`7/1/3`、`7/2/3`；这里保留源实现的更小重排窗口，输入的每拍峰值同样为 1。
+score/P 和 PV 的消费者包括没有 swizzle iterator 的 FlexVec，因此保持 identity。
+这些是地址模型结果；吞吐和调度块周期需要实机或 RTL 测量。
 
 ```sh
-make -C demo ../build/demo/flash_attention_1c
-build/demo/flash_attention_1c
-build/demo/flash_attention_1c --fp8
+make -C demo ../build/demo/flash_attention
+build/demo/flash_attention --help
+
+# 使用已启动的 Dayan Server；默认 FP16、单核、B=1、Hq=4、Hkv=2、Q=256、KV=512、D=128
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention
+
+# 单核 BF16
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention --cores 1 --bf16
+
+# 四核 prefill，因果掩码、Q/KV 尾块、带 padding 的 stride，以及两次重复 launch
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention \
+  --bf16 --cores 4 --q-len 529 --kv-len 641 --causal --padded --repeat 2
+
+# 四核 decode；Q=1 且 KV>=512 时自动使用 Split-KV
+DAYAN_SERVER_SOCKET=/tmp/dayan-server.sock build/demo/flash_attention \
+  --cores 4 --q-len 1 --kv-len 769 --q-heads 16 --kv-heads 2
 ```
+
+`--split-kv` 可显式选择 decode 路径，要求四核、Q=1、至少四个可见 key。
+`--causal-offset` 指定因果偏移；只给 `--causal` 时默认为 `KV-Q`。
+`--tasks` 在单核模式分配独立 Task，四核模式分配独立 Cluster 工作组。
+Host 使用确定性的可精确表示输入，按输入数据计算双精度完整 attention 参考值，
+逐元素检查输出、每个 Task 的返回状态及输出尾部 guard。
+报告最大绝对/相对误差、RMSE 和 mismatch 数；允许误差为
+`3e-2 + 3e-2 * abs(reference)`，使用放宽阈值做 Resource 稳定性复测，日志同时打印
+`atol`/`rtol`。NaN/Inf、超过阈值的误差、Task 失败及 guard 损坏仍报错。
+`--repeat` 每轮重置输出和状态再验证。
+
+### FlashAttention 构建变体
+
+六个目标均来自 `flash_attention.cpp`，通过独立的编译宏和中间文件目录选择实现：
+
+| 可执行文件 | 行为 |
+| --- | --- |
+| `flash_attention` | 1c/4c 完整流水线，保留 Split-KV decode |
+| `flash_attention_tgmt_barrier` | 独立 Q group 分工，各核加载自己的 K/V，核间仅首尾 barrier |
+| `flash_attention_tgmt_shared_4c` | 四核共享 K/V，合并 K/V loader，以 barrier 协调 peer copy |
+| `flash_attention_tgmt_resource_4c` | 四核共享 K/V，以 Shared Resource 协调独立 K/V loader |
+| `flash_attention_tgmt_resource_timed_4c` | Resource 版本，增加每核启动窗口与计算窗口计时 |
+| `flash_attention_tgmt_resource_opt_4c` | 带计时的 Resource 版本，缓存 peer LSU 配置并合并输出 drain |
+
+后三个 Resource 目标仅保留四核 prefill，关闭 Split-KV。独立 K、V loader
+分别协调两个 ping-pong slot，共 4 个 Shared Resource、30 个 Local Resource、
+6 个子线程。producer 在 LSU 完成后发布共享 token，peer 在 URAM 复制完成后
+消费 token；下一次写入同时受本地 MAT 读者和远端复制完成约束。
+K/V 循环内无 barrier，仅保留首尾初始化和汇合 barrier。
+
+共享 K/V 的 barrier 版本将独立 K/V loader 合并为一个线程。每轮选一个有有效
+Q 行的 Core 作为 DRAM owner，其他 Core 从 owner 的 URAM 复制 K 和转置后的 V。
+两次 barrier 分别确认 owner 加载和 peer 复制完成，保留双缓冲及下一 tile 预取。
+
+```sh
+make -C demo ../build/demo/flash_attention_tgmt_resource_4c
+# DAYAN_SERVER_SOCKET 指向启用四核的 Server。
+build/demo/flash_attention_tgmt_resource_4c --bf16 --cores 4 --tasks 1 \
+  --q-len 1024 --kv-len 512 --head-dim 128 --q-heads 1 --kv-heads 1
+```
+
+两个计时目标在首个 QK MAT 提交前记录时间，结束点在输出写回、线程汇合和末尾
+barrier 完成之后。Host 分别对四核的 startup/post_startup/total 取最大值；
+各列最大值可能来自不同 Core，不能将最大 startup 与最大 post_startup 相加。
+post_startup 包含剩余加载、计算和排空，完整 launch 周期仍用于端到端比较。
+优化版本通过 `FLASH_ATTENTION_OPT=1` 缓存 peer LSU 配置、将 shared_keys 提到
+Q group 外层，并将两个 O slice 的 LSU drain 合并到 Q group 边界。
+Resource 生命周期及数据共享方式保持一致。
 
 ## LSU 单核带宽微基准
 
 `lsu_bandwidth` 隔离测试一个 Core 发射的连续 D2U，以及从本 Core URAM 到相邻 Core
 URAM 地址窗的 U2D。四个 Core 仅用于建立 Cluster URAM 映射；测量区间内只有 lane 0
 发射 DMA。每个尺寸都严格采用“发射一条 DMA、立即 `dayan_wait_lsu()`”的顺序，并用
-`dayan_get_time()` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期。测试结束
+`dayan_get_time()` 记录 4 KiB、16 KiB、64 KiB、256 KiB 和 1 MiB 的端到端周期；
+768 KiB 核心的最后一档改为 768 KiB，输入 Buffer 同步缩小。测试结束
 后另行回读 64 KiB 做数据校验，回读不计入带宽：
 
 ```sh
 build/demo/lsu_bandwidth       # 依次测试 D2U 和远端 U2D
 build/demo/lsu_bandwidth d2u
 build/demo/lsu_bandwidth u2d
+```
+
+## VEC 吞吐微基准
+
+`vec_peak` 测量 FlexVec 的稳态吞吐，并与设计峰值 128 FLOP/cycle（每周期 2 条 64-lane
+ALU 指令，1 lane-op 记 1 FLOP）对比。每个配置是一个只使用寄存器的 VFork：prologue 用
+30 条 broadcast 填满两个寄存器队列，循环体是 `BODY` 条 ALU 指令，由硬件循环
+`(DIM1 + 1) × (DIM0 + 1)` 在 `TASKS`（`DIM2 + 1`）个 task 中重放，epilogue 每个 task 写回一个 256B
+槽位。循环体不访问 URAM（`ld-*` 模式除外），因此结果只反映发射、寄存器堆和 ALU。
+
+每个配置运行两次，仅外层循环次数不同（`DIM1 + 1` = 1 和 2；`flat` 为 VFork 个数），并用
+`dayan_get_time()` 记录“发射指令块 → VFork → `dayan_wait_vec()`”的周期。Host 报告两次的
+差值：
+
+```text
+ALU/cycle  = 长短两次相差的 ALU 指令数 / (long - short)
+FLOP/cycle = ALU/cycle × 64        peak = FLOP/cycle / 128
+```
+
+指令块发射、VFork、prologue、task 的爬升与排空以及单元等待在两次运行中各出现一次，相减后
+抵消，剩下的是稳态吞吐。测量开始前先执行一个不计时的小 VFork 吸收冷启动开销。操作数
+取值保证每个 task 的最终结果是已知常数（`x+0`、`x*1`、`recip(1)` 恒为 1.0，`0+0`、
+`0*0` 恒为 0.0）；kernel 在每次运行前用 poison 覆盖结果槽位，结束后检查每个 task 的
+lane 0 和 lane 63。被静默丢弃的 VFork 会报告为 `BAD`，而不是一个快得不合理的周期数。
+
+```sh
+make -C demo ../build/demo/vec_peak
+build/demo/vec_peak                     # 默认 summary sweep
+build/demo/vec_peak threads mix         # 指定 sweep，一次 launch 内顺序执行
+build/demo/vec_peak am-1r:16:15         # 单个配置：MODE[:TASKS[:DISTANCE[:BODY]]]
+build/demo/vec_peak --cores 4 mix       # 四核：每个 Core 在自己的 VEC 上各跑一遍
+build/demo/vec_peak --work 1024 all     # cmodel 功能验证时缩小每次运行的规模
+```
+
+`--help` 列出全部 sweep 和模式。sweep 包括 `summary`（默认，各结论的代表点）、
+`threads`（task 数 1..64）、`depend`（依赖距离与延迟）、`ops`（add/mul/sfu/load）、
+`body`（循环体长度）、`flat`（不使用硬件循环，标量核逐块发射）、`mix`（add 与 mul
+交错）、`reads`（add+mul 的操作数模式）和 `all`。`DISTANCE` 是以 push 计的依赖距离：
+1 为串行链，15 是 16 项队列允许的最大独立度；取值限 1、2、4、8、15，因为寄存器 age
+是指令的立即数字段，kernel 为每个取值各实例化一份发射代码。`--work N` 是长短两次运行
+相差的循环体指令总数，默认 16384。
+
+`--cores 4` 以 `NPUTaskMode::kFourCore`、`task_dim={4,1,1}` 启动，要求 Server 启用同一
+Cluster 的 4 个 Core。task X 在 Core X 上执行整张配置表并写入 `results[X]`，Host 逐核
+输出结果，并按“各核 ALU 指令之和 / 最慢一核的周期”给出 Cluster 吞吐，对比 4 × 128。
+各核的 `sweep cycles` 窗口用于确认四份 sweep 确实同时运行；跨核比较要求计数器同源。
+
+Device 部分只有一个 kernel，不创建子 Thread，使用 1 个 LSU 和 1 个 VEC TCSR 组、
+32 KiB URAM（16 KiB 的 1.0f load 源和 16 KiB 结果槽位）。descriptor 为
+`DAYAN_KERNEL_TASK_DESC(vec_peak, 1, ...)`：同一个 kernel 还要以四核模式启动，因此不能
+声明为 locked Task，测量时 Server 上不应同时运行其它算子。Vec 指令队列在 Proc 退出后
+仍然存在，kernel 退出前比较队列空闲项数，有指令未被 VFork 时以 `-5` 结束。
+
+周期数只在 RTL 或实机上有意义；cmodel 没有时序模型，长短两次的差值可能为负，此时该行
+输出 `timing unusable`，PASS 只表示数据校验通过。使用 TestCluster 时按
+[`Readme_cluster.md`](../Readme_cluster.md) 的方式运行，例如：
+
+```sh
+python3 ./scripts/run_testcluster_operator.py \
+  --repo . --sim-dir "$NPU_TC_ROOT" --sim-bin "$NPU_TC_BIN" \
+  --dram-config "$NPU_TC_DRAM" --startup-timeout 300 \
+  --server-timeout-ms 36000000 --core-mask 0x1 --expect '[host] PASS:' \
+  -- ./build/demo/vec_peak
+```
+
+四核 sweep 使用 `--core-mask 0xf` 并在 `vec_peak` 后追加 `--cores 4`。单个配置适合配合
+`dyperf` 观察 Proc 状态时间线，trace 中只有该配置的一短一长两次运行：
+
+```sh
+build/host/dyperf/dyperf -o vec-peak-trace.json -- \
+  build/demo/vec_peak am-1r:16:15
 ```
 
 ## 用 dyperf 测量跨 Hart 调度通知
@@ -276,14 +456,14 @@ A[M][K] (BF16) × BT[N][K] (BF16) -> C[M][N] (FP32)
 ```
 
 Host 按转置布局提供 BT，三个 stride 均以字节为单位。核内流水沿用
-`matmul_bf16_4c` 的 `512×384×256` tile、4 个 slice、两个 Loader Thread、
+`matmul_bf16_4c` 的 tile（1.5 MiB 配置为 `512×384×256`）、4 个 slice、两个 Loader Thread、
 根 Calc Proc 和一个 Post Thread，按输出 tile → K tile → slice 的顺序推进。
 `M<N` 时 A 双缓冲，BT 分为四份 `96×256`；否则 BT 双缓冲，A 分为四份
 `128×256`。每个 slice 保留独立 C，直到全部 K 累加完成，再由 Post 写回。
 
 每个 Task 自己从 DRAM 加载 A/BT，只用 10 个 Local Resource 管理核内依赖，
 不做跨核复制、Shared Resource 选举或 Cluster barrier，也不申请 atomic/shared
-存储。两种布局分别使用 1,472 KiB、1,408 KiB URAM，统一申请 1,536 KiB，
+存储。1.5 MiB 配置的两种布局分别使用 1,472 KiB、1,408 KiB URAM，统一申请 1,536 KiB，
 每 Core 同时驻留一个 Task。
 
 默认 `M=1024, N=1536, K=1536, TASKS=1`，启动单 Core Task。可选第四个参数
@@ -311,7 +491,7 @@ VisualSwizzle 按实际类型、尺寸、URAM 基地址和 32 个 Bank 搜索：
 
 ## 四 Core BF16 matmul
 
-`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，每核固定使用
+`matmul_bf16_4c` 默认计算 `M=1024, N=1536, K=1536`，1.5 MiB 配置下每核使用
 `512×384×256` tile，分成 4 个 slice。`M<N` 时 A 双缓冲供 4 个 B slice 共用，
 B 每片为 `96×256 BF16`；反之 B 双缓冲供 4 个 A slice 共用，A 每片为
 `128×256 BF16`。切片输入和 C 都是每 slice 单缓冲。C 每份为 `512×96` 或
@@ -356,24 +536,15 @@ build/demo/matmul_bf16_4c
 可用 `./run_cmodel_server.sh` 启动四核 cmodel Server，再在另一终端运行上述命令。
 吞吐收益需以 RTL 测量为准。
 
-## 使用 cmodel 一键运行
+## 使用 cmodel 运行
 
-默认使用 `~/rvtng-cmodel` 和其配套的 `deps/npu-qemu/build/dl-riscv64`：
-
-```sh
-make -C demo run
-```
-
-也可以直接向脚本传入 7 个参数：
-
-```sh
-bash demo/run_cmodel.sh 10 20 30 40 50 60 70
-```
-
+默认使用 `~/rvtng-cmodel` 和其配套的 QEMU。先在一个终端运行仓库根目录的
+`run_cmodel_server.sh`，再从另一个终端启动 demo。
 可通过 `RVTNG_CMODEL_DIR`、`RVTNG_QEMU`、`NPU_DEVICE_PREFIX`、
-`NPU_CMODEL_HARTS` 和 `DAYAN_SERVER_SOCKET` 覆盖模拟器与运行路径。脚本保留
-`build/demo/cmodel.log`、`build/demo/dayan_server.log` 和
-`build/demo/print_demo.log` 便于排查。
+`NPU_CMODEL_HARTS` 和 `DAYAN_SERVER_SOCKET` 配置运行路径及连接。
+脚本会构建固件与 Host 工具，模拟器日志默认位于 `build/cmodel/cmodel.log`。
+它使用固定名称的 cmodel IPC 资源，仅支持一个实例；已有模拟器运行时请复用其
+Server，不要另起脚本。
 
 单 Core matmul 可用以下两个终端运行：
 
@@ -416,7 +587,7 @@ FP8 每核保留 4 个 slice，FP4 每核使用 2 个 slice，总 tile 为 `512�
 | `matmul_fp8_4c` | E4M3，每元素 1 字节 | 512×384×512 | 1024×1536×3072 |
 | `matmul_fp4_4c` | E2M1，每字节 2 个元素 | 512×512×640 | 1024×2048×6144 |
 
-FP8 相对 BF16 的 K tile 扩大到 2 倍，M/N tile 和 slice 尺寸保持不变；
+以下描述 1.5 MiB 配置。FP8 相对 BF16 的 K tile 扩大到 2 倍，M/N tile 和 slice 尺寸保持不变；
 A/B 的 URAM 行跨度为 512 字节，A 共享路径使用 1,472 KiB，B 共享路径使用
 1,408 KiB。FP4 的 M/N tile 保持 512，K tile 为 640，A/B 行跨度为 320 字节。
 共享 A 时每个 slice 为 `512×256×640`，共享 B 时为 `256×512×640`，
@@ -474,16 +645,124 @@ build/demo/matmul_fp4_4c
 也可使用 `[M N K]` 参数指定尺寸；Host 根据对应格式生成确定性输入，解码后
 计算 FP32 参考结果，报告最大绝对/相对误差及 PASS/FAIL。
 
-## 四 Core 直接广播性能模型
+BF16（1c/4c）和 FP4 的配置通过 Host DMA 上传到 DRAM。Device CPU 的数据缓存
+与 DMA 不保持一致，buffer 地址复用后可能仍缓存上一个算子的尺寸和步长，因此每个
+Hart 在 kernel 入口、第一次解引用 `config` 之前执行
+`dayan_cache_invalidate(config, sizeof(*config))`。FP8 直接传递尺寸和步长标量，
+不会替其他算子刷新配置缓存；重复运行 FP8 不能修复旧 FP4 入口读到的缓存配置。
 
-`matmul_bf16_broadcast_4c` 建模更完整的未来广播指令：源端 Loader 的一次 D2U
-同时填充本地和远端 URAM，完成后直接发布 Local/Shared Named Resource。tile 固定为
-`512x384x256`，A 沿 M 维等分为四个 `128x256` slice。
-每个 Core 只创建一个 DRAM Loader 和两个有序 MatStore worker，不再创建 Copy worker；
-源端 MAT 消费 Local Resource，远端 MAT 直接等待并消费 Shared Resource。B 的远端
-Shared Resource 由四个 M slice 分别消费。模型保留真实的 Load/MAT/C 写回时序与同步
-成本，但由于当前指令不会真实写入远端 URAM，仍跳过数值校验。
+切换回归应连接同一个四核 Server，期间不重启设备。在板子或 TestCluster 上执行：
 
 ```sh
-build/demo/matmul_bf16_broadcast_4c
+make -C demo ../build/demo/matmul_bf16_1c ../build/demo/matmul_bf16_4c \
+  ../build/demo/matmul_fp8_4c ../build/demo/matmul_fp4_4c
+for op in matmul_bf16_4c matmul_fp4_4c matmul_fp4_4c matmul_fp8_4c \
+          matmul_fp4_4c matmul_bf16_1c matmul_fp4_4c; do
+  build/demo/"$op" 16 1024 640 || break
+done
 ```
+
+每轮应通过数值校验，FP4 的行尾 padding 也应保持完整。cmodel 可验证数值和
+执行顺序，但其 QEMU CPU 不模拟这类数据缓存残留，不能单独验证此问题。
+
+## Gated DeltaNet: TGMT, SW + Vec TGMT, and SW
+
+`gdn.cpp` and `gdn_chunk.h` reproduce the chunked scalar-gate path in
+`/workspace/llama.cpp/ggml/src/ggml-dayan/ggml-dayan-gated-delta-net.h`.
+All three executables share the same arithmetic, FP32 tensors, TF32 MAT inputs,
+64-token chunks, 128-element heads, and 768 KiB URAM layout.
+
+```bash
+make -C demo -j3 ../build/demo/gdn_tgmt ../build/demo/gdn_sw_vec_tgmt ../build/demo/gdn_sw
+./build/demo/gdn_tgmt [tokens heads sequences]
+./build/demo/gdn_sw_vec_tgmt [tokens heads sequences]
+./build/demo/gdn_sw [tokens heads sequences]
+```
+
+Defaults are `1024 1 1`. All launch one kernel Task on one Core. `gdn_tgmt` uses
+loader and precompute child Threads plus the root state-update loop, with
+four Local Resources and internal VEC task parallelism. `gdn_sw_vec_tgmt`
+uses only the root Proc, one VEC TCSR context, and no Named Resources, but
+DIM2/3 still fork multiple VEC hardware tasks. This is the VEC policy of the old
+`gdn_sw` measured on 2026-10-28; its measurements and binary snapshots
+remain in the experiment record under **SW + Vec TGMT**.
+
+The new `gdn_sw` has at most one outstanding VEC hardware task: DIM2..5
+are zero, rows execute sequentially using DIM1, and DIM0 handles the
+triangular recurrence or the two halves of a state row. Each VEC block
+completes before the next is submitted. This does not insert per-row CPU
+submissions or waits. Both SW variants prefetch the next chunk during
+current state projections and prepare the next chunk while the final
+state MAT update can still be in flight. All retain block-local MAT/VEC/LSU
+overlap and the same arithmetic.
+
+The SW prologue and next-chunk input loads are expanded directly in
+`run_chunked`, including the paired Q/K and gate/beta DMA submissions.
+The prologue waits for LSU before the first Prepare; the loop waits for
+prefetched inputs and output stores before Prepare(next). These are explicit
+LSU dependencies, independent of MAT waits. TGMT retains its loader helper.
+Historical timings describe their saved binaries, before this source expansion.
+
+Both SW variants are explicitly software-pipelined baselines: their single
+Proc can submit asynchronous MAT/LSU work, prefetch into the second input
+buffer, and overlap work within a chunk. The TGMT variant keeps the backend's
+coarse loader / prepare / root split; the heavy prepare stage remains one
+sequential issuer. Holding the internal VEC parallelism switch fixed therefore
+does not guarantee a large speedup from this stage split. See the pipeline
+review in `../RVTNG/data_zb_lattn.md` for the source and trace evidence.
+
+This small benchmark supports contiguous FP32 Q/K/V, one scalar gate and
+beta per token/head, and one final state snapshot. It requires at least
+16 tokens; KDA, shared Q/K heads/sequences, and multiple snapshots are not
+exposed. Independent head/sequence chains are distributed across Tasks;
+each Task processes all tokens of its assigned chains in order.
+Tail input slots are zero-filled, and all paths materialize all 64 MAT
+columns before reuse; Host stores only valid tokens. Full chunks retain
+the backend dimensions. The input seed is fixed at 20261028; Q/K rows are
+L2-normalized.
+
+Each run checks every output and final-state element against an independent
+FP32 recurrence. It uses the backend's TF32 tolerances: output atol=2e-5,
+state atol=2e-4, rtol=3e-3, and separate output/state relative L2 <= 3e-3.
+Set `GDN_OUTPUT=/path/to/result.bin` to save `[output | final state]` as
+raw FP32 for direct comparison between the three executables.
+Use `DAYAN_SERVER_SOCKET` to select an isolated simulator instance.
+Experiment records are in `../RVTNG/data_zb_lattn.md` relative to the
+firmware repository; original traces and logs are under
+`build/testcluster-runs/gdn-*`.
+
+### Independent-work four-core matmul and GDN
+
+`matmul_bf16_1c` and all three GDN variants support one or four cores. Each core owns
+complete independent work items, loads its own inputs, and writes disjoint
+outputs. Four-core groups synchronize only at the initial and final
+`dayan_cluster_barrier(4, ...)`; no Shared Resource, peer copy or broadcast is
+used. TGMT's producer/consumer Resources remain local to each core.
+Idle lanes still participate in both barriers.
+
+```sh
+# M N K, number of groups, cores per group; same tiles and full K reduction.
+build/demo/matmul_bf16_1c 1024 1536 1024 1 4
+
+# Tokens, heads, sequences, cores, number of groups (last defaults to 1).
+# Four independent chains keep all four cores busy; tokens are not sharded.
+build/demo/gdn_tgmt        128 4 1 4
+build/demo/gdn_sw_vec_tgmt 128 4 1 4
+build/demo/gdn_sw          128 4 1 4
+```
+
+`matmul_bf16_1c` retains its historical executable name but also accepts
+four-core launch groups. `matmul_bf16_4c` retains the existing cooperative
+implementation and is a different baseline. `matmul_bf16_1c` defaults to
+M=1024, N=1536, K=1024.
+
+For GDN, strict SW means at most one VEC hardware task **per core** at a time;
+four cores may therefore execute four such tasks concurrently. The hybrid
+variant permits VEC TGMT within each core. Only TGMT creates child Threads.
+Input-load expansions and explicit LSU waits remain in place.
+
+Measurements and active device-source counts are appended to
+`../RVTNG/data_zb_matmul.md` and `../RVTNG/data_zb_lattn.md`; earlier results
+remain tied to their saved source/binary snapshots. The four-core timing
+metric is the maximum root-Proc duration over the four cores, including
+entry/exit barriers. It is not the sum of core durations.
