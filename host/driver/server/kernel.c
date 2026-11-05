@@ -803,8 +803,6 @@ static int apply_one_relocation(const struct relocation_context *context,
     case R_RISCV_64:
     case R_RISCV_ADD64:
     case R_RISCV_SUB64:
-        width = 8;
-        break;
     case R_RISCV_CALL:
     case R_RISCV_CALL_PLT:
         width = 8;
