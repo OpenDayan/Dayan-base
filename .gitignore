@@ -9,3 +9,4 @@ core.*
 *.json
 !device_tests/**/*.json
 __pycache__/
+docs
