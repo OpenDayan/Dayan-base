@@ -44,7 +44,6 @@ static void tensor_run(void)
     auto output = reinterpret_cast<volatile u32 *>(OUT_DDR);
     auto guarded_input = reinterpret_cast<volatile u32 *>(DDR_BASE + 0x2000);
     auto guarded_output = reinterpret_cast<volatile u32 *>(OUT_DDR + 0x2000);
-    auto diagnostic = reinterpret_cast<volatile u32 *>(OUT_DDR + 0x1000);
     for (unsigned lane = 0; lane < 64; ++lane) {
         left[lane] = input_left[lane];
         right[lane] = input_right[lane];
@@ -52,8 +51,6 @@ static void tensor_run(void)
     fill_words(OUT_DDR, 128, 0);
     for (unsigned index = 0; index < 96; ++index)
         guarded_input[index] = 0xa55a3cc3U;
-    for (unsigned index = 0; index < 4; ++index)
-        diagnostic[index] = 0;
     fence_io();
     dayan_cache_flush(reinterpret_cast<const void *>(DDR_BASE), 512U);
     dayan_cache_flush(reinterpret_cast<const void *>(DDR_BASE + 0x1000), 512U);
@@ -91,21 +88,13 @@ static void tensor_run(void)
         const bool guard = index < 16 || index >= 80;
         const u32 actual = guard ? guarded_output[index] : output[index - 16];
         const u32 wanted = guard ? 0xa55a3cc3U : expected_output[index - 16];
-        if (actual != wanted && diagnostic[0] == 0) {
-            diagnostic[0] = guard ? 2 : 1;
-            diagnostic[1] = index;
-            diagnostic[2] = actual;
-            diagnostic[3] = wanted;
+        if (actual != wanted) {
+            printf("[vec] index=%u actual=%08x expected=%08x\n", index, actual, wanted);
+            dayan_thread_exit(-22);
         }
     }
     fence_io();
     dayan_cache_flush(reinterpret_cast<const void *>(OUT_DDR), 512U);
-    dayan_cache_flush(reinterpret_cast<const void *>(OUT_DDR + 0x1000), 16U);
-    if (diagnostic[0] != 0) {
-        printf("[vec] kind=%u index=%u actual=%08x expected=%08x\n",
-               diagnostic[0], diagnostic[1], diagnostic[2], diagnostic[3]);
-        dayan_thread_exit(-22);
-    }
 }
 
 DAYAN_TEST(tensor_test, {

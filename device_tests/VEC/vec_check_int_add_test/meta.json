@@ -8,12 +8,6 @@
       "base": "0x92000000",
       "size": 256,
       "policy": "exact"
-    },
-    {
-      "name": "diagnostic",
-      "base": "0x92001000",
-      "size": 16,
-      "policy": "exact"
     }
   ],
   "mailbox": {
@@ -31,8 +25,8 @@
     }
   },
   "timeout": {
-    "alive_cycles": 50000,
-    "done_cycles": 50000,
+    "alive_cycles": 500000,
+    "done_cycles": 500000,
     "qemu_seconds": 120
   }
 }

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "identity_bf16_op1_p2",
+  "memory_init": [],
+  "compare": [
+    {
+      "name": "uram",
+      "base": "0x92000000",
+      "size": 1632,
+      "policy": "exact"
+    },
+    {
+      "name": "context",
+      "base": "0x92110000",
+      "size": 8,
+      "policy": "exact"
+    }
+  ],
+  "mailbox": {
+    "alive": {
+      "addr": "0x83ffffc0",
+      "value": "0xcafe0001"
+    },
+    "result": {
+      "addr": "0x83ffffc8",
+      "value": 0
+    },
+    "done": {
+      "addr": "0x83ffffd0",
+      "value": "0xdead0001"
+    }
+  },
+  "timeout": {
+    "alive_cycles": 500000,
+    "done_cycles": 2000000,
+    "qemu_seconds": 120
+  }
+}
