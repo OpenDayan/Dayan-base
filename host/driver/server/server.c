@@ -787,15 +787,17 @@ int dayan_server_create(dayan_server_t **server_out,
                         const dayan_server_options_t *options)
 {
     dayan_server_options_t defaults;
-    dayan_server_t *server;
+    dayan_server_t *server = 0;
     uint32_t cluster;
     const char *stage = "validating options";
     int mutex_initialized = 0;
     int condition_initialized = 0;
     int status;
 
-    if (!server_out)
-        return -EINVAL;
+    if (!server_out) {
+        status = -EINVAL;
+        goto fail;
+    }
     *server_out = 0;
     if (!options) {
         dayan_server_options_init(&defaults);
@@ -813,11 +815,16 @@ int dayan_server_create(dayan_server_t **server_out,
         !options->macro_tcsr_count_per_hart ||
         options->macro_tcsr_count_per_hart > 64U ||
         !options->socket_path ||
-        !*options->socket_path)
-        return -EINVAL;
+        !*options->socket_path) {
+        status = -EINVAL;
+        goto fail;
+    }
+    stage = "allocating the Server state";
     server = calloc(1, sizeof(*server));
-    if (!server)
-        return -ENOMEM;
+    if (!server) {
+        status = -ENOMEM;
+        goto fail;
+    }
     server->listen_fd = -1;
     server->options = *options;
     server->service_trap = options->service.trap;
@@ -979,21 +986,23 @@ int dayan_server_create(dayan_server_t **server_out,
 fail:
     server_log("error", "startup failed while %s: %s (%d)", stage,
                server_status_string(status), status);
-    if (server->listen_fd >= 0)
-        close(server->listen_fd);
-    if (server->socket_path)
-        (void)unlink(server->socket_path);
-    free(server->shared_resource_used);
-    free(server->slots);
-    if (server->device)
-        (void)npu_service_close(server->device);
-    npu_hal_close(server->hal);
-    if (condition_initialized)
-        pthread_cond_destroy(&server->condition);
-    if (mutex_initialized)
-        pthread_mutex_destroy(&server->mutex);
-    free(server->socket_path);
-    free(server);
+    if (server) {
+        if (server->listen_fd >= 0)
+            close(server->listen_fd);
+        if (server->socket_path)
+            (void)unlink(server->socket_path);
+        free(server->shared_resource_used);
+        free(server->slots);
+        if (server->device)
+            (void)npu_service_close(server->device);
+        npu_hal_close(server->hal);
+        if (condition_initialized)
+            pthread_cond_destroy(&server->condition);
+        if (mutex_initialized)
+            pthread_mutex_destroy(&server->mutex);
+        free(server->socket_path);
+        free(server);
+    }
     return status;
 }
 
