@@ -18,8 +18,10 @@
 set -euo pipefail
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-user_home=${HOME:-}
-cmodel_dir=${RVTNG_CMODEL_DIR:-"$user_home/rvtng-cmodel"}
+cmodel_dir=${RVTNG_CMODEL_DIR:-}
+if [ -z "$cmodel_dir" ] && [ -d "$repo_dir/../dayan-emu" ]; then
+    cmodel_dir=$(CDPATH='' cd -- "$repo_dir/../dayan-emu" && pwd)
+fi
 qemu=${RVTNG_QEMU:-"$cmodel_dir/deps/npu-qemu/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}
@@ -70,8 +72,9 @@ esac
 case "$build_jobs" in
     ''|*[!0-9]*|0) echo "DAYAN_BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
 esac
-if [ -z "$user_home" ] && [ -z "${RVTNG_CMODEL_DIR:-}" ]; then
-    echo "HOME or RVTNG_CMODEL_DIR must identify the simulator" >&2
+if [ -z "$cmodel_dir" ]; then
+    echo "RVTNG_CMODEL_DIR must identify the simulator" >&2
+    echo "set it explicitly, or place dayan-emu next to this repository" >&2
     exit 2
 fi
 if [ ! -x "$cmodel_dir/bin/rvt_emulator" ]; then

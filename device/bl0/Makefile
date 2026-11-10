@@ -17,7 +17,7 @@
 GCC=riscv64-unknown-elf-gcc
 OBJCOPY=riscv64-unknown-elf-objcopy
 OBJDUMP=riscv64-unknown-elf-objdump
-QEMU?=/workspace/npu-qemu/build/qemu-system-riscv64
+QEMU?=$(abspath $(CURDIR)/../../deps/npu-qemu/build/qemu-system-riscv64)
 DEBUG_ELF?=../../build/device/npu-os.elf
 
 .PHONY: clean all testDbg

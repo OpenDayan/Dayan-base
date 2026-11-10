@@ -24,7 +24,7 @@
  *   - 指令发射一律走 txenc::*_enc + emit 模板；
  *   - 测试注册 / 线程退出 / cache 维护沿用 <dayan_test.h> 协议层。
  * 测试通过相对路径引入：#include "../../instr_enc/tx_test.h"
- * 迁移意图参考 /home/juyi/instruction_test_all/dayan-samples 的样例。
+ * 迁移意图参考 dayan-samples 仓库中的样例。
  */
 
 #include "tx_base_enc.h"

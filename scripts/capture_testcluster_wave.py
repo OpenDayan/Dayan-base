@@ -36,9 +36,6 @@ import time
 import run_testcluster_operator as runner
 
 
-DEFAULT_SIM_DIR = Path("/workspace/npu-cluster-sim")
-
-
 class OperatorDrain:
     def __init__(
         self,
@@ -118,7 +115,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--sim-dir",
         type=Path,
-        default=Path(os.environ.get("NPU_CLUSTER_SIM_DIR", DEFAULT_SIM_DIR)),
+        default=runner.default_sim_dir(),
     )
     parser.add_argument("--sim-bin", type=Path)
     parser.add_argument("--dram-config", type=Path)
@@ -234,6 +231,10 @@ def main() -> int:
     ):
         raise runner.RunnerError("timeouts and cycle counts must be positive")
 
+    if arguments.sim_dir is None:
+        raise runner.RunnerError(
+            "no TestCluster directory: pass --sim-dir or set NPU_TC_ROOT"
+        )
     repo = arguments.repo.resolve()
     sim_dir = arguments.sim_dir.resolve()
     sim_bin = runner.rooted(arguments.sim_bin, sim_dir, "TestCluster")

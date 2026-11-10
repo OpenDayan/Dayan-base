@@ -36,7 +36,13 @@ import threading
 import time
 
 
-DEFAULT_SIM_DIR = Path("/home/wangzhe/npu-cluster-sim")
+def default_sim_dir() -> Path | None:
+    value = os.environ.get("NPU_TC_ROOT") or os.environ.get(
+        "NPU_CLUSTER_SIM_DIR"
+    )
+    return Path(value) if value else None
+
+
 DEFAULT_DRAM_CONFIG = "LPDDR5_8Gb_x16_6400_4ch.ini"
 RING_LIMIT = 512 * 1024
 SCAN_LIMIT = 256 * 1024
@@ -108,7 +114,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--sim-dir",
         type=Path,
-        default=Path(os.environ.get("NPU_CLUSTER_SIM_DIR", DEFAULT_SIM_DIR)),
+        default=default_sim_dir(),
     )
     result.add_argument("--sim-bin", type=Path)
     result.add_argument("--dram-config", type=Path)
@@ -336,6 +342,10 @@ def main() -> int:
     if arguments.fuse_settle < 0:
         raise RunnerError("--fuse-settle cannot be negative")
 
+    if arguments.sim_dir is None:
+        raise RunnerError(
+            "no TestCluster directory: pass --sim-dir or set NPU_TC_ROOT"
+        )
     repo = arguments.repo.resolve()
     sim_dir = arguments.sim_dir.resolve()
     sim_bin = rooted(arguments.sim_bin, sim_dir, "TestCluster")

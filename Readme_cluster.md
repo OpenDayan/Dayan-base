@@ -49,18 +49,18 @@ control/data socket，已接受的连接由独立线程处理。不同 Session �
 
 ## 2. 路径与前置条件
 
-以下命令均从 firmware 仓库根目录执行：
+以下命令均从 dayan-base 仓库根目录执行：
 
 ```sh
-cd ~/npu-firmware
+cd <dayan-base 检出目录>
 ```
 
 当前环境中有两种常见的 TestCluster 布局。
 
-默认使用 `/workspace/npu-cluster-sim` 中已经构建好的二进制模拟器：
+默认使用 <npu-cluster-sim 检出目录> 中已经构建好的二进制模拟器：
 
 ```sh
-export NPU_TC_ROOT=/workspace/npu-cluster-sim
+export NPU_TC_ROOT=<npu-cluster-sim 检出目录>
 export NPU_TC_BIN="$NPU_TC_ROOT/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 ```
@@ -315,7 +315,7 @@ strings "$latest_run/testcluster-tail.raw" | tail -200
 三个终端中使用一致的路径：
 
 ```sh
-export NPU_TC_ROOT=/workspace/npu-cluster-sim
+export NPU_TC_ROOT=<npu-cluster-sim 检出目录>
 export NPU_TC_BIN="$NPU_TC_ROOT/TestCluster"
 export NPU_TC_DRAM="$NPU_TC_ROOT/configs/LPDDR5_8Gb_x16_6400_4ch.ini"
 export NPU_DEVICE_PREFIX=/tmp/virtual_npu
@@ -587,7 +587,7 @@ trap/assertion、Server/Host 非零退出、timeout 或数值 mismatch 时，才
 检查 `--sim-bin`。默认使用的预构建 binary 是：
 
 ```text
-/workspace/npu-cluster-sim/TestCluster
+$NPU_TC_ROOT/TestCluster
 ```
 
 若使用本地源码构建，则 binary 是 `~/npu-cluster/sim/build/TestCluster`。
@@ -597,8 +597,8 @@ trap/assertion、Server/Host 非零退出、timeout 或数值 mismatch 时，才
 通常是 `--sim-dir` 与所选 binary 的目录布局不匹配。默认预构建布局应使用：
 
 ```text
---sim-dir /workspace/npu-cluster-sim
---sim-bin /workspace/npu-cluster-sim/TestCluster
+--sim-dir $NPU_TC_ROOT
+--sim-bin $NPU_TC_ROOT/TestCluster
 ```
 
 使用本地源码构建时，应使用 `--sim-dir ~/npu-cluster/sim` 和

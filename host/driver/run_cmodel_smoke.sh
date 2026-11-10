@@ -19,7 +19,15 @@ set -eu
 
 runtime_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$runtime_dir/../.." && pwd)
-cmodel_dir=${RVTNG_CMODEL_DIR:-/home/wangzhe/rvtng-cmodel}
+cmodel_dir=${RVTNG_CMODEL_DIR:-}
+if [ -z "$cmodel_dir" ] && [ -d "$repo_dir/../dayan-emu" ]; then
+    cmodel_dir=$(CDPATH='' cd -- "$repo_dir/../dayan-emu" && pwd)
+fi
+if [ -z "$cmodel_dir" ]; then
+    echo "RVTNG_CMODEL_DIR must identify the simulator" >&2
+    echo "set it explicitly, or place dayan-emu next to this repository" >&2
+    exit 2
+fi
 qemu=${RVTNG_QEMU:-"$repo_dir/deps/npu-qemu/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}

@@ -668,7 +668,7 @@ done
 ## Gated DeltaNet: TGMT, SW + Vec TGMT, and SW
 
 `gdn.cpp` and `gdn_chunk.h` reproduce the chunked scalar-gate path in
-`/workspace/llama.cpp/ggml/src/ggml-dayan/ggml-dayan-gated-delta-net.h`.
+`ggml/src/ggml-dayan/ggml-dayan-gated-delta-net.h` in the llama.cpp repository.
 All three executables share the same arithmetic, FP32 tensors, TF32 MAT inputs,
 64-token chunks, 128-element heads, and 768 KiB URAM layout.
 

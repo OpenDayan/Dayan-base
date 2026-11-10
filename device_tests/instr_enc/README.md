@@ -40,7 +40,7 @@ txenc::emit32<txenc::vec_vv_int_enc(txenc::VEC_INT_ADD, /*vrs1=*/1)>();
 
 ## 来源与锚点
 
-编码提取自 `/home/juyi/CLUSTER/npu-cluster/instruction-encoding/` 各文档
+编码提取自 npu-cluster 仓库的 `instruction-encoding/` 各文档
 （spec-rvt-cn-2026.08.31 的编码向提取）。`selfcheck.cpp` 为编译期自检
 （全部 `static_assert`，无运行时产物），用设备同款 flags 编译验证：
 
