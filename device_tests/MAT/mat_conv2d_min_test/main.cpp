@@ -1,3 +1,19 @@
+/***************************************************************************************
+ * Copyright (c) 2026 Institute of Computing Technology, Chinese Academy of Sciences
+ *
+ * Dayan-base is licensed under the Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of Mulan PSL v2 at:
+ *
+ *     http://license.coscl.org.cn/MulanPSL2
+ *
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ *
+ * See the Mulan PSL v2 for more details.
+***************************************************************************************/
+
 /* S8/S8 conv2d/conv2da：C=8/Co=8、Hi=1/Wi=1、Hk=1/Wk=1。
  * pad(L,U)=(0,0)、dilation(W,H)=(1,1)、stride(W,H)=(1,1)，Ho=1/Wo=1。
  * 维度写实际值减 1，全部 32 项 TCSR 显式初始化；swizzle/非 MX scale 步长为零。

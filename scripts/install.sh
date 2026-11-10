@@ -1,4 +1,20 @@
 #!/usr/bin/env bash
+#***************************************************************************************
+# Copyright (c) 2026 Institute of Computing Technology, Chinese Academy of Sciences
+#
+# Dayan-base is licensed under the Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#
+#     http://license.coscl.org.cn/MulanPSL2
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+#
+# See the Mulan PSL v2 for more details.
+#***************************************************************************************
+
 set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -34,6 +50,7 @@ done
 required=(
     "$root/build/host/dycc/dycc-bin"
     "$root/build/host/dyperf/dyperf"
+    "$root/build/host/dyrun/dyrun"
     "$root/build/host/driver/libDayanRuntime.a"
     "$root/build/host/driver/libDayanRuntime.so"
     "$root/build/host/driver/libnpu_runtime.a"
@@ -69,6 +86,8 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$destdir$bindir/dycc"
 "$install_tool" -m 0755 "$root/build/host/dyperf/dyperf" \
     "$destdir$bindir/dyperf"
+"$install_tool" -m 0755 "$root/build/host/dyrun/dyrun" \
+    "$destdir$bindir/dyrun"
 "$install_tool" -m 0755 "$root/build/host/driver/dayan_server" \
     "$destdir$bindir/"
 "$install_tool" -m 0644 "$root/build/host/driver/libDayanRuntime.a" \
@@ -108,11 +127,14 @@ documentation_target="$destdir$datadir/doc/dayan"
     "$documentation_target/driver.md"
 "$install_tool" -m 0644 "$root/host/dyperf/README.md" \
     "$documentation_target/dyperf.md"
+"$install_tool" -m 0644 "$root/host/dyrun/README.md" \
+    "$documentation_target/dyrun.md"
 "$install_tool" -m 0644 "$root/device/BAREMETAL.md" \
     "$documentation_target/baremetal.md"
 
 echo "install-dayan: dycc       -> $bindir/dycc"
 echo "install-dayan: dyperf     -> $bindir/dyperf"
+echo "install-dayan: dyrun      -> $bindir/dyrun"
 echo "install-dayan: server     -> $bindir/dayan_server"
 echo "install-dayan: Host SDK   -> $includedir, $libdir"
 echo "install-dayan: Device SDK -> $sdkdir"
