@@ -1,9 +1,8 @@
-// 取自 demo/matmul_bf16_1c.cpp，仅去掉 host main。
 #include <dayan_kernel.h>
 #include <stdint.h>
 
 // A[M][K] BF16 * BT[N][K] BF16 -> C[M][N] FP32; strides are bytes.
-// Each single-Core Task owns complete output tiles and loads both operands.
+// Each Core's root Task owns complete output tiles and loads both operands.
 // One operand has four slices, the other two physical buffers. Each slice
 // has its own C tile. Two Loader Threads, the root Calc Proc, and one Post
 // Thread coordinate through Local Resources only; Tasks never exchange data.
@@ -15,6 +14,8 @@ struct MatmulBf16Config {
 struct MatmulBf16Shape {
     enum : int {
         kTileM = 512, kTileN = 384, kTileK = 256, kSlices = 4,
+        // Keep row strides; reduce A/C buffers to fit both pipeline layouts.
+        kSmallTileM = 192, kSmallUramBytes = 768 * 1024,
         kWorkers = 3, kUramBytes = 1536 * 1024,
     };
 };
@@ -28,6 +29,7 @@ namespace matmul_bf16_1c_detail {
 
 // One Local Resource per sliced input, buffered input, and C slice.
 enum : int {
+    SmallTM = MatmulBf16Shape::kSmallTileM,
     TM = MatmulBf16Shape::kTileM, TN = MatmulBf16Shape::kTileN,
     TK = MatmulBf16Shape::kTileK, Slices = MatmulBf16Shape::kSlices,
     LocalResources = 2 * Slices + 2,
@@ -47,6 +49,14 @@ static_assert(2 * TM * TK * 2 + TN * TK * 2 + TM * TN * 4 <=
 static_assert(TM * TK * 2 + 2 * TN * TK * 2 + TM * TN * 4 <=
               MatmulBf16Shape::kUramBytes);
 
+static_assert(SmallTM % Slices == 0);
+static_assert((2ULL * SmallTM + TN) * TK * 2 +
+              4ULL * SmallTM * TN <=
+              MatmulBf16Shape::kSmallUramBytes);
+static_assert((SmallTM + 2ULL * TN) * TK * 2 +
+              4ULL * SmallTM * TN <=
+              MatmulBf16Shape::kSmallUramBytes);
+
 struct Buffer {
     uint64_t uram;
     dayan_resource_t resource;
@@ -55,7 +65,7 @@ struct State {
     const MatmulBf16Config *cfg;
     uint64_t input[2], output, generations, c_swizzle;
     uint32_t task, tasks;
-    int nt, kt, slice_m, slice_n;
+    int tile_m, nt, kt, slice_m, slice_n;
     bool buffer_a;
     Buffer a[Slices], b[Slices], c[Slices];
 };
@@ -80,9 +90,9 @@ static Node node(const State &s, uint64_t generation, int slice)
     const uint64_t out = s.task + generation / s.kt * s.tasks;
     const int step = (int)(generation % s.kt);
     const int phase = (int)(generation & 1);
-    const uint64_t row = out / s.nt * TM;
+    const uint64_t row = out / s.nt * s.tile_m;
     const uint64_t col = out % s.nt * TN;
-    const int rows = extent((int64_t)s.cfg->m - (int64_t)row, TM);
+    const int rows = extent((int64_t)s.cfg->m - (int64_t)row, s.tile_m);
     const int cols = extent((int64_t)s.cfg->n - (int64_t)col, TN);
     const int row_offset = s.buffer_a ? 0 : slice * s.slice_m;
     const int col_offset = s.buffer_a ? slice * s.slice_n : 0;
@@ -227,29 +237,30 @@ static bool config_valid(const MatmulBf16Config *c)
     return !(c->a_stride & 1) && !(c->bt_stride & 1) && !(c->c_stride & 63);
 }
 
-} // namespace matmul_bf16_1c_detail
-#endif
-
-__kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
-                              const uint16_t *a, const uint16_t *bt, float *c)
+static void run(const MatmulBf16Config *config,
+                const uint16_t *a, const uint16_t *bt, float *c, int tile_m)
 {
-    using namespace matmul_bf16_1c_detail;
-    dayan_cache_invalidate(config, sizeof(*config));
+    const bool four_core = dayan_task_mode() == 4;
+    // Host DMA may reuse a config address still cached by this Hart.
+    if (config)
+        dayan_cache_invalidate(config, sizeof(*config));
     if (!config_valid(config) || !a || !bt || !c ||
         ((uintptr_t)a & 1) || ((uintptr_t)bt & 1) || ((uintptr_t)c & 63) ||
-        dayan_task_mode() != 1 || !dayan_task_dim(DAYAN_TASK_X) ||
-        dayan_task_dim(DAYAN_TASK_Y) != 1 || dayan_task_dim(DAYAN_TASK_Z) != 1)
+        (!four_core && dayan_task_mode() != 1) || !dayan_task_dim(DAYAN_TASK_X) ||
+        (four_core ? dayan_task_dim(DAYAN_TASK_X) != 4 : dayan_task_dim(DAYAN_TASK_Y) != 1) ||
+        !dayan_task_dim(DAYAN_TASK_Y) || dayan_task_dim(DAYAN_TASK_Z) != 1)
         dayan_thread_exit(-22);
     State s = {};
+    s.tile_m = tile_m;
     s.cfg = config;
     s.input[0] = (uintptr_t)a;
     s.input[1] = (uintptr_t)bt;
     s.output = (uintptr_t)c;
-    s.task = dayan_task_id(DAYAN_TASK_X);
-    s.tasks = dayan_task_dim(DAYAN_TASK_X);
+    s.task = dayan_task_id(DAYAN_TASK_X) + (four_core ? 4 * dayan_task_id(DAYAN_TASK_Y) : 0);
+    s.tasks = dayan_task_dim(DAYAN_TASK_X) * dayan_task_dim(DAYAN_TASK_Y);
     s.nt = (int)((config->n + TN - 1) / TN);
     s.kt = (int)((config->k + TK - 1) / TK);
-    const uint64_t outputs = (config->m + TM - 1) / TM * s.nt;
+    const uint64_t outputs = (config->m + s.tile_m - 1) / s.tile_m * s.nt;
     if (s.task >= s.tasks)
         dayan_thread_exit(-22);
     if (s.task >= outputs)
@@ -260,7 +271,7 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
         dayan_thread_exit(-22);
     s.generations = tiles * s.kt;
     s.buffer_a = config->m < config->n;
-    s.slice_m = s.buffer_a ? TM : TM / Slices;
+    s.slice_m = s.buffer_a ? s.tile_m : s.tile_m / Slices;
     s.slice_n = s.buffer_a ? TN / Slices : TN;
     s.c_swizzle = s.buffer_a ? MAT_BATCH_SWIZZLE(5, 0, 1)
                             : MAT_BATCH_SWIZZLE(7, 2, 3);
@@ -296,9 +307,40 @@ __kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
     check(dayan_thread_join_all());
 }
 
+// Independent complete output tiles; the only inter-core operation is barrier.
+static void launch(const MatmulBf16Config *config, const uint16_t *a,
+                   const uint16_t *bt, float *c, int tile_m)
+{
+    const bool four_core = dayan_task_mode() == 4;
+    auto *barrier = (dayan_cluster_barrier_t *)shared;
+    if (four_core && dayan_cluster_barrier(4, barrier) < 0) dayan_thread_exit(-22);
+    run(config, a, bt, c, tile_m);
+    if (four_core && dayan_cluster_barrier(4, barrier) < 0) dayan_thread_exit(-22);
+}
+
+} // namespace matmul_bf16_1c_detail
+#endif
+
+__kernel__ void matmul_bf16_1c(const MatmulBf16Config *config,
+                              const uint16_t *a, const uint16_t *bt, float *c)
+{
+    matmul_bf16_1c_detail::launch(config, a, bt, c, MatmulBf16Shape::kTileM);
+}
+
+__kernel__ void matmul_bf16_1c_small(const MatmulBf16Config *config,
+                              const uint16_t *a, const uint16_t *bt, float *c)
+{
+    matmul_bf16_1c_detail::launch(config, a, bt, c, MatmulBf16Shape::kSmallTileM);
+}
+
 DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
     matmul_bf16_1c, 1, MatmulBf16Shape::kWorkers,
-    0, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
+    64, MatmulBf16Shape::kUramBytes, 3, 1, 0, 0,
+    2 * MatmulBf16Shape::kSlices + 2, 0);
+
+DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
+    matmul_bf16_1c_small, 1, MatmulBf16Shape::kWorkers,
+    64, MatmulBf16Shape::kSmallUramBytes, 3, 1, 0, 0,
     2 * MatmulBf16Shape::kSlices + 2, 0);
 
 

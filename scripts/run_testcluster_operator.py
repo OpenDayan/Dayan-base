@@ -138,6 +138,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--startup-timeout", type=float, default=30.0)
     result.add_argument("--server-timeout-ms", type=int, default=60000)
     result.add_argument(
+        "--continue-interval-seconds",
+        type=float,
+        default=90.0,
+        help="queue another 'c' periodically so long runs cross TestCluster's "
+        "continuous-run cap; set to 0 to disable",
+    )
+    result.add_argument(
         "--fuse-settle",
         type=float,
         default=1.0,
@@ -247,6 +254,31 @@ def stop_process(process: subprocess.Popen | None, timeout: float = 5.0) -> None
     except ProcessLookupError:
         return
     process.wait(timeout=timeout)
+
+
+def start_continuation(
+    master_fd: int,
+    simulator: subprocess.Popen,
+    interval: float,
+) -> tuple[threading.Event, threading.Thread] | None:
+    if interval <= 0:
+        return None
+    stop = threading.Event()
+
+    def run() -> None:
+        while not stop.wait(interval):
+            if simulator.poll() is not None:
+                return
+            try:
+                os.write(master_fd, b"c\n")
+            except OSError:
+                return
+
+    thread = threading.Thread(
+        target=run, name="testcluster-continuation", daemon=True
+    )
+    thread.start()
+    return stop, thread
 
 
 def disconnected_mount(path: Path) -> bool:
@@ -399,6 +431,7 @@ def main() -> int:
     server_log = None
     master_fd = -1
     drain: PtyDrain | None = None
+    continuation: tuple[threading.Event, threading.Thread] | None = None
 
     try:
         master_fd, slave_fd = pty.openpty()
@@ -506,6 +539,9 @@ def main() -> int:
             (("TestCluster", simulator), ("dayan_server", server_process)),
         )
         print(f"[testcluster-runner] Dayan socket is ready: {socket_path}", flush=True)
+        continuation = start_continuation(
+            master_fd, simulator, arguments.continue_interval_seconds
+        )
 
         status = run_operator(
             arguments.command,
@@ -521,6 +557,9 @@ def main() -> int:
         print(f"[testcluster-runner] operator passed with status {status}", flush=True)
         return 0
     finally:
+        if continuation is not None:
+            continuation[0].set()
+            continuation[1].join(timeout=1.0)
         stop_process(server_process)
         if server_log is not None:
             server_log.close()

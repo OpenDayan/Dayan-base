@@ -94,18 +94,18 @@ __device__ static void store_run(uint64_t source, float *destination,
     }
 }
 
-__device__ static inline uint32_t shard_begin(uint32_t total) {
+__device__ static inline uint64_t shard_begin(uint64_t total) {
     const uint32_t tasks = dayan_task_dim(0);
     if (tasks < 2U)
         return 0;
-    return (uint32_t)((uint64_t)total * dayan_task_id(0) / tasks);
+    return total * dayan_task_id(0) / tasks;
 }
 
-__device__ static inline uint32_t shard_end(uint32_t total) {
+__device__ static inline uint64_t shard_end(uint64_t total) {
     const uint32_t tasks = dayan_task_dim(0);
     if (tasks < 2U)
         return total;
-    return (uint32_t)((uint64_t)total * (dayan_task_id(0) + 1U) / tasks);
+    return total * (dayan_task_id(0) + 1U) / tasks;
 }
 
 #endif
@@ -140,21 +140,35 @@ __kernel__ void rvnpu_resize_nearest_nchw_fp32(const float *input,
 
     const uint64_t planes = (uint64_t)batch * channels;
     const uint64_t units = planes * output_h;
+    uint64_t previous_row = ~(uint64_t)0;
     for (uint64_t unit = shard_begin(units); unit < shard_end(units); ++unit) {
         const uint32_t plane = (uint32_t)(unit / output_h);
         const uint32_t oh = (uint32_t)(unit % output_h);
         const uint64_t plane_base = (uint64_t)plane * input_h * input_w;
         const uint32_t ih = (uint32_t)(((uint64_t)oh * input_h) / output_h);
         if (stage_in_uram) {
-            load_run(input + plane_base + (uint64_t)ih * input_w, cached_row,
-                     input_w);
-            const volatile float *cached =
-                (const volatile float *)(uintptr_t)cached_row;
-            volatile float *staged =
-                (volatile float *)(uintptr_t)staged_row;
-            for (uint32_t ow = 0; ow < output_w; ++ow)
-                staged[ow] =
-                    cached[(uint32_t)(((uint64_t)ow * input_w) / output_w)];
+            const uint64_t row_key = plane_base + (uint64_t)ih * input_w;
+            if (row_key != previous_row) {
+                load_run(input + row_key, cached_row, input_w);
+                const volatile float *cached =
+                    (const volatile float *)(uintptr_t)cached_row;
+                volatile float *staged =
+                    (volatile float *)(uintptr_t)staged_row;
+                if ((uint64_t)output_w == (uint64_t)input_w * 2U) {
+                    // YOLO nearest 2x: no per-output integer division, one
+                    // read per source. Reuse the expanded row vertically.
+                    for (uint32_t iw = 0; iw < input_w; ++iw) {
+                        const float value = cached[iw];
+                        staged[2U * iw] = value;
+                        staged[2U * iw + 1U] = value;
+                    }
+                } else {
+                    for (uint32_t ow = 0; ow < output_w; ++ow)
+                        staged[ow] =
+                            cached[(uint32_t)(((uint64_t)ow * input_w) / output_w)];
+                }
+                previous_row = row_key;
+            }
             store_run(staged_row,
                       output + (plane * output_h + oh) * output_w, output_w);
         } else {

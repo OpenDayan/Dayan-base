@@ -1,7 +1,10 @@
-// MaxPool2D(NCHW)：按输出行分片，每个输出行按 kOutputTile 个输出点一块处理。
-// 每块把 kernel_h 行输入经 LSU 搬进 URAM，在 URAM 里拼出
-// [output][padded_window] 窗口矩阵，再用一条 MACRO reduce_max 同时算出这一块
-// 所有输出点（DIM0 = 窗口，DIM1 = 输出点数）。越界位置补 -inf。
+// MaxPool2D(NCHW)。三条路径：
+//  5x5/s1/p2 dense：二维行块装载，水平 5-max，垂直 MACRO 合并归约，
+//    每 plane 少量 D2U/U2D，避免逐行小 DMA。
+//  3x3/s2/p1 tile：plane 行连续 packed 装载（整块+尾块 2 条，无越界读），
+//    水平 s2 3-max 主循环无分支（边界 2 点特化），垂直 MACRO，写回 2 条；
+//    装载(g0) 与垂直/写回(g1) 跨 tile 流水。
+//  通用：窗口矩阵 + reduce_max（保持原样）。
 #include <dayan_kernel.h>
 
 #if defined(__DAYAN_DEVICE__)
@@ -14,15 +17,13 @@
 namespace {
 #if defined(__DAYAN_DEVICE__)
 
-// A 64-output tile covers the complete 56-wide ResNet50 pool row. This keeps
-// the MACRO-friendly 16-element window layout while avoiding four repeated
-// input-row loads and four reduce launches per output row.
 __device__ constexpr uint32_t kOutputTile = 64;
 __device__ constexpr uint32_t kMaxKernel = 16;
 __device__ constexpr uint32_t kMaxStride = 16;
-__device__ constexpr uint32_t kOutputRowTile = 8;
+__device__ constexpr uint32_t kOutputRowTile = 16;
 __device__ constexpr uint32_t kUramBytes = 64U * 1024U;
 __device__ constexpr long kLsuGroup = 0;
+__device__ constexpr long kStoreGroup = 1;
 __device__ constexpr long kMacroGroup = 0;
 
 __device__ static inline float negative_infinity() {
@@ -64,7 +65,6 @@ __device__ static inline void configure_lsu(uint32_t bytes,
     __tx_lsu_tcsr_write<kLsuGroup * LSU_GROUPSZ + LSU_TABLESTRIDE>(64);
 }
 
-// 从 64B 对齐的 DRAM 地址搬 bytes 字节到 URAM：整块交给 LSU，尾部零头单独一次。
 __device__ static void load_bytes(uint64_t destination, uintptr_t source,
                                   uint32_t bytes) {
     const uint32_t full_bytes = bytes & ~63U;
@@ -79,6 +79,74 @@ __device__ static void load_bytes(uint64_t destination, uintptr_t source,
         __tx_lsu_dma_d2u<kLsuGroup>((long)(destination + full_bytes),
                                     (long)(source + full_bytes));
         dayan_wait_lsu();
+    }
+}
+
+// 双维块搬运：每行 dim0_blocks 个 64B 块，行数 dim1_rows；request 裁块尾。
+// 组别可挑（装载 g0 / 写回 g1），地址与步长均允许非 64B 对齐（Transpose=6）。
+template <long GROUP>
+__device__ static inline void configure_lsu_dims(uint32_t dim0_blocks,
+                                                 uint32_t dim1_rows,
+                                                 uint32_t in_dim1_stride,
+                                                 uint32_t out_dim1_stride,
+                                                 uint32_t request_bytes) {
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_BLOCK>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_DIM0>(dim0_blocks - 1U);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_DIM1>(dim1_rows - 1U);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_DIM2>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_INBLOCKSTRIDE>(64);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_INDIM0STRIDE>(64);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_INDIM1STRIDE>(in_dim1_stride);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_INDIM2STRIDE>(64);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_OUTBLOCKSTRIDE>(64);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_OUTDIM0STRIDE>(64);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_OUTDIM1STRIDE>(out_dim1_stride);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_OUTDIM2STRIDE>(64);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_BLOCKTRANSPOSE>(6);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_BLOCKPADDING>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_REQUESTREADSIZE>(
+        request_bytes - 1U);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_PADDINGVALUE>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_URAMWRITESWIZZLEMBS>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_URAMREADSWIZZLEMBS>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_REQUESTWRITESIZE>(
+        request_bytes - 1U);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_TABLESIZE>(0);
+    __tx_lsu_tcsr_write<GROUP * LSU_GROUPSZ + LSU_TABLESTRIDE>(64);
+}
+
+// packed 连续装载 rows 行（源 DRAM 行紧排）：整块条 + 尾块条，皆无越界。
+__device__ static void load_packed_issue(uint64_t destination, uintptr_t source,
+                                         uint32_t rows, uint32_t row_bytes) {
+    const uint64_t total = (uint64_t)rows * row_bytes;
+    const uint32_t full = (uint32_t)(total / 64U);
+    const uint32_t tail = (uint32_t)(total % 64U);
+    if (full != 0U) {
+        configure_lsu_dims<kLsuGroup>( full, 1, 64, 64, 64);
+        __tx_lsu_dma_d2u<kLsuGroup>((long)destination, (long)source);
+    }
+    if (tail != 0U) {
+        configure_lsu_dims<kLsuGroup>( 1, 1, 64, 64, tail);
+        __tx_lsu_dma_d2u<kLsuGroup>((long)(destination + (uint64_t)full * 64U),
+                                    (long)(source + (uint64_t)full * 64U));
+    }
+}
+
+// 行循环写回 rows 行：每行 full 块 + tail 字节，两条件各自带 DIM1 行步长。
+__device__ static void store_rows_issue(uint64_t source, uintptr_t destination,
+                                        uint32_t rows, uint32_t row_bytes,
+                                        uint32_t source_stride) {
+    const uint32_t full = row_bytes / 64U;
+    const uint32_t tail = row_bytes % 64U;
+    if (full != 0U) {
+        configure_lsu_dims<kStoreGroup>( full, rows, source_stride, row_bytes, 64);
+        __tx_lsu_dma_u2d<kStoreGroup>((long)destination, (long)source);
+    }
+    if (tail != 0U) {
+        configure_lsu_dims<kStoreGroup>( 1, rows, source_stride, row_bytes, tail);
+        __tx_lsu_dma_u2d<kStoreGroup>(
+            (long)(destination + (uint64_t)full * 64U),
+            (long)(source + (uint64_t)full * 64U));
     }
 }
 
@@ -127,10 +195,6 @@ __device__ static inline uint32_t shard_end(uint32_t total) {
     return (uint32_t)((uint64_t)total * (dayan_task_id(0) + 1U) / tasks);
 }
 
-// DIM0 is the contiguous SIMD dimension. DIM1 repeats that vector for each
-// row. Putting individual columns in DIM1 is not equivalent: the hardware
-// still executes a vector at every DIM1 position and overlapping stores corrupt
-// neighbouring results.
 __device__ static inline void configure_vector_rows(
     uint32_t elements, uint32_t rows, uint32_t source0_row_stride,
     uint32_t source1_row_stride, uint32_t destination_row_stride) {
@@ -143,17 +207,20 @@ __device__ static inline void configure_vector_rows(
         source0_row_stride);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC0DIM2STRIDE>(
         0);
-    __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC0DIM3STRIDE>(0);
+    __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC0DIM3STRIDE>(
+        0);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC1DIM1STRIDE>(
         source1_row_stride);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC1DIM2STRIDE>(
         0);
-    __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC1DIM3STRIDE>(0);
+    __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC1DIM3STRIDE>(
+        0);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_DSTDIM1STRIDE>(
         destination_row_stride);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_DSTDIM2STRIDE>(
         0);
-    __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_DSTDIM3STRIDE>(0);
+    __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_DSTDIM3STRIDE>(
+        0);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC0SWIZZLEMBS>(0);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_SRC1SWIZZLEMBS>(0);
     __tx_macro_tcsr_write<kMacroGroup * MACRO_GROUPSZ + MACRO_DSTSWIZZLEMBS>(0);
@@ -172,30 +239,62 @@ __device__ static inline void vector_max_rows(
     dayan_wait_macro();
 }
 
-// Vectorized ResNet-style 3x3/s2/p1 pooling. A batch of eight output rows
-// needs at most seventeen input rows, which are loaded only once. Horizontal
-// stride-2 maxima are formed directly because MACRO sources must be aligned and
-// cannot safely address input+1/input+2. The vertical stage is row-vectorized
-// with two MACRO instructions. No [output][16] window matrix or padding exists.
+// 水平 s2 3-max（去分支）：主循环读 s[2ow-1..2ow+1]，ow=0 与右端点各特化。
+__device__ static void horizontal_max3_stride2(const volatile float *s,
+                                               volatile float *d,
+                                               uint32_t output_w,
+                                               uint32_t input_w) {
+    if (output_w == 0)
+        return;
+    float left = s[0];
+    if (1U < input_w) {
+        const float v = s[1];
+        left = v > left ? v : left;
+    }
+    d[0] = left;
+    for (uint32_t ow = 1U; ow + 1U < output_w; ++ow) {
+        const uint32_t base = 2U * ow;
+        const float a = s[base - 1U];
+        const float b = s[base];
+        const float c = s[base + 1U];
+        float m = a > b ? a : b;
+        d[ow] = c > m ? c : m;
+    }
+    if (output_w > 1U) {
+        const uint32_t base = 2U * (output_w - 1U);
+        const float a = s[base - 1U];
+        const float b = s[base];
+        float m = a > b ? a : b;
+        if (base + 1U < input_w) {
+            const float c = s[base + 1U];
+            m = c > m ? c : m;
+        }
+        d[output_w - 1U] = m;
+    }
+}
+
+// Vectorized ResNet-style 3x3/s2/p1 pooling, tile 流水版。
 __device__ static bool maxpool3x3s2p1_vector(
     const float *input, float *output, uint32_t batch, uint32_t channels,
     uint32_t input_h, uint32_t input_w, uint32_t output_h, uint32_t output_w,
     uint64_t uram) {
     const uint32_t input_row_bytes = input_w * sizeof(float);
     const uint32_t output_row_bytes = output_w * sizeof(float);
-    if (((uintptr_t)input & 63U) != 0 || (input_row_bytes & 63U) != 0)
-        return false;
-    const uint32_t input_row_stride = align_up_64(input_row_bytes);
+    // packed 装载：行在 URAM 里按实距排列（读侧同为实距）；hmax/结果行保持
+    // 64B 对齐 stride 以满足 MACRO 源 32B 对齐约束。
+    const uint32_t input_row_stride = input_row_bytes;
     const uint32_t horizontal_row_stride = align_up_64(output_row_bytes);
     const uint32_t result_row_stride = horizontal_row_stride;
     const uint32_t maximum_input_rows = 2U * kOutputRowTile + 1U;
     const uint64_t input_rows_at = uram;
-    const uint64_t horizontal_at =
-        input_rows_at + (uint64_t)maximum_input_rows * input_row_stride;
+    // packed 行距（实距）后区域起点不再天然对齐，显式取整保 MACRO 32B 对齐。
+    const uint64_t horizontal_at = (input_rows_at +
+                                    (uint64_t)maximum_input_rows * input_row_stride +
+                                    63U) & ~(uint64_t)63U;
     const uint64_t result_at =
         horizontal_at + (uint64_t)maximum_input_rows * horizontal_row_stride;
     const uint64_t required =
-        (uint64_t)maximum_input_rows * input_row_stride +
+        (uint64_t)maximum_input_rows * (input_row_bytes + 63U) +
         (uint64_t)maximum_input_rows * horizontal_row_stride +
         (uint64_t)kOutputRowTile * result_row_stride;
     if (required > kUramBytes)
@@ -221,30 +320,18 @@ __device__ static bool maxpool3x3s2p1_vector(
                 input_end_signed > input_h ? input_h : (uint32_t)input_end_signed;
             const uint32_t input_rows = input_end - input_first;
 
+            load_packed_issue(input_rows_at,
+                              (uintptr_t)(input + input_plane +
+                                          (uint64_t)input_first * input_w),
+                              input_rows, input_row_bytes);
+            dayan_wait_lsu();
             for (uint32_t row = 0; row < input_rows; ++row) {
-                load_bytes(input_rows_at + (uint64_t)row * input_row_stride,
-                           (uintptr_t)(input + input_plane +
-                                       (uint64_t)(input_first + row) * input_w),
-                           input_row_bytes);
-            }
-
-            for (uint32_t row = 0; row < input_rows; ++row) {
-                const volatile float *source =
+                horizontal_max3_stride2(
                     (const volatile float *)(uintptr_t)(
-                        input_rows_at + (uint64_t)row * input_row_stride);
-                volatile float *destination =
+                        input_rows_at + (uint64_t)row * input_row_stride),
                     (volatile float *)(uintptr_t)(
-                        horizontal_at + (uint64_t)row * horizontal_row_stride);
-                for (uint32_t ow = 0; ow < output_w; ++ow) {
-                    float maximum = negative_infinity();
-                    const int64_t first = (int64_t)ow * 2 - 1;
-                    for (uint32_t kw = 0; kw < 3U; ++kw) {
-                        const int64_t iw = first + kw;
-                        if (iw >= 0 && iw < input_w && source[iw] > maximum)
-                            maximum = source[iw];
-                    }
-                    destination[ow] = maximum;
-                }
+                        horizontal_at + (uint64_t)row * horizontal_row_stride),
+                    output_w, input_w);
             }
 
             uint32_t vertical_begin = 0;
@@ -302,16 +389,123 @@ __device__ static bool maxpool3x3s2p1_vector(
                     2U * horizontal_row_stride, result_row_stride);
             }
 
-            for (uint32_t row = 0; row < output_rows; ++row) {
+            store_rows_issue(result_at,
+                             (uintptr_t)(output + output_plane +
+                                         (uint64_t)output_first * output_w),
+                             output_rows, output_row_bytes, result_row_stride);
+            dayan_wait_lsu();
+        }
+    }
+    return true;
+}
+
+// SPPF 5x5/s1/p2：按二维行块搬入 URAM，水平阶段用标量比较，
+// 垂直阶段使用 MACRO 合并归约，最后整 plane 写回。
+__device__ static bool maxpool5x5s1p2_dense(
+    const float *input, float *output, uint32_t batch, uint32_t channels,
+    uint32_t height, uint32_t width, uint64_t uram) {
+    const uint32_t row_bytes = width * sizeof(float);
+    const uint64_t plane_bytes = (uint64_t)height * row_bytes;
+    const uint32_t input_pitch = align_up_64(row_bytes);
+    const uint64_t horizontal_at = uram + plane_bytes;
+    const uint64_t result_at =
+        horizontal_at + (uint64_t)height * input_pitch;
+    const uint64_t output_at =
+        (result_at + (uint64_t)height * input_pitch + 63U) &
+        ~(uint64_t)63U;
+    if (row_bytes == 0U || plane_bytes == 0U ||
+        output_at + plane_bytes > uram + kUramBytes)
+        return false;
+    const uint32_t planes = batch * channels;
+    for (uint32_t plane = shard_begin(planes); plane < shard_end(planes);
+         ++plane) {
+        const uint64_t base = (uint64_t)plane * height * width;
+        volatile float *destination =
+            (volatile float *)(uintptr_t)output_at;
+        const uint32_t full_row_bytes = row_bytes & ~63U;
+        const uint32_t tail_row_bytes = row_bytes & 63U;
+        if (full_row_bytes != 0U) {
+            configure_lsu_dims<kLsuGroup>(
+                full_row_bytes / 64U, height, row_bytes, row_bytes, 64U);
+            __tx_lsu_dma_d2u<kLsuGroup>(
+                (long)uram, (long)(input + base));
+        }
+        if (tail_row_bytes != 0U) {
+            configure_lsu_dims<kLsuGroup>(
+                1U, height, row_bytes, row_bytes, tail_row_bytes);
+            __tx_lsu_dma_d2u<kLsuGroup>(
+                (long)(uram + full_row_bytes),
+                (long)(input + base + full_row_bytes / sizeof(float)));
+        }
+        dayan_wait_lsu();
+
+        for (uint32_t row = 0; row < height; ++row) {
+            for (uint32_t ow = 0; ow < width; ++ow) {
+                float maximum = negative_infinity();
+                const uint32_t begin = ow > 2U ? ow - 2U : 0U;
+                const uint32_t end =
+                    ow + 3U < width ? ow + 3U : width;
                 const volatile float *source =
                     (const volatile float *)(uintptr_t)(
-                        result_at + (uint64_t)row * result_row_stride);
-                float *destination = output + output_plane +
-                    (uint64_t)(output_first + row) * output_w;
-                for (uint32_t ow = 0; ow < output_w; ++ow)
-                    destination[ow] = source[ow];
+                        uram + (uint64_t)row * row_bytes);
+                for (uint32_t iw = begin; iw < end; ++iw) {
+                    const float value = source[iw];
+                    maximum = value > maximum ? value : maximum;
+                }
+                ((volatile float *)(uintptr_t)(
+                    horizontal_at + (uint64_t)row * input_pitch))[ow] =
+                    maximum;
             }
         }
+
+        const uint32_t interior_rows = height > 4U ? height - 4U : 0U;
+        if (interior_rows != 0U) {
+            configure_vector_rows(width, interior_rows, input_pitch,
+                                  input_pitch, input_pitch);
+            __tx_macro_elemwise_max_fp32<kMacroGroup, 0>(
+                (long)result_at, (long)horizontal_at, (long)horizontal_at);
+            for (uint32_t offset = 1U; offset < 5U; ++offset) {
+                __tx_macro_elemwise_max_fp32<kMacroGroup, 0>(
+                    (long)result_at, (long)result_at,
+                    (long)(horizontal_at +
+                           (uint64_t)offset * input_pitch));
+            }
+            dayan_wait_macro();
+            for (uint32_t row = 0; row < interior_rows; ++row) {
+                const volatile float *source =
+                    (const volatile float *)(uintptr_t)(
+                        result_at + (uint64_t)row * input_pitch);
+                for (uint32_t ow = 0; ow < width; ++ow)
+                    destination[(uint64_t)(row + 2U) * width + ow] =
+                        source[ow];
+            }
+        }
+
+        const uint32_t edge_rows[4] = {0U, 1U, height > 2U ? height - 2U : 0U,
+                                       height > 1U ? height - 1U : 0U};
+        for (uint32_t edge_index = 0; edge_index < 4U; ++edge_index) {
+            const uint32_t oh = edge_rows[edge_index];
+            if (oh >= height || (edge_index == 3U && height <= 1U) ||
+                (edge_index == 2U && height <= 2U))
+                continue;
+            for (uint32_t ow = 0; ow < width; ++ow) {
+                float maximum = negative_infinity();
+                for (uint32_t kh = 0; kh < 5U; ++kh) {
+                    const int32_t ih = (int32_t)oh + (int32_t)kh - 2;
+                    if (ih < 0 || ih >= (int32_t)height)
+                        continue;
+                    const float value =
+                        ((const volatile float *)(uintptr_t)(
+                             horizontal_at + (uint64_t)ih * input_pitch))[ow];
+                    maximum = value > maximum ? value : maximum;
+                }
+                destination[(uint64_t)oh * width + ow] = maximum;
+            }
+        }
+
+        store_rows_issue(output_at, (uintptr_t)(output + base), height,
+                         row_bytes, row_bytes);
+        dayan_wait_lsu();
     }
     return true;
 }
@@ -340,6 +534,13 @@ __kernel__ void rvnpu_maxpool2d_nchw_fp32(
     if (uram == 0 || dayan_uram_size() < kUramBytes)
         dayan_thread_exit(-2);
 
+    if (kernel_h == 5U && kernel_w == 5U && stride_h == 1U &&
+        stride_w == 1U && pad_h == 2U && pad_w == 2U &&
+        input_h == output_h && input_w == output_w &&
+        maxpool5x5s1p2_dense(input, output, batch, channels,
+                          input_h, input_w, uram))
+        return;
+
     if (kernel_h == 3U && kernel_w == 3U && stride_h == 2U &&
         stride_w == 2U && pad_h == 1U && pad_w == 1U &&
         maxpool3x3s2p1_vector(input, output, batch, channels, input_h,
@@ -348,7 +549,6 @@ __kernel__ void rvnpu_maxpool2d_nchw_fp32(
 
     const uint32_t window_elements = kernel_h * kernel_w;
     const uint32_t padded_window = (window_elements + 15U) & ~15U;
-    // 一块输出最多覆盖这么宽的输入：其中每行还要多读最多 63 字节的对齐前缀。
     uint32_t widest = (kOutputTile - 1U) * stride_w + kernel_w;
     if (widest > input_w)
         widest = input_w;
@@ -454,4 +654,4 @@ __kernel__ void rvnpu_maxpool2d_nchw_fp32(
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_maxpool2d_nchw_fp32, 4, 0, 0, 65536U, 1, 0, 0, 1);
+DAYAN_KERNEL_TASK_DESC(rvnpu_maxpool2d_nchw_fp32, 4, 0, 0, 65536U, 2, 0, 0, 1);

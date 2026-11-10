@@ -60,6 +60,8 @@ __device__ static void copy_run(const T *source, T *destination,
     if (elements == 0)
         return;
     if ((((uintptr_t)source | (uintptr_t)destination) & 63U) != 0) {
+        dayan_cache_invalidate(source, elements * (uint32_t)sizeof(T));
+        dayan_cache_invalidate(destination, elements * (uint32_t)sizeof(T));
         for (uint32_t index = 0; index < elements; ++index)
             destination[index] = source[index];
         return;
@@ -87,6 +89,7 @@ __device__ static void load_run(const float *source, uint64_t uram,
     if (elements == 0)
         return;
     if (((uintptr_t)source & 63U) != 0) {
+        dayan_cache_invalidate(source, elements * (uint32_t)sizeof(float));
         volatile float *destination = (volatile float *)(uintptr_t)uram;
         for (uint32_t index = 0; index < elements; ++index)
             destination[index] = source[index];
@@ -115,6 +118,7 @@ __device__ static void store_run(uint64_t uram, float *destination,
     if (elements == 0)
         return;
     if (((uintptr_t)destination & 63U) != 0) {
+        dayan_cache_invalidate(destination, elements * (uint32_t)sizeof(float));
         const volatile float *source = (const volatile float *)(uintptr_t)uram;
         for (uint32_t index = 0; index < elements; ++index)
             destination[index] = source[index];
@@ -245,8 +249,6 @@ __kernel__ void rvnpu_transpose_fp32(const float *input, float *output,
         return;
     }
 #if defined(__DAYAN_DEVICE__)
-    dayan_cache_invalidate(input, (uint64_t)d0*d1*(mode?d2:1)*(mode==2?d3:1)*sizeof(float));
-    dayan_cache_invalidate(output, (uint64_t)d0*d1*(mode?d2:1)*(mode==2?d3:1)*sizeof(float));
     const uint64_t uram = (uint64_t)(uintptr_t)dayan_uram_base();
     const uint64_t uram_size = dayan_uram_size();
     if (uram == 0 || uram_size < kUramBytes)
@@ -264,6 +266,8 @@ __kernel__ void rvnpu_transpose_fp32(const float *input, float *output,
             transpose_10(input, output, d0, d1, uram, tile_rows);
         } else {
             // 单行都放不进 URAM，退化为 Proc 逐元素转置。
+            dayan_cache_invalidate(input, (uint64_t)d0 * d1 * sizeof(float));
+            dayan_cache_invalidate(output, (uint64_t)d0 * d1 * sizeof(float));
             const uint64_t units = (uint64_t)d0 * d1;
             for (uint64_t unit = shard_begin(units); unit < shard_end(units);
                  ++unit) {
@@ -276,6 +280,8 @@ __kernel__ void rvnpu_transpose_fp32(const float *input, float *output,
     } else if (mode == 1) {
         const uint32_t tile = transpose_021_tile(d1, uram_size);
         if (tile == 0) {
+            dayan_cache_invalidate(input, (uint64_t)d0 * d1 * d2 * sizeof(float));
+            dayan_cache_invalidate(output, (uint64_t)d0 * d1 * d2 * sizeof(float));
             const uint64_t elements = (uint64_t)d0 * d1 * d2;
             for (uint64_t index = shard_begin(elements);
                  index < shard_end(elements); ++index) {
