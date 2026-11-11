@@ -63,7 +63,7 @@ RUNTIME_EXPORT_MAP := runtime/exports.map
 COMPAT_LIB := $(BUILD)/libnpu_runtime.a
 SERVER_BIN := $(BUILD)/dayan_server
 
-.PHONY: all check clean cmodel-smoke cmodel-smoke-bin \
+.PHONY: all check clean dayan_emu-smoke dayan_emu-smoke-bin \
 	consecutive-launch-test-bin layer-check runtime-export-check
 
 all: $(HAL_LIB) $(SERVICE_LIB) $(RUNTIME_STATIC) $(RUNTIME_SHARED) \
@@ -208,7 +208,7 @@ check: all layer-check runtime-export-check $(BUILD)/tests/hal_test \
 	$(BUILD)/tests/profile_parallel_test
 	$(BUILD)/tests/inprocess_test
 
-$(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
+$(BUILD)/tests/dayan_emu_kernel.o: runtime/tests/dayan_emu_kernel.c
 	@mkdir -p $(dir $@)
 	$(CLANG) --target=riscv64-unknown-elf \
 		-march=rv64imaf_zicsr_zifencei -mabi=lp64 -mcmodel=medany \
@@ -218,7 +218,7 @@ $(BUILD)/tests/cmodel_kernel.o: runtime/tests/cmodel_kernel.c
 		-Xclang -target-feature -Xclang +txlsu \
 		-I$(ROOT)/device/include/api -c $< -o $@
 
-$(BUILD)/tests/cmodel_smoke: runtime/tests/cmodel_smoke.c \
+$(BUILD)/tests/dayan_emu_smoke: runtime/tests/dayan_emu_smoke.c \
 		$(PROTOCOL_OBJECT) $(HAL_IO_OBJECTS) $(HAL_CONTROL_OBJECTS) \
 		$(HAL_DATA_OBJECTS) \
 		$(SERVICE_OBJECTS) $(SERVER_OBJECTS) $(RUNTIME_OBJECTS)
@@ -230,14 +230,14 @@ $(BUILD)/tests/consecutive_launches: runtime/tests/consecutive_launches.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $^ -o $@
 
-cmodel-smoke-bin: all $(BUILD)/tests/cmodel_kernel.o \
-	$(BUILD)/tests/cmodel_smoke $(BUILD)/tests/consecutive_launches
+dayan_emu-smoke-bin: all $(BUILD)/tests/dayan_emu_kernel.o \
+	$(BUILD)/tests/dayan_emu_smoke $(BUILD)/tests/consecutive_launches
 
-consecutive-launch-test-bin: all $(BUILD)/tests/cmodel_kernel.o \
+consecutive-launch-test-bin: all $(BUILD)/tests/dayan_emu_kernel.o \
 	$(BUILD)/tests/consecutive_launches
 
-cmodel-smoke: cmodel-smoke-bin
-	sh ./run_cmodel_smoke.sh
+dayan_emu-smoke: dayan_emu-smoke-bin
+	sh ./run_dayan_emu_smoke.sh
 
 clean:
 	rm -rf $(BUILD)

@@ -903,7 +903,7 @@ __host__ static void usage(const char *program)
                 program);
     std::printf("  --cores 4  one sweep on each Core of a four-Core Cluster\n");
     std::printf("  --work N   body instructions added by each long run "
-                "(default 16384; try 1024 on cmodel)\n");
+                "(default 16384; try 1024 on dayan_emu)\n");
     std::printf("SWEEP (default: summary):\n");
     std::printf("  summary  headline of every result below\n");
     std::printf("  threads  add, 1..64 tasks: does the task grid fill it?\n");

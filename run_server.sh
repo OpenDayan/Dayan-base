@@ -48,7 +48,7 @@ usage()
 usage: $0 [dayan_server options]
 
 Start dayan_server after an external backend exposes its XDMA-compatible
-device files.  The backend may be cmodel, npu-cluster-sim, or hardware.
+device files.  The backend may be dayan-emu, npu-cluster-sim, or hardware.
 
 Environment:
   NPU_XDMA_PROFILE           simulator or fpga (default: simulator)

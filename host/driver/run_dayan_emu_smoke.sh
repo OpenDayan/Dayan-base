@@ -19,19 +19,19 @@ set -eu
 
 runtime_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH='' cd -- "$runtime_dir/../.." && pwd)
-cmodel_dir=${RVTNG_CMODEL_DIR:-}
-if [ -z "$cmodel_dir" ] && [ -d "$repo_dir/../dayan-emu" ]; then
-    cmodel_dir=$(CDPATH='' cd -- "$repo_dir/../dayan-emu" && pwd)
+emu_dir=${DAYAN_EMU_DIR:-}
+if [ -z "$emu_dir" ] && [ -d "$repo_dir/../dayan-emu" ]; then
+    emu_dir=$(CDPATH='' cd -- "$repo_dir/../dayan-emu" && pwd)
 fi
-if [ -z "$cmodel_dir" ]; then
-    echo "RVTNG_CMODEL_DIR must identify the simulator" >&2
+if [ -z "$emu_dir" ]; then
+    echo "DAYAN_EMU_DIR must identify the simulator" >&2
     echo "set it explicitly, or place dayan-emu next to this repository" >&2
     exit 2
 fi
 qemu=${QEMU_DL_BIN:-"$repo_dir/deps/QEMU/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
-cmodel_harts=${NPU_CMODEL_HARTS:-4}
-log_file=${NPU_CMODEL_LOG:-"$repo_dir/build/host/driver/cmodel.log"}
+dayan_emu_harts=${DAYAN_EMU_HARTS:-4}
+log_file=${DAYAN_EMU_LOG:-"$repo_dir/build/host/driver/dayan_emu.log"}
 emulator_pid=
 
 cleanup() {
@@ -50,21 +50,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if pgrep -f "$cmodel_dir/bin/rvt_emulator" >/dev/null 2>&1 || \
+if pgrep -f "$emu_dir/bin/rvt_emulator" >/dev/null 2>&1 || \
    pgrep -f "$qemu.*rvtng-v0" >/dev/null 2>&1; then
-    echo "an RVTNG cmodel instance is already running" >&2
+    echo "a dayan_emu instance is already running" >&2
     exit 1
 fi
-case "$cmodel_harts" in
+case "$dayan_emu_harts" in
     1|2|3|4) ;;
-    *) echo "NPU_CMODEL_HARTS must be between 1 and 4" >&2; exit 1 ;;
+    *) echo "DAYAN_EMU_HARTS must be between 1 and 4" >&2; exit 1 ;;
 esac
 cleanup
 mkdir -p "$repo_dir/build/host/driver" "$mount_dir"
 make -C "$repo_dir" -j4 all
-make -C "$runtime_dir" cmodel-smoke-bin
+make -C "$runtime_dir" dayan_emu-smoke-bin
 
-"$cmodel_dir/bin/rvt_emulator" -c "$cmodel_harts" \
+"$emu_dir/bin/rvt_emulator" -c "$dayan_emu_harts" \
     "$qemu" -monitor null -bios "$repo_dir/device/bl0/bootrom.elf" \
     -machine rvtng-v0 -nographic -serial none -m 4096 >"$log_file" 2>&1 &
 emulator_pid=$!
@@ -79,20 +79,20 @@ while [ "$attempt" -lt 300 ]; do
         break
     fi
     if ! kill -0 "$emulator_pid" 2>/dev/null; then
-        echo "cmodel exited during startup; see $log_file" >&2
+        echo "dayan_emu exited during startup; see $log_file" >&2
         exit 1
     fi
     attempt=$((attempt + 1))
     sleep 0.1
 done
 if [ "$ready" -ne 1 ]; then
-    echo "cmodel device did not appear; see $log_file" >&2
+    echo "dayan_emu device did not appear; see $log_file" >&2
     exit 1
 fi
 
 NPU_DEVICE_PREFIX="$mount_dir" \
-    "$repo_dir/build/host/driver/tests/cmodel_smoke" \
+    "$repo_dir/build/host/driver/tests/dayan_emu_smoke" \
     "$repo_dir/build/device/npu-os.elf" \
     "$repo_dir/build/device/npu-os-api.elf" \
-    "$repo_dir/build/host/driver/tests/cmodel_kernel.o" \
-    "$cmodel_harts"
+    "$repo_dir/build/host/driver/tests/dayan_emu_kernel.o" \
+    "$dayan_emu_harts"

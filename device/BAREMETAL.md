@@ -184,18 +184,18 @@ DONE is still handled by the simulator's timeout.
 
 ```sh
 make -C device check
-make -C device check-baremetal-cmodel
+make -C device check-baremetal-dayan_emu
 ```
 
 The first command checks archive membership, linker retention, C/C++ descriptor
 ABI, allocator boundaries, RPC services and the existing firmware tests. The
-second uses `~/rvtng-cmodel` and its QEMU build, with no Host server, and sets all
+second uses `~/dayan-emu` and its QEMU build, with no Host server, and sets all
 four PCs directly to `0x80000000`. It checks both successful execution and an
-illegal-instruction fault followed by another test. Override `RVTNG_CMODEL_DIR`
+illegal-instruction fault followed by another test. Override `DAYAN_EMU_DIR`
 or `QEMU_DL_BIN` to select compatible simulator builds. Its temporary processes,
 mount and IPC resources are removed after each case.
 
-The dedicated cmodel check image links a semihosting override of `platform_print`.
+The dedicated dayan_emu check image links a semihosting override of `platform_print`.
 The default archive hook, `baremetal-smoke` and normal `device_tests` use the
-DRAM circular buffer described above. Cmodel verifies functional behavior,
+DRAM circular buffer described above. DayanEmu verifies functional behavior,
 not RTL timing.

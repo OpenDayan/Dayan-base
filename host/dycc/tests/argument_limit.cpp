@@ -69,7 +69,7 @@ __kernel__ void argument_limit(
 }
 DAYAN_KERNEL_DESC(argument_limit, 0, 0, 0, 0, 0, 0, 0);
 
-#if !defined(__DAYAN_DEVICE__) && defined(TEST_CMODEL)
+#if !defined(__DAYAN_DEVICE__) && defined(TEST_DAYAN_EMU)
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

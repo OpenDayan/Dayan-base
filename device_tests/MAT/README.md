@@ -6,9 +6,9 @@
 
 ## 正向回归与模型限制
 
-当前 QEMU+cmodel 的正向回归集合为除 `mat_mm_fp32_shape_test` 外的 27 项。
+当前 QEMU+dayan_emu 的正向回归集合为除 `mat_mm_fp32_shape_test` 外的 27 项。
 `mat_mm_fp32_shape_test` 保留 FP32 容器 / TF32 pair（0x8410）的正向语义，
-但当前 cmodel 未实现 TF32 operand 转换，运行会触发 tensor interrupt。
+但当前 dayan_emu 未实现 TF32 operand 转换，运行会触发 tensor interrupt。
 这属于模型能力阻塞，不是成功的异常测试；不要吞掉错误、修改通过标准或改成其他 dtype。
 模型支持补齐后，应将它加入正向通过集合。
 
@@ -44,7 +44,7 @@
 ```sh
 make -C dayan-base/device_tests MAT/mat_conv2d_test
 cd sim
-python3 tools/qemu_rvtng_cmodel_runner.py ../dayan-base/device_tests/MAT/mat_conv2d_test
+python3 tools/qemu_rvtng_dayan_emu_runner.py ../dayan-base/device_tests/MAT/mat_conv2d_test
 ```
 
 从 `release/` 构建全部并运行当前可支持的正向集合，任一失败立即退出：
@@ -56,10 +56,10 @@ for manifest in dayan-base/device_tests/MAT/*/meta.json; do
     name=${test_dir##*/}
     make -C dayan-base/device_tests "MAT/$name"
     if [ "$name" = mat_mm_fp32_shape_test ]; then
-        echo "BLOCKED: $name requires TF32 support in cmodel"
+        echo "BLOCKED: $name requires TF32 support in dayan_emu"
         continue
     fi
-    (cd sim && python3 tools/qemu_rvtng_cmodel_runner.py "../$test_dir")
+    (cd sim && python3 tools/qemu_rvtng_dayan_emu_runner.py "../$test_dir")
 done
 ```
 

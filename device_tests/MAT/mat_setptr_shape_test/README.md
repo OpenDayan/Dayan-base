@@ -15,5 +15,5 @@ S8 不消费 scale 数据，MM 结果仅作解码/调度哨兵，不声明 MX sc
 
 ```sh
 make -C dayan-base/device_tests MAT/mat_setptr_shape_test
-cd sim && python3 tools/qemu_rvtng_cmodel_runner.py ../dayan-base/device_tests/MAT/mat_setptr_shape_test
+cd sim && python3 tools/qemu_rvtng_dayan_emu_runner.py ../dayan-base/device_tests/MAT/mat_setptr_shape_test
 ```

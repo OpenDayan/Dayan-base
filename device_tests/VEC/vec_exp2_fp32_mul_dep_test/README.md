@@ -39,7 +39,7 @@
 
 ```sh
 make -C dayan-base/device_tests VEC/vec_exp2_fp32_mul_dep_test
-cd dayan-base/sim && python3 tools/qemu_rvtng_cmodel_runner.py \
+cd dayan-base/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_exp2_fp32_mul_dep_test
 ```
 

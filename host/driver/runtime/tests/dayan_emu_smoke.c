@@ -52,7 +52,7 @@ struct lock_test_results {
 };
 
 _Static_assert(sizeof(struct lock_test_results) == 128,
-               "locked-task cmodel result ABI");
+               "locked-task dayan_emu result ABI");
 
 struct run_state {
     dayan_server_t *server;
@@ -978,7 +978,7 @@ int main(int argc, char **argv)
     if (status < 0)
         return 1;
     assert(snprintf(socket_path, sizeof(socket_path),
-                    "/tmp/dayan-cmodel-%ld.sock", (long)getpid()) > 0);
+                    "/tmp/dayan-dayan_emu-%ld.sock", (long)getpid()) > 0);
     dayan_server_options_init(&server_options);
     if (npu_hal_xilinx_dma_options_init(
             &xdma_options, NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR) < 0)
@@ -991,16 +991,16 @@ int main(int argc, char **argv)
     server_options.enabled_core_mask = (UINT32_C(1) << core_count) - 1U;
     /*
      * MMU off by default, so the smoke keeps testing the identity-mapped path
-     * that the FixMap reset state gives.  NPU_CMODEL_MMU=1 runs the same
+     * that the FixMap reset state gives.  NPU_DAYAN_EMU_MMU=1 runs the same
      * sequence with translation enabled, which is the only end-to-end check
      * that Device addresses survive being routed through the page tables.
      */
     {
-        const char *mmu = getenv("NPU_CMODEL_MMU");
+        const char *mmu = getenv("NPU_DAYAN_EMU_MMU");
 
         if (mmu && *mmu == '1') {
             server_options.service.enable_mmu = 1;
-            printf("cmodel smoke: ClusterMMU translation enabled\n");
+            printf("dayan_emu smoke: ClusterMMU translation enabled\n");
         }
     }
     xdma_options.device_directory = device_prefix;
@@ -1250,7 +1250,7 @@ int main(int argc, char **argv)
         status = -EIO;
     }
     if (status < 0)
-        fprintf(stderr, "cmodel runtime test failed at %s: %d\n", stage,
+        fprintf(stderr, "dayan_emu runtime test failed at %s: %d\n", stage,
                 status);
     if (kernel)
         (void)npu_kernel_release(kernel);
@@ -1290,7 +1290,7 @@ int main(int argc, char **argv)
     pthread_mutex_destroy(&exits.interrupt_lock);
     if (status < 0 || run.status < 0)
         return 1;
-    puts("cmodel smoke: BL1, logical grid, locked tasks and consecutive "
+    puts("dayan_emu smoke: BL1, logical grid, locked tasks and consecutive "
          "asynchronous launches passed");
     return 0;
 }

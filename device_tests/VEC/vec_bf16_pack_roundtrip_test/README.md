@@ -14,5 +14,5 @@ host 填数 / oracle 原样移植到设备侧（float 按位比较）；CONTROL 
 
 ```sh
 make -C dayan-base/device_tests VEC/vec_bf16_pack_roundtrip_test
-cd dayan-base/sim && python3 tools/qemu_rvtng_cmodel_runner.py ../dayan-base/device_tests/VEC/vec_bf16_pack_roundtrip_test
+cd dayan-base/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py ../dayan-base/device_tests/VEC/vec_bf16_pack_roundtrip_test
 ```

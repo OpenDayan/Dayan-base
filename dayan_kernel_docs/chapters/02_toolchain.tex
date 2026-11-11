@@ -137,7 +137,7 @@ make check QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64
 
 \code{make check} 运行固件静态检查、Host Runtime/dycc 测试，并在 QEMU \code{virt}
 上执行 Device 基础组件回归。XDMA、mailbox 和完整 kernel launch 由
-\code{host/driver/run_cmodel_smoke.sh} 验证。
+\code{host/driver/run_dayan_emu_smoke.sh} 验证。
 
 仓库的 \code{.vscode/settings.json} 为 IntelliSense 提供空的
 \code{__host__}/\code{__device__}/\code{__kernel__} 宏和两侧 include path；这些

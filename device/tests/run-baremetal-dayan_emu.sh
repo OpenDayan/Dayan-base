@@ -20,9 +20,17 @@ set -euo pipefail
 device_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo_root=$(CDPATH= cd -- "$device_root/.." && pwd)
 build=${BUILD_DIR:-"$repo_root/build/device"}
-cmodel_dir=${RVTNG_CMODEL_DIR:-"$HOME/rvtng-cmodel"}
-qemu=${QEMU_DL_BIN:-"$cmodel_dir/deps/QEMU/build/dl-riscv64"}
-emulator="$cmodel_dir/bin/rvt_emulator"
+emu_dir=${DAYAN_EMU_DIR:-}
+if [ -z "$emu_dir" ] && [ -d "$repo_root/../dayan-emu" ]; then
+    emu_dir=$(CDPATH='' cd -- "$repo_root/../dayan-emu" && pwd)
+fi
+if [ -z "$emu_dir" ]; then
+    echo "DAYAN_EMU_DIR must identify the simulator" >&2
+    echo "set it explicitly, or place dayan-emu next to this repository" >&2
+    exit 2
+fi
+qemu=${QEMU_DL_BIN:-"$emu_dir/deps/QEMU/build/dl-riscv64"}
+emulator="$emu_dir/bin/rvt_emulator"
 mount_dir=/tmp/virtual_npu
 emulator_pid=
 resources=(/tmp/card0_rvt_inst_req /tmp/card0_rvt_inst_rsp /tmp/card0_rvt_msg
@@ -54,18 +62,18 @@ trap 'exit 143' TERM
 [[ -x "$emulator" && -x "$qemu" ]]
 if pgrep -x rvt_emulator >/dev/null || pgrep -x dl-riscv64 >/dev/null ||
    pgrep -x TestCluster >/dev/null || findmnt -rn -M "$mount_dir" >/dev/null; then
-    echo 'baremetal-cmodel: simulator resources are already in use' >&2
+    echo 'baremetal-dayan_emu: simulator resources are already in use' >&2
     exit 1
 fi
 for path in "${resources[@]}"; do
     if [[ -e "$path" || -S "$path" ]]; then
-        echo "baremetal-cmodel: existing simulator resource: $path" >&2
+        echo "baremetal-dayan_emu: existing simulator resource: $path" >&2
         exit 1
     fi
 done
 mkdir -p "$mount_dir"
 
-for test in baremetal_cmodel baremetal_failure; do
+for test in baremetal_dayan_emu baremetal_failure; do
     elf="$build/tests/$test.elf"
     log="$build/tests/$test.log"
     [[ -f "$elf" ]]
@@ -92,10 +100,10 @@ for test in baremetal_cmodel baremetal_failure; do
     done
     if [[ $completed != 1 ]]; then
         tail -n 60 "$log" >&2
-        echo "baremetal-cmodel: FAIL $test (no completion)" >&2
+        echo "baremetal-dayan_emu: FAIL $test (no completion)" >&2
         exit 1
     fi
-    if [[ $test == baremetal_cmodel ]]; then
+    if [[ $test == baremetal_dayan_emu ]]; then
         grep -Fq '[test] first: PASS (0)' "$log"
         grep -Fq '[test] second: PASS (0)' "$log"
         grep -Fq '[test] suite: PASS (0)' "$log"
@@ -106,5 +114,5 @@ for test in baremetal_cmodel baremetal_failure; do
         grep -Fq '[test] suite: FAIL (-5)' "$log"
     fi
     cleanup
-    echo "baremetal-cmodel: PASS $test"
+    echo "baremetal-dayan_emu: PASS $test"
 done

@@ -17,6 +17,6 @@ host 填数/oracle 移植到设备侧；CONTROL 约定 (0,0,N,N,N)；发指令�
 
 ```sh
 make -C dayan-base/device_tests VEC/vec_pred_shuf_test
-cd dayan-base/sim && python3 tools/qemu_rvtng_cmodel_runner.py \
+cd dayan-base/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_pred_shuf_test
 ```

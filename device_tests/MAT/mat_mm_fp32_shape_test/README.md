@@ -10,7 +10,7 @@ FP32 存储 / TF32 pair（dtype=0x8410）单 MM：M=4/N=12/K=17，K 尾部 + 有
 ## 当前模型限制
 
 保留 TF32 pair 正向语义，不降级为 S8/BF16，也不把 tensor interrupt 视作成功。
-当前 `rvtng-cmodel/emu/mat.cpp` 的 operand decoder 未实现 TF32，运行会触发
+当前 `dayan-emu/emu/mat.cpp` 的 operand decoder 未实现 TF32，运行会触发
 张量中断并保持输出哨兵。本项属于模型能力阻塞，不能计入已通过的正向回归。
 实现 TF32 支持后，应保持本测试并要求数值及保护区全部通过。
 输入均为 TF32 精确可表示的小值，乘积和也可在 FP32 中精确表示；仅由 meta 定义 ref/dut 按位比较。

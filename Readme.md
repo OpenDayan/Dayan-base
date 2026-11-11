@@ -85,7 +85,7 @@ make check QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64
 ```
 
 这些测试覆盖标准 RV64IMAF 上可独立执行的 Device 基础组件；Dayan 自定义执行单元和
-Host↔Device 完整链路仍由 `host/driver/run_cmodel_smoke.sh` 在 RVTNG cmodel 中验证。
+Host↔Device 完整链路仍由 `host/driver/run_dayan_emu_smoke.sh` 在 dayan_emu 中验证。
 
 默认目标为 `rv64imaf_zicsr_zifencei` / `lp64`，使用标准 RV64 `lp64` 调用约定，
 同时允许编译器在函数内部使用 F 指令。`zicsr` 和 `zifencei` 是裸机启动所需的系统
@@ -197,7 +197,7 @@ make -C demo run
 ```
 
 模拟器或 XDMA 硬件已经单独启动时，可用现有脚本启动 Runtime server。它只等待 XDMA 兼容设备文件，
-不关心设备来自 cmodel、`npu-cluster-sim` 的 RTL 模拟器还是硬件：
+不关心设备来自 dayan_emu、`npu-cluster-sim` 的 RTL 模拟器还是硬件：
 
 ```sh
 NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
@@ -220,15 +220,15 @@ QDMA IRQ 模式需要本地驱动扩展的 `/dev/qdma01000-user_irq0`；若没�
 无需创建 XDMA 名称的符号链接。完整配置与限制见
 [`Xilinx DMA 说明`](host/driver/hal/backend/xilinx_dma/README.md)。
 
-需要由一个脚本同时启动 cmodel 与 Runtime server 时运行：
+需要由一个脚本同时启动 dayan_emu 与 Runtime server 时运行：
 
 ```sh
-./run_cmodel_server.sh
+./run_dayan_emu_server.sh
 ```
 
-脚本默认使用 `~/rvtng-cmodel` 及其 `deps/QEMU/build/dl-riscv64`，保持 MMU 和
-Shared Resource clear 协议匹配；可用 `RVTNG_CMODEL_DIR` 与 `QEMU_DL_BIN` 覆盖。
-脚本默认给 QEMU DRAM 和 HAL Normal memory 配置 4096 MiB，可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者。BL1 的 `RAM_SIZE` 仍只描述固件链接区域。
+脚本默认使用同级的 `dayan-emu` 及其 `deps/QEMU/build/dl-riscv64`，保持 MMU 和
+Shared Resource clear 协议匹配；可用 `DAYAN_EMU_DIR` 与 `QEMU_DL_BIN` 覆盖。
+脚本默认给 QEMU DRAM 和 HAL Normal memory 配置 4096 MiB，可用 `DAYAN_EMU_MEMORY_MIB` 同时覆盖两者。BL1 的 `RAM_SIZE` 仍只描述固件链接区域。
 
 脚本就绪后，在另一个终端运行：
 
@@ -522,5 +522,5 @@ Task 的 proc slot、Atomic Cache、URAM 和四类 TCSR 声明求和后再调度
 Runtime 与 Server 使用 Unix socket 控制协议。H2D/D2H payload 不进入 socket：Runtime
 先在 data socket 申请受范围和方向约束的 token，再用 HELLO 时经 `SCM_RIGHTS` 导入的
 HAL data-plane FD 直接搬运，最后回报同一 token；Server 在完成回报前不会回收对应
-allocation。详细架构、生命周期、API 和 cmodel 命令见
+allocation。详细架构、生命周期、API 和 dayan_emu 命令见
 [`host/driver/README.md`](host/driver/README.md)。

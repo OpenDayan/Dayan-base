@@ -17,6 +17,6 @@ DMA 语义与样例一致。
 
 ```sh
 make -C dayan-base/device_tests MAT/mat_mm_mma_k64_test
-cd sim && python3 tools/qemu_rvtng_cmodel_runner.py \
+cd sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
   ../dayan-base/device_tests/MAT/mat_mm_mma_k64_test
 ```

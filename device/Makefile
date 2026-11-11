@@ -122,7 +122,7 @@ $(BUILD)/sche/sche.o $(BUILD)/sche/dapi.o $(BUILD)/platform/platform.o \
 $(BUILD)/platform/tensor_interrupt.o: \
     CFLAGS += $(RVT_ISA_FLAGS)
 
-.PHONY: all clean check FORCE bl0 libnpu-os.a baremetal-smoke check-baremetal-cmodel
+.PHONY: all clean check FORCE bl0 libnpu-os.a baremetal-smoke check-baremetal-dayan_emu
 
 all: $(ELF) $(LIB) $(API_ELF) $(BIN) $(DUMP) bl0 device-tests
 
@@ -137,19 +137,19 @@ $(LIB): $(OBJECTS) $(CONFIG_STAMP)
 
 baremetal-smoke: device-test-smoke_test
 
-$(BUILD)/tests/baremetal_cmodel.elf: $(DEVICE_TEST_BUILD)/smoke_test/main.c.o \
-        $(BUILD)/tests/baremetal_cmodel.o $(LIB) linker.ld
+$(BUILD)/tests/baremetal_dayan_emu.elf: $(DEVICE_TEST_BUILD)/smoke_test/main.c.o \
+        $(BUILD)/tests/baremetal_dayan_emu.o $(LIB) linker.ld
 	$(CLANG) $(LDFLAGS) -Wl,-Map,$@.map,--gc-sections \
 		$(filter %.o,$^) $(LIB) -o $@
 
 $(BUILD)/tests/baremetal_failure.elf: $(BUILD)/tests/baremetal_failure.o \
-        $(BUILD)/tests/baremetal_cmodel.o $(LIB) linker.ld
+        $(BUILD)/tests/baremetal_dayan_emu.o $(LIB) linker.ld
 	$(CLANG) $(LDFLAGS) -Wl,-Map,$@.map,--gc-sections \
 		$(filter %.o,$^) $(LIB) -o $@
 
-check-baremetal-cmodel: $(BUILD)/tests/baremetal_cmodel.elf \
+check-baremetal-dayan_emu: $(BUILD)/tests/baremetal_dayan_emu.elf \
                        $(BUILD)/tests/baremetal_failure.elf bl0
-	BUILD_DIR="$(abspath $(BUILD))" bash ./tests/run-baremetal-cmodel.sh
+	BUILD_DIR="$(abspath $(BUILD))" bash ./tests/run-baremetal-dayan_emu.sh
 
 bl0:
 	$(MAKE) -C bl0 all

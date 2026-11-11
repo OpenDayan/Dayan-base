@@ -44,7 +44,7 @@ v2u  vrs1=0 sel=0      -> OUT_URAM        (bank0 age0 写出)
 
 ```sh
 flock /tmp/dayan-build.lock make -C release/dayan-base/device_tests VEC/vec_shuffle_xor_add_dep_test
-cd release/sim && python3 tools/qemu_rvtng_cmodel_runner.py \
+cd release/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_shuffle_xor_add_dep_test
 ```
 

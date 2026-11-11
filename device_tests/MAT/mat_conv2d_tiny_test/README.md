@@ -36,7 +36,7 @@ S8/S8（DataType=0x8208），MAT group 0；维度寄存器写实际值减 1。
 ```sh
 make -C dayan-base/device_tests MAT/mat_conv2d_tiny_test
 cd sim
-python3 tools/qemu_rvtng_cmodel_runner.py ../dayan-base/device_tests/MAT/mat_conv2d_tiny_test
+python3 tools/qemu_rvtng_dayan_emu_runner.py ../dayan-base/device_tests/MAT/mat_conv2d_tiny_test
 ```
 
 参考模型通过不代表 RTL 已通过；非零 padding、尾通道和非常量寻址错误应保留暴露，不能通过弱化数据或对拍范围绕过。
