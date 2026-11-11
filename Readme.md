@@ -226,8 +226,8 @@ QDMA IRQ 模式需要本地驱动扩展的 `/dev/qdma01000-user_irq0`；若没�
 ./run_cmodel_server.sh
 ```
 
-脚本默认使用 `~/rvtng-cmodel` 及其 `deps/npu-qemu/build/dl-riscv64`，保持 MMU 和
-Shared Resource clear 协议匹配；可用 `RVTNG_CMODEL_DIR` 与 `RVTNG_QEMU` 覆盖。
+脚本默认使用 `~/rvtng-cmodel` 及其 `deps/QEMU/build/dl-riscv64`，保持 MMU 和
+Shared Resource clear 协议匹配；可用 `RVTNG_CMODEL_DIR` 与 `QEMU_DL_BIN` 覆盖。
 脚本默认给 QEMU DRAM 和 HAL Normal memory 配置 4096 MiB，可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者。BL1 的 `RAM_SIZE` 仍只描述固件链接区域。
 
 脚本就绪后，在另一个终端运行：

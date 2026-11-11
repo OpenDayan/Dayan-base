@@ -28,8 +28,8 @@ qemu_timeout=${QEMU_TIMEOUT:-20}
 if [[ -z "$qemu" ]]; then
     if command -v qemu-system-riscv64 >/dev/null 2>&1; then
         qemu=$(command -v qemu-system-riscv64)
-    elif [[ -x "$repo_root/../npu-qemu/build/qemu-system-riscv64" ]]; then
-        qemu="$repo_root/../npu-qemu/build/qemu-system-riscv64"
+    elif [[ -x "$repo_root/../QEMU/build/qemu-system-riscv64" ]]; then
+        qemu="$repo_root/../QEMU/build/qemu-system-riscv64"
     else
         echo "qemu-tests: error: qemu-system-riscv64 was not found" >&2
         echo "set QEMU_SYSTEM_RISCV64=/path/to/qemu-system-riscv64" >&2

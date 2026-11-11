@@ -21,7 +21,7 @@ device_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo_root=$(CDPATH= cd -- "$device_root/.." && pwd)
 build=${BUILD_DIR:-"$repo_root/build/device"}
 cmodel_dir=${RVTNG_CMODEL_DIR:-"$HOME/rvtng-cmodel"}
-qemu=${RVTNG_QEMU:-"$cmodel_dir/deps/npu-qemu/build/dl-riscv64"}
+qemu=${QEMU_DL_BIN:-"$cmodel_dir/deps/QEMU/build/dl-riscv64"}
 emulator="$cmodel_dir/bin/rvt_emulator"
 mount_dir=/tmp/virtual_npu
 emulator_pid=

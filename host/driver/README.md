@@ -476,7 +476,7 @@ build/host/driver/dayan_server \
 make -C host/driver check
 ```
 
-完整链路默认使用 `~/rvtng-cmodel`、`~/npu-qemu/build/dl-riscv64`、4 个 Core：
+完整链路默认使用 `~/rvtng-cmodel`、`~/QEMU/build/dl-riscv64`、4 个 Core：
 
 ```sh
 make -C host/driver cmodel-smoke
@@ -507,6 +507,6 @@ Server 还会记录 Runtime control/data 连接的建立与断开，以及停止
 ./run_cmodel_server.sh
 ```
 
-默认 QEMU DRAM 和 HAL Normal memory 均为 4096 MiB。可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者；BL1 的 `RAM_SIZE` 仍只描述固件链接区域。还可用 `RVTNG_CMODEL_DIR`、`RVTNG_QEMU`、`NPU_DEVICE_PREFIX` 和 `NPU_CMODEL_HARTS=1..4` 覆盖其余配置。4-core smoke 同时验证 BL0/BL1 启动、API ELF 动态
+默认 QEMU DRAM 和 HAL Normal memory 均为 4096 MiB。可用 `NPU_CMODEL_MEMORY_MIB` 同时覆盖两者；BL1 的 `RAM_SIZE` 仍只描述固件链接区域。还可用 `RVTNG_CMODEL_DIR`、`QEMU_DL_BIN`、`NPU_DEVICE_PREFIX` 和 `NPU_CMODEL_HARTS=1..4` 覆盖其余配置。4-core smoke 同时验证 BL0/BL1 启动、API ELF 动态
 重定位、令牌化 H2D/D2H 直传、`kSingleCore` 网格、`kFourCore` Cluster 网格，以及
 `kFourCore` 对 `task_dim.x == 4` 的约束和性能采样满缓冲区、尾批次的端到端传输。

@@ -192,7 +192,7 @@ ABI, allocator boundaries, RPC services and the existing firmware tests. The
 second uses `~/rvtng-cmodel` and its QEMU build, with no Host server, and sets all
 four PCs directly to `0x80000000`. It checks both successful execution and an
 illegal-instruction fault followed by another test. Override `RVTNG_CMODEL_DIR`
-or `RVTNG_QEMU` to select compatible simulator builds. Its temporary processes,
+or `QEMU_DL_BIN` to select compatible simulator builds. Its temporary processes,
 mount and IPC resources are removed after each case.
 
 The dedicated cmodel check image links a semihosting override of `platform_print`.

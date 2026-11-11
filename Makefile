@@ -24,10 +24,10 @@ LIBDIR      ?= $(PREFIX)/lib
 DATADIR     ?= $(PREFIX)/share
 DAYAN_SDKDIR ?= $(LIBDIR)/dayan
 DAYAN_FIRMWAREDIR ?= $(DAYAN_SDKDIR)/firmware
-NPU_QEMU_DIR ?= deps/npu-qemu
-NPU_QEMU_BUILD_DIR ?= $(NPU_QEMU_DIR)/build
-NPU_QEMU_BIN ?= $(NPU_QEMU_BUILD_DIR)/qemu-system-riscv64
-NPU_QEMU_DL_BIN ?= $(NPU_QEMU_BUILD_DIR)/dl-riscv64
+QEMU_DIR ?= deps/QEMU
+QEMU_BUILD_DIR ?= $(QEMU_DIR)/build
+QEMU_BIN ?= $(QEMU_BUILD_DIR)/qemu-system-riscv64
+QEMU_DL_BIN ?= $(QEMU_BUILD_DIR)/dl-riscv64
 
 .PHONY: all clean check install qemu qemu-deps device device-check device-bl0 device-tests docs docs-check \
 	host-driver host-driver-check dycc dycc-check dyperf dyperf-check \
@@ -35,22 +35,22 @@ NPU_QEMU_DL_BIN ?= $(NPU_QEMU_BUILD_DIR)/dl-riscv64
 
 all: qemu device host-driver dycc dyperf demo
 
-qemu: $(NPU_QEMU_BIN) $(NPU_QEMU_DL_BIN)
+qemu: $(QEMU_BIN) $(QEMU_DL_BIN)
 
 qemu-deps:
-	@if [ ! -f "$(NPU_QEMU_DIR)/configure" ]; then \
-		git submodule update --init $(NPU_QEMU_DIR); \
+	@if [ ! -f "$(QEMU_DIR)/configure" ]; then \
+		git submodule update --init $(QEMU_DIR); \
 	fi
 
-$(NPU_QEMU_BUILD_DIR)/Makefile: | qemu-deps
-	mkdir -p $(NPU_QEMU_BUILD_DIR)
-	cd $(NPU_QEMU_BUILD_DIR) && ../configure --target-list=riscv64-softmmu
+$(QEMU_BUILD_DIR)/Makefile: | qemu-deps
+	mkdir -p $(QEMU_BUILD_DIR)
+	cd $(QEMU_BUILD_DIR) && ../configure --target-list=riscv64-softmmu
 
-$(NPU_QEMU_BIN): $(NPU_QEMU_BUILD_DIR)/Makefile
-	$(MAKE) -C $(NPU_QEMU_BUILD_DIR)
+$(QEMU_BIN): $(QEMU_BUILD_DIR)/Makefile
+	$(MAKE) -C $(QEMU_BUILD_DIR)
 
-$(NPU_QEMU_DL_BIN): $(NPU_QEMU_BIN)
-	$(MAKE) -C $(NPU_QEMU_BUILD_DIR) dl-riscv64
+$(QEMU_DL_BIN): $(QEMU_BIN)
+	$(MAKE) -C $(QEMU_BUILD_DIR) dl-riscv64
 
 device:
 	$(MAKE) -C device all
@@ -62,7 +62,7 @@ device-bl0:
 	$(MAKE) -C device/bl0 all
 
 device-check: qemu
-	$(MAKE) -C device check QEMU_SYSTEM_RISCV64="$(abspath $(NPU_QEMU_BIN))"
+	$(MAKE) -C device check QEMU_SYSTEM_RISCV64="$(abspath $(QEMU_BIN))"
 
 host-driver:
 	$(MAKE) -C host/driver all

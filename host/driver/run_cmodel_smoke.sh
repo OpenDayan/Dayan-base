@@ -28,7 +28,7 @@ if [ -z "$cmodel_dir" ]; then
     echo "set it explicitly, or place dayan-emu next to this repository" >&2
     exit 2
 fi
-qemu=${RVTNG_QEMU:-"$repo_dir/deps/npu-qemu/build/dl-riscv64"}
+qemu=${QEMU_DL_BIN:-"$repo_dir/deps/QEMU/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}
 log_file=${NPU_CMODEL_LOG:-"$repo_dir/build/host/driver/cmodel.log"}

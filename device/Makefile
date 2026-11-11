@@ -21,7 +21,7 @@ OBJDUMP     ?= llvm-objdump
 NM          ?= llvm-nm
 READELF     ?= llvm-readelf
 LLVM_AR     ?= llvm-ar
-QEMU_SYSTEM_RISCV64 ?= $(ROOT)/deps/npu-qemu/build/qemu-system-riscv64
+QEMU_SYSTEM_RISCV64 ?= $(ROOT)/deps/QEMU/build/qemu-system-riscv64
 
 ROOT        := ..
 BUILD       ?= $(ROOT)/build/device

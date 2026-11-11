@@ -540,7 +540,7 @@ build/demo/matmul_bf16_4c
 
 默认使用 `~/rvtng-cmodel` 和其配套的 QEMU。先在一个终端运行仓库根目录的
 `run_cmodel_server.sh`，再从另一个终端启动 demo。
-可通过 `RVTNG_CMODEL_DIR`、`RVTNG_QEMU`、`NPU_DEVICE_PREFIX`、
+可通过 `RVTNG_CMODEL_DIR`、`QEMU_DL_BIN`、`NPU_DEVICE_PREFIX`、
 `NPU_CMODEL_HARTS` 和 `DAYAN_SERVER_SOCKET` 配置运行路径及连接。
 脚本会构建固件与 Host 工具，模拟器日志默认位于 `build/cmodel/cmodel.log`。
 它使用固定名称的 cmodel IPC 资源，仅支持一个实例；已有模拟器运行时请复用其

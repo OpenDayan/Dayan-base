@@ -22,7 +22,7 @@ cmodel_dir=${RVTNG_CMODEL_DIR:-}
 if [ -z "$cmodel_dir" ] && [ -d "$repo_dir/../dayan-emu" ]; then
     cmodel_dir=$(CDPATH='' cd -- "$repo_dir/../dayan-emu" && pwd)
 fi
-qemu=${RVTNG_QEMU:-"$cmodel_dir/deps/npu-qemu/build/dl-riscv64"}
+qemu=${QEMU_DL_BIN:-"$cmodel_dir/deps/QEMU/build/dl-riscv64"}
 mount_dir=${NPU_DEVICE_PREFIX:-/tmp/virtual_npu}
 cmodel_harts=${NPU_CMODEL_HARTS:-4}
 cmodel_memory_mib=${NPU_CMODEL_MEMORY_MIB:-4096}
