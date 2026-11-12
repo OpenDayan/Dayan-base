@@ -59,17 +59,17 @@ $(foreach test,$(DEVICE_TEST_NAMES),$(eval $(call device_test_alias,$(test))))
 
 $(DEVICE_TEST_BUILD)/%.c.o: $(ROOT)/device_tests/%.c $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
-	$(CLANG) $(CPPFLAGS) -I$(dir $<) $(CFLAGS) $(RVT_ISA_FLAGS) -MMD -MP -c $< -o $@
+	$(CLANG) $(CPPFLAGS) -I$(dir $<) $(CFLAGS) $(DAYAN_ISA_FLAGS) -MMD -MP -c $< -o $@
 
 $(DEVICE_TEST_BUILD)/%.cpp.o: $(ROOT)/device_tests/%.cpp $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
 	$(CLANGXX) $(CPPFLAGS) -I$(dir $<) $(filter-out -std=c11,$(CFLAGS)) \
-		$(RVT_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti -MMD -MP -c $< -o $@
+		$(DAYAN_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti -MMD -MP -c $< -o $@
 
 $(DEVICE_TEST_BUILD)/%.cc.o: $(ROOT)/device_tests/%.cc $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
 	$(CLANGXX) $(CPPFLAGS) -I$(dir $<) $(filter-out -std=c11,$(CFLAGS)) \
-		$(RVT_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti -MMD -MP -c $< -o $@
+		$(DAYAN_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti -MMD -MP -c $< -o $@
 
 $(DEVICE_TEST_BUILD)/%.S.o: $(ROOT)/device_tests/%.S $(CONFIG_STAMP)
 	@mkdir -p $(dir $@)

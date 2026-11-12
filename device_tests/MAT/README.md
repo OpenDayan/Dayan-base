@@ -6,9 +6,9 @@
 
 ## 正向回归与模型限制
 
-当前 QEMU+dayan_emu 的正向回归集合为除 `mat_mm_fp32_shape_test` 外的 27 项。
+当前 QEMU+Dayan-emu 的正向回归集合为除 `mat_mm_fp32_shape_test` 外的 27 项。
 `mat_mm_fp32_shape_test` 保留 FP32 容器 / TF32 pair（0x8410）的正向语义，
-但当前 dayan_emu 未实现 TF32 operand 转换，运行会触发 tensor interrupt。
+但当前 Dayan-emu 未实现 TF32 operand 转换，运行会触发 tensor interrupt。
 这属于模型能力阻塞，不是成功的异常测试；不要吞掉错误、修改通过标准或改成其他 dtype。
 模型支持补齐后，应将它加入正向通过集合。
 

@@ -1,7 +1,7 @@
 # VisualSwizzle
 
 该目录包含自 VisualSwizzle 项目引入的单文件 NPU URAM swizzle
-可视化与搜索工具。模型与 RVTNG `SwizzleAddr` 一致：使用字节地址，只改变
+可视化与搜索工具。模型与 Dayan `SwizzleAddr` 一致：使用字节地址，只改变
 `addr[14:5]`，保留 32B 字内偏移和 32 KiB 区域以上的地址位。
 
 ## 启动

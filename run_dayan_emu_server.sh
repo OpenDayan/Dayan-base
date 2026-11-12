@@ -77,15 +77,15 @@ if [ -z "$emu_dir" ]; then
     echo "set it explicitly, or place dayan-emu next to this repository" >&2
     exit 2
 fi
-if [ ! -x "$emu_dir/bin/rvt_emulator" ]; then
-    echo "dayan_emu is not executable: $emu_dir/bin/rvt_emulator" >&2
+if [ ! -x "$emu_dir/bin/dayan-emu" ]; then
+    echo "dayan_emu is not executable: $emu_dir/bin/dayan-emu" >&2
     exit 2
 fi
 if [ ! -x "$qemu" ]; then
-    echo "RVTNG QEMU is not executable: $qemu" >&2
+    echo "Dayan QEMU is not executable: $qemu" >&2
     exit 2
 fi
-if pgrep -f "$emu_dir/bin/rvt_emulator" >/dev/null 2>&1 || \
+if pgrep -f "$emu_dir/bin/dayan-emu" >/dev/null 2>&1 || \
    pgrep -f "$qemu.*rvtng-v0" >/dev/null 2>&1; then
     echo "a dayan_emu instance is already running" >&2
     exit 1
@@ -102,7 +102,7 @@ if [ ! -f "$repo_dir/device/bl0/bootrom.elf" ]; then
 fi
 cleanup_devices
 
-"$emu_dir/bin/rvt_emulator" -c "$dayan_emu_harts" \
+"$emu_dir/bin/dayan-emu" -c "$dayan_emu_harts" \
     "$qemu" -monitor null -bios "$repo_dir/device/bl0/bootrom.elf" \
     -machine rvtng-v0 -nographic -serial none -m "$dayan_emu_memory_mib" >"$dayan_emu_log" 2>&1 &
 emulator_pid=$!

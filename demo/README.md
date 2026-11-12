@@ -162,7 +162,7 @@ build/host/dyperf/dyperf --clock-hz 10000000 -o launch-trace.json -- \
 测试要求只启用一个 Cluster。四核模式按同一物理 Hart 的相邻样本计算间隔，不进行跨核时间戳相减。
 单核任务可能迁移到其他 Hart；仅当 Server core mask 只有一位时输出 device gap，否则只输出 Host 和循环统计。
 性能采集可在启动 Server 时设置 `DAYAN_RPC_DEBUG=0`，避免额外 RPC 日志；demo 不改变 Server 的 IRQ/polling 模式。
-dayan_emu 用于验证启动次数和循环结果，性能结论应使用实机或 RTL 数据。
+Dayan-emu 用于验证启动次数和循环结果，性能结论应使用实机或 RTL 数据。
 
 ## 最小 FP32 Add
 
@@ -348,7 +348,7 @@ build/demo/vec_peak                     # 默认 summary sweep
 build/demo/vec_peak threads mix         # 指定 sweep，一次 launch 内顺序执行
 build/demo/vec_peak am-1r:16:15         # 单个配置：MODE[:TASKS[:DISTANCE[:BODY]]]
 build/demo/vec_peak --cores 4 mix       # 四核：每个 Core 在自己的 VEC 上各跑一遍
-build/demo/vec_peak --work 1024 all     # dayan_emu 功能验证时缩小每次运行的规模
+build/demo/vec_peak --work 1024 all     # Dayan-emu 功能验证时缩小每次运行的规模
 ```
 
 `--help` 列出全部 sweep 和模式。sweep 包括 `summary`（默认，各结论的代表点）、
@@ -370,7 +370,7 @@ Device 部分只有一个 kernel，不创建子 Thread，使用 1 个 LSU 和 1 
 声明为 locked Task，测量时 Server 上不应同时运行其它算子。Vec 指令队列在 Proc 退出后
 仍然存在，kernel 退出前比较队列空闲项数，有指令未被 VFork 时以 `-5` 结束。
 
-周期数只在 RTL 或实机上有意义；dayan_emu 没有时序模型，长短两次的差值可能为负，此时该行
+周期数只在 RTL 或实机上有意义；Dayan-emu 没有时序模型，长短两次的差值可能为负，此时该行
 输出 `timing unusable`，PASS 只表示数据校验通过。使用 TestCluster 时按
 [`Readme_cluster.md`](../Readme_cluster.md) 的方式运行，例如：
 
@@ -536,14 +536,14 @@ build/demo/matmul_bf16_4c
 可用 `./run_dayan_emu_server.sh` 启动四核 dayan_emu Server，再在另一终端运行上述命令。
 吞吐收益需以 RTL 测量为准。
 
-## 使用 dayan_emu 运行
+## 使用 Dayan-emu 运行
 
 默认使用同级的 `dayan-emu` 和其配套的 QEMU。先在一个终端运行仓库根目录的
 `run_dayan_emu_server.sh`，再从另一个终端启动 demo。
 可通过 `DAYAN_EMU_DIR`、`QEMU_DL_BIN`、`NPU_DEVICE_PREFIX`、
 `DAYAN_EMU_HARTS` 和 `DAYAN_SERVER_SOCKET` 配置运行路径及连接。
 脚本会构建固件与 Host 工具，模拟器日志默认位于 `build/dayan_emu/dayan_emu.log`。
-它使用固定名称的 dayan_emu IPC 资源，仅支持一个实例；已有模拟器运行时请复用其
+它使用固定名称的 Dayan-emu IPC 资源，仅支持一个实例；已有模拟器运行时请复用其
 Server，不要另起脚本。
 
 单 Core matmul 可用以下两个终端运行：
@@ -635,7 +635,7 @@ LSU 与 MAT 使用一致映射，跨核复制仍直接搬运物理字节。
 
 ```sh
 make -C demo ../build/demo/matmul_fp8_4c ../build/demo/matmul_fp4_4c
-# 终端一：启动四核 dayan_emu
+# 终端一：启动四核 Dayan-emu
 DAYAN_EMU_HARTS=4 ./run_dayan_emu_server.sh
 # 终端二：运行默认尺寸并逐元素校验 CPU 参考结果
 build/demo/matmul_fp8_4c
@@ -662,7 +662,7 @@ for op in matmul_bf16_4c matmul_fp4_4c matmul_fp4_4c matmul_fp8_4c \
 done
 ```
 
-每轮应通过数值校验，FP4 的行尾 padding 也应保持完整。dayan_emu 可验证数值和
+每轮应通过数值校验，FP4 的行尾 padding 也应保持完整。Dayan-emu 可验证数值和
 执行顺序，但其 QEMU CPU 不模拟这类数据缓存残留，不能单独验证此问题。
 
 ## Gated DeltaNet: TGMT, SW + Vec TGMT, and SW

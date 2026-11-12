@@ -27,7 +27,7 @@ static const char *const uram_names[DAYAN_CLUSTER_MAX_HARTS] = {
 };
 
 /*
- * Access widths are the ones the Host driver uses and the rvtng model
+ * Access widths are the ones the Host driver uses and the Dayan model
  * accepts; the RTL has not confirmed them (see README.md):
  *   - Device and IRQ mailboxes, atomic-cache control: 64-bit.
  *   - IRQ control (STATUS, ENABLE, SET, CLR, ENABLE_SET, ENABLE_CLR), MSIP,

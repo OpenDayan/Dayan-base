@@ -78,8 +78,8 @@ CPPFLAGS := -Iinclude/api -Iinclude -Ilib/include \
             -DCONFIG_URAM_BASE=$(URAM_BASE) \
             -DCONFIG_URAM_SIZE=$(URAM_SIZE) \
             -DCONFIG_URAM_STRIDE=$(URAM_STRIDE)
-# Clang RVT builtins require the TX extensions and the compiler resource dir.
-RVT_ISA_FLAGS := -Xclang -target-feature -Xclang +txlsu \
+# Clang Dayan builtins require the TX extensions and the compiler resource dir.
+DAYAN_ISA_FLAGS := -Xclang -target-feature -Xclang +txlsu \
                  -Xclang -target-feature -Xclang +txmat \
                  -Xclang -target-feature -Xclang +txvec \
                  -Xclang -target-feature -Xclang +txbase \
@@ -120,7 +120,7 @@ API_CXX_COMPILE_TEST := $(BUILD)/tests/api_compile.cxx.o
 
 $(BUILD)/sche/sche.o $(BUILD)/sche/dapi.o $(BUILD)/platform/platform.o \
 $(BUILD)/platform/tensor_interrupt.o: \
-    CFLAGS += $(RVT_ISA_FLAGS)
+    CFLAGS += $(DAYAN_ISA_FLAGS)
 
 .PHONY: all clean check FORCE bl0 libnpu-os.a baremetal-smoke check-baremetal-dayan_emu
 
@@ -210,13 +210,13 @@ $(API_CXX_COMPILE_TEST): tests/api_compile.c $(wildcard include/api/*.h) \
 		$(CONFIG_STAMP)
 	@mkdir -p $(dir $@)
 	$(CLANGXX) -Iinclude/api $(filter-out -std=c11,$(CFLAGS)) \
-		$(RVT_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti \
+		$(DAYAN_ISA_FLAGS) -std=c++17 -fno-exceptions -fno-rtti \
 		-x c++ -c $< -o $@
 
 $(CONFIG_STAMP): FORCE
 	@mkdir -p $(dir $@)
 	@printf '%s\n' '$(CLANG)' '$(CLANGXX)' '$(CPPFLAGS)' '$(CFLAGS)' \
-		'$(LDFLAGS)' '$(RVT_ISA_FLAGS)' '$(OBJECTS)' > $@.tmp
+		'$(LDFLAGS)' '$(DAYAN_ISA_FLAGS)' '$(OBJECTS)' > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
 
 FORCE:

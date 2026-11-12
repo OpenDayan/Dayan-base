@@ -25,7 +25,7 @@
 #include <stdio.h>
 
 /*
- * Instruction emitters come from Clang's RVT builtin header. Device compiles
+ * Instruction emitters come from Clang's C routine header <rvt_intrinsics.h>. Device compiles
  * must use the Dayan clang so <rvt_intrinsics.h> and __builtin_riscv_tx_* are
  * available. Host compilations skip that header; they only need the TCSR
  * identifiers and datatype constants below.

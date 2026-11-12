@@ -240,7 +240,7 @@ python3 ./scripts/run_testcluster_operator.py \
 ```
 
 默认 case 包含约 2.42G 次 BF16 MAC，K 方向有 6 个分片，足以展开四 slice 流水。
-Verilator RTL 仿真仍明显慢于 dayan_emu；日常 bring-up 可先使用前面的单 Cluster tile
+Verilator RTL 仿真仍明显慢于 Dayan-emu；日常 bring-up 可先使用前面的单 Cluster tile
 case，完整数值验证可先运行：
 
 ```sh
@@ -719,7 +719,7 @@ Host 算子已经报告 PASS 且清理发生在其后，这只是交互命令的
 ## 10. 推荐的日常验证顺序
 
 1. `make ... check`，确认 Host、firmware ABI 和 Device ISA 静态检查通过；
-2. 用 dayan_emu 运行目标算子的完整数值 case；
+2. 用 Dayan-emu 运行目标算子的完整数值 case；
 3. 用 TestCluster runner 跑 `print_demo`，确认 BL0/BL1、RPC 和 Device printf；
 4. 用 TestCluster 跑单核或一个对齐的四核 Cluster tile；
 5. 只有需要发布回归或硬件时序证据时，才运行完整 `1024x1536x1536` case 或开启波形；

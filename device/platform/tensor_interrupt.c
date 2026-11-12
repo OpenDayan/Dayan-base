@@ -26,7 +26,7 @@
 /*
  * Interrupt TCSRs: 0 control, 1-16 first records, 17-32 recent records,
  * 33 interrupt count.  The register list places them in the Global unit at
- * 256 + n.  Earlier RTL (and the rvtng dayan_emu) decoded them as a separate
+ * 256 + n.  Earlier RTL (and the early Dayan-emu) decoded them as a separate
  * unit 5 at n; on RTL that follows the list, a unit 5 read never retires and
  * stalls the Hart inside this handler.
  */

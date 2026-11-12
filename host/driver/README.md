@@ -488,7 +488,7 @@ make -C host/driver dayan_emu-smoke
 NPU_DEVICE_PREFIX=/tmp/virtual_npu ./run_server.sh
 ```
 
-该脚本不启动具体后端，因此可连接 dayan_emu、`npu-cluster-sim` 的 RTL 模拟器或 XDMA 硬件。
+该脚本不启动具体后端，因此可连接 Dayan-emu、`npu-cluster-sim` 的 RTL 模拟器或 XDMA 硬件。
 它仍检查 `xdma<index>_h2c_0/c2h_0` 并构造旧 XDMA 参数；QDMA 或自定义 channel/name
 应使用上面的 `dayan_server` 直接命令，不要将新参数直接传给该脚本。
 脚本和 Server 会把启动进度直接写到标准错误并立即刷新，包括等待 XDMA endpoint、打开
@@ -501,7 +501,7 @@ Server 还会记录 Runtime control/data 连接的建立与断开，以及停止
 首个不可恢复的设备 I/O 错误；DMA endpoint 返回 `EIO`、`ENODEV`、`EBADF` 等
 错误时，Server 无需额外信号便会自动退出，并跳过已经不可能完成的 Device 侧清理。
 
-需要由脚本同时启动 dayan_emu 与 `dayan_server` 时运行：
+需要由脚本同时启动 Dayan-emu 与 `dayan_server` 时运行：
 
 ```sh
 ./run_dayan_emu_server.sh

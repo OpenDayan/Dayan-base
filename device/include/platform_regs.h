@@ -55,7 +55,7 @@
  * Cluster IP aperture: the fixed module layout below CONFIG_CONTROL_BASE +
  * DAYAN_CLUSTER_APERTURE_SIZE, as the NPU sees it and as a Host reaches it
  * through the Cluster slave port.  A Host that maps the aperture at some
- * base B reaches IP offset X at B + X.  Values follow the rvtng QEMU model
+ * base B reaches IP offset X at B + X.  Values follow the Dayan QEMU model
  * and the FPGA register list; the SoC integration has not confirmed them.
  *
  * DAYAN_DRAM_BASE is not part of the aperture: it is where the NPU master

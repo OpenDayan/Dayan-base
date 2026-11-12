@@ -195,7 +195,7 @@ illegal-instruction fault followed by another test. Override `DAYAN_EMU_DIR`
 or `QEMU_DL_BIN` to select compatible simulator builds. Its temporary processes,
 mount and IPC resources are removed after each case.
 
-The dedicated dayan_emu check image links a semihosting override of `platform_print`.
+The dedicated Dayan-emu check image links a semihosting override of `platform_print`.
 The default archive hook, `baremetal-smoke` and normal `device_tests` use the
-DRAM circular buffer described above. DayanEmu verifies functional behavior,
+DRAM circular buffer described above. Dayan-emu verifies functional behavior,
 not RTL timing.

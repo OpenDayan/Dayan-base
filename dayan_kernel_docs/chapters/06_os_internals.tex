@@ -193,17 +193,17 @@ root proc、parent proc 和 launch cookie，生成稳定的 \code{trap_record}�
 
 \subsection{张量中断处理}
 
-RVTNG 把 URAM 越界或未对齐、TCSR 逻辑组越界以及指令解码错误汇总为每 Hart 的
+Dayan 把 URAM 越界或未对齐、TCSR 逻辑组越界以及指令解码错误汇总为每 Hart 的
 机器外部中断。trap 入口保存通用寄存器和 machine/FCSR 状态后读取中断控制、48-bit
 累计计数与最近 16 条记录，连同当前 Thread ID、状态和 Tensor Context 写入
 472-byte \code{tensor_interrupt_record}，清除硬件 pending 后直接 \code{mret} 恢复
-原执行对象。错误指令是否继续以及采用何种降级结果由 RVTNG 定义。
+原执行对象。错误指令是否继续以及采用何种降级结果由 Dayan 定义。
 
 trap handler 唤醒 RPC send Thread；它在发送普通 transaction 前 drain 快照，并用
 \code{RPC_TENSOR_INTERRUPT_REPORT} 同步上报，不额外维护 transaction 或完成回调。
 每 Hart 使用两个缓冲，发送期间的新中断写入另一个 pending 缓冲；若 pending 缓冲
 已经占用，则累计 \code{dropped_reports}。每次中断都会清除硬件 pending，避免中断
 线长期阻塞。Server 默认打印 source ID/名称、低 32-bit info、Context 和累计次数；source
-编号与 RVTNG 的 \code{RVTIntPlacer} 输入顺序一致。
+编号与 Dayan 的 \code{RVTIntPlacer} 输入顺序一致。
 
 \end{document}

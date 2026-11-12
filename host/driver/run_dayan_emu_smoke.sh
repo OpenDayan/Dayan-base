@@ -50,7 +50,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if pgrep -f "$emu_dir/bin/rvt_emulator" >/dev/null 2>&1 || \
+if pgrep -f "$emu_dir/bin/dayan-emu" >/dev/null 2>&1 || \
    pgrep -f "$qemu.*rvtng-v0" >/dev/null 2>&1; then
     echo "a dayan_emu instance is already running" >&2
     exit 1
@@ -64,7 +64,7 @@ mkdir -p "$repo_dir/build/host/driver" "$mount_dir"
 make -C "$repo_dir" -j4 all
 make -C "$runtime_dir" dayan_emu-smoke-bin
 
-"$emu_dir/bin/rvt_emulator" -c "$dayan_emu_harts" \
+"$emu_dir/bin/dayan-emu" -c "$dayan_emu_harts" \
     "$qemu" -monitor null -bios "$repo_dir/device/bl0/bootrom.elf" \
     -machine rvtng-v0 -nographic -serial none -m 4096 >"$log_file" 2>&1 &
 emulator_pid=$!

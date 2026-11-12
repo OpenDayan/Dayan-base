@@ -30,7 +30,7 @@ if [ -z "$emu_dir" ]; then
     exit 2
 fi
 qemu=${QEMU_DL_BIN:-"$emu_dir/deps/QEMU/build/dl-riscv64"}
-emulator="$emu_dir/bin/rvt_emulator"
+emulator="$emu_dir/bin/dayan-emu"
 mount_dir=/tmp/virtual_npu
 emulator_pid=
 resources=(/tmp/card0_rvt_inst_req /tmp/card0_rvt_inst_rsp /tmp/card0_rvt_msg
@@ -60,7 +60,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 [[ -x "$emulator" && -x "$qemu" ]]
-if pgrep -x rvt_emulator >/dev/null || pgrep -x dl-riscv64 >/dev/null ||
+if pgrep -x dayan-emu >/dev/null || pgrep -x dl-riscv64 >/dev/null ||
    pgrep -x TestCluster >/dev/null || findmnt -rn -M "$mount_dir" >/dev/null; then
     echo 'baremetal-dayan_emu: simulator resources are already in use' >&2
     exit 1

@@ -60,7 +60,7 @@ IP 窗口：Host PA = soc-base + IP offset            （IP offset < DAYAN_CLUST
 DDR：    Host PA = soc-ddr-base + (NPU PA - soc-ddr-npu-base)
 ```
 
-Normal DDR 不属于 IP 窗口，而是独立的 SoC 共享内存。依据是：rvtng QEMU 模型把 DRAM 作为
+Normal DDR 不属于 IP 窗口，而是独立的 SoC 共享内存。依据是：Dayan QEMU 模型把 DRAM 作为
 独立共享内存挂在 NPU 地址 0x80000000，IP 内部模块全在 16 MiB 以下；FPGA 路径中低 2 GiB
 加偏移、DDR 不加偏移。因此 DDR 单独配置，不使用 `--soc-base`。
 
@@ -255,12 +255,12 @@ QEMU 或文件测试通过，不能证明真实 SoC 的缓存一致性。
 ## 待确认项
 
 1. IP 窗口在 SoC 中的 Host PA（`--soc-base`），以及窗口内各模块 offset 是否与
-   `platform_regs.h` 一致。SoC QEMU 尚未加入 NPU，表中数值来自 rvtng QEMU 模型和 FPGA
+   `platform_regs.h` 一致。SoC QEMU 尚未加入 NPU，表中数值来自 Dayan QEMU 模型和 FPGA
    寄存器表。
 2. 各寄存器的实际访问宽度：
    - 64 位寄存器是否接受单次 64 位访问；
    - MMU LO/HI 的锁存语义（HI 写入时提交，还是各自立即生效）。
-3. PCU 窗口大小及锁存协议（rvtng QEMU 尚未建模 PCU）。
+3. PCU 窗口大小及锁存协议（Dayan QEMU 尚未建模 PCU）。
 4. NPU 主端口访问共享 DDR 的地址映射，即 `--soc-ddr-npu-base` 与 Host PA 的关系。
 5. 共享 DDR 的一致性模型，以及 BSP 保留区（地址、大小、`no-map`）。
 6. Coherent 窗口与 URAM 是否允许 Host 批量访问，访问宽度是否受限。
