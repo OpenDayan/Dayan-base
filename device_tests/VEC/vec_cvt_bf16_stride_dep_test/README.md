@@ -37,7 +37,7 @@
 
 ```sh
 make -C release/dayan-base/device_tests VEC/vec_cvt_bf16_stride_dep_test
-cd release/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
+cd release/sim && python3 tools/dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_cvt_bf16_stride_dep_test
 ```
 

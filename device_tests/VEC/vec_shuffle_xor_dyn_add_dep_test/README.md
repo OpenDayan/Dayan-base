@@ -32,7 +32,7 @@
 
 ```sh
 make -C dayan-base/device_tests VEC/vec_shuffle_xor_dyn_add_dep_test
-cd dayan-base/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
+cd dayan-base/sim && python3 tools/dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_shuffle_xor_dyn_add_dep_test
 ```
 

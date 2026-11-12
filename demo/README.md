@@ -709,7 +709,7 @@ buffer, and overlap work within a chunk. The TGMT variant keeps the backend's
 coarse loader / prepare / root split; the heavy prepare stage remains one
 sequential issuer. Holding the internal VEC parallelism switch fixed therefore
 does not guarantee a large speedup from this stage split. See the pipeline
-review in `../RVTNG/data_zb_lattn.md` for the source and trace evidence.
+review in `../dayan-samples/data_zb_lattn.md` for the source and trace evidence.
 
 This small benchmark supports contiguous FP32 Q/K/V, one scalar gate and
 beta per token/head, and one final state snapshot. It requires at least
@@ -727,7 +727,7 @@ state atol=2e-4, rtol=3e-3, and separate output/state relative L2 <= 3e-3.
 Set `GDN_OUTPUT=/path/to/result.bin` to save `[output | final state]` as
 raw FP32 for direct comparison between the three executables.
 Use `DAYAN_SERVER_SOCKET` to select an isolated simulator instance.
-Experiment records are in `../RVTNG/data_zb_lattn.md` relative to the
+Experiment records are in `../dayan-samples/data_zb_lattn.md` relative to the
 firmware repository; original traces and logs are under
 `build/testcluster-runs/gdn-*`.
 
@@ -762,7 +762,7 @@ variant permits VEC TGMT within each core. Only TGMT creates child Threads.
 Input-load expansions and explicit LSU waits remain in place.
 
 Measurements and active device-source counts are appended to
-`../RVTNG/data_zb_matmul.md` and `../RVTNG/data_zb_lattn.md`; earlier results
+`../dayan-samples/data_zb_matmul.md` and `../dayan-samples/data_zb_lattn.md`; earlier results
 remain tied to their saved source/binary snapshots. The four-core timing
 metric is the maximum root-Proc duration over the four cores, including
 entry/exit barriers. It is not the sum of core durations.

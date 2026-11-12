@@ -43,6 +43,6 @@ clean:
 testDbg:
 	test -f "$(DEBUG_ELF)"
 	export QEMU="$(QEMU)"
-	export QEMU_FLAGS="-bios $(CURDIR)/bootrom.elf -machine rvtng-v0 -nographic -m 4096"
+	export QEMU_FLAGS="-bios $(CURDIR)/bootrom.elf -machine dayan-v0 -nographic -m 4096"
 	setsid ./run_bg.sh $$$$ &
 	exec gdb-multiarch -q "$(DEBUG_ELF)" -ex "target remote localhost:1234" -ex "b *0x80000000"

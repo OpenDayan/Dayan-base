@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* rvtng-v0 has no UART model; only this test adapter uses QEMU semihosting. */
+/* dayan-v0 has no UART model; only this test adapter uses QEMU semihosting. */
 static long semihost(long operation, const void *argument)
 {
     register long a0 __asm__("a0") = operation;

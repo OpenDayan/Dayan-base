@@ -41,8 +41,8 @@ cleanup() {
     fi
     fusermount3 -uz "$mount_dir" 2>/dev/null || \
         fusermount -uz "$mount_dir" 2>/dev/null || true
-    rm -f /tmp/card0_rvt_msg /tmp/card0_rvt_inst_req \
-        /tmp/card0_rvt_inst_rsp /dev/shm/dram_shm_0 \
+    rm -f /tmp/card0_dayan_msg /tmp/card0_dayan_inst_req \
+        /tmp/card0_dayan_inst_rsp /dev/shm/dram_shm_0 \
         /dev/shm/uram_shm_0 /dev/shm/uram_shm_1 \
         /dev/shm/uram_shm_2 /dev/shm/uram_shm_3 \
         /dev/shm/uram_shm_4 /dev/shm/uram_shm_5 \
@@ -51,7 +51,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if pgrep -f "$emu_dir/bin/dayan-emu" >/dev/null 2>&1 || \
-   pgrep -f "$qemu.*rvtng-v0" >/dev/null 2>&1; then
+   pgrep -f "$qemu.*dayan-v0" >/dev/null 2>&1; then
     echo "a dayan_emu instance is already running" >&2
     exit 1
 fi
@@ -66,7 +66,7 @@ make -C "$runtime_dir" dayan_emu-smoke-bin
 
 "$emu_dir/bin/dayan-emu" -c "$dayan_emu_harts" \
     "$qemu" -monitor null -bios "$repo_dir/device/bl0/bootrom.elf" \
-    -machine rvtng-v0 -nographic -serial none -m 4096 >"$log_file" 2>&1 &
+    -machine dayan-v0 -nographic -serial none -m 4096 >"$log_file" 2>&1 &
 emulator_pid=$!
 
 ready=0

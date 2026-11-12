@@ -31,7 +31,7 @@
 ```sh
 cd <包含 dayan-base 与 sim 的检出目录>
 flock /tmp/dayan-build.lock make -C release/dayan-base/device_tests VEC/vec_i32_mulu24_maxu_and_chain_test
-cd release/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
+cd release/sim && python3 tools/dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_i32_mulu24_maxu_and_chain_test
 ```
 

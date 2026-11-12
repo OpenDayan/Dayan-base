@@ -33,8 +33,8 @@ qemu=${QEMU_DL_BIN:-"$emu_dir/deps/QEMU/build/dl-riscv64"}
 emulator="$emu_dir/bin/dayan-emu"
 mount_dir=/tmp/virtual_npu
 emulator_pid=
-resources=(/tmp/card0_rvt_inst_req /tmp/card0_rvt_inst_rsp /tmp/card0_rvt_msg
-           /tmp/card0_rvt_mmu /dev/shm/dram_shm_0
+resources=(/tmp/card0_dayan_inst_req /tmp/card0_dayan_inst_rsp /tmp/card0_dayan_msg
+           /tmp/card0_dayan_mmu /dev/shm/dram_shm_0
            /dev/shm/uram_shm_0 /dev/shm/uram_shm_1
            /dev/shm/uram_shm_2 /dev/shm/uram_shm_3)
 
@@ -78,7 +78,7 @@ for test in baremetal_dayan_emu baremetal_failure; do
     log="$build/tests/$test.log"
     [[ -f "$elf" ]]
     # The loader sets every PC directly, bypassing the Host/BL0 boot exchange.
-    setsid "$emulator" -c 4 "$qemu" -machine rvtng-v0 \
+    setsid "$emulator" -c 4 "$qemu" -machine dayan-v0 \
         -bios "$device_root/bl0/bootrom.elf" \
         -device "loader,file=$elf,cpu-num=0" \
         -device loader,addr=0x80000000,cpu-num=1 \

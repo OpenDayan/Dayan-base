@@ -45,7 +45,7 @@ v2u  vrs1=16 sel=0     -> OUT_URAM        (bank1 age0 写出)
 
 ```sh
 flock /tmp/dayan-build.lock make -C release/dayan-base/device_tests VEC/vec_bank1_shuf_alu_dep_test
-cd release/sim && python3 tools/qemu_rvtng_dayan_emu_runner.py \
+cd release/sim && python3 tools/dayan_emu_runner.py \
   ../dayan-base/device_tests/VEC/vec_bank1_shuf_alu_dep_test
 ```
 

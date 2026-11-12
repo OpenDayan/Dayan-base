@@ -44,7 +44,7 @@
 ```sh
 make -C dayan-base/device_tests MAT/mat_conv2d_test
 cd sim
-python3 tools/qemu_rvtng_dayan_emu_runner.py ../dayan-base/device_tests/MAT/mat_conv2d_test
+python3 tools/dayan_emu_runner.py ../dayan-base/device_tests/MAT/mat_conv2d_test
 ```
 
 从 `release/` 构建全部并运行当前可支持的正向集合，任一失败立即退出：
@@ -59,7 +59,7 @@ for manifest in dayan-base/device_tests/MAT/*/meta.json; do
         echo "BLOCKED: $name requires TF32 support in dayan_emu"
         continue
     fi
-    (cd sim && python3 tools/qemu_rvtng_dayan_emu_runner.py "../$test_dir")
+    (cd sim && python3 tools/dayan_emu_runner.py "../$test_dir")
 done
 ```
 
