@@ -1,9 +1,7 @@
-# NPU cooperative OS skeleton
+# Dayan-base
 
-这是一个面向 RISC-V NPU Device 的最小裸机系统骨架。当前版本已经建立启动、
-每核资源隔离、协作式调度、mailbox RPC、同步异常处理、张量外部中断、基础 libc
-和堆管理。系统不使用时钟抢占：上下文切换时通过 `mip.MSIP` 选择 RPC 接收线程；张量错误
-通过机器外部中断进入 trap，同步异常仍通过 `mtvec` 处理。
+Dayan-base 是 Dayan 的基础软件栈，提供 Device 侧的启动固件、协作式操作系统和
+Device API，以及 Host 侧的编译工具、运行时与用户态驱动，支撑算子的编译、加载和执行。
 
 源码按运行位置组织：`device/` 包含 BL0/BL1、Dayan OS、Device API 和 Device
 测试；`host/` 包含 dycc、Runtime、Service 与 HAL；`demo/` 保存同时使用 Host 和
