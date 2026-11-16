@@ -101,6 +101,18 @@ static void usage(FILE *stream, const char *program)
             "  --dma-channel N         XDMA H2C/C2H channel (default 0)\n"
             "  --dma-event N           XDMA event (default 0)\n"
             "  --dma-completion MODE   irq (required node) or polling (1 us sleep)\n"
+            "  --dma-control MODE      Cluster aperture through dma (H2C/C2H nodes) or\n"
+            "                          bar (32-bit MMIO); qdma + fpga default: bar when\n"
+            "                          the control BAR exists, dma otherwise\n"
+            "  --dma-pci-device BDF    PCI function of the control BAR (default:\n"
+            "                          from the QDMA device name, qdma01000 = 01:00.0)\n"
+            "  --dma-control-bar N     control BAR index (default 1)\n"
+            "  --dma-control-offset N  BAR offset of the aperture (default 0x1000000)\n"
+            "  --dma-control-resource PATH  file to map instead of the sysfs BAR\n"
+            "  --dma-wide-bar N|none   BAR for single 64-bit register accesses\n"
+            "                          (default 4; missing = two 32-bit accesses)\n"
+            "  --dma-wide-offset N     BAR offset of the aperture (default 0)\n"
+            "  --dma-wide-resource PATH  file to map instead of the sysfs wide BAR\n"
             "  --xdma-profile/--xdma-device-dir/--xdma-mmio-offset: legacy aliases\n"
             "  --device-index N        first XDMA device index\n"
             "  --cluster-count N       number of Clusters\n"
@@ -252,6 +264,35 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argument, "--dma-device-name") == 0)
             dma.device_name = value;
+        else if (strcmp(argument, "--dma-control") == 0) {
+            if (strcmp(value, "dma") == 0) dma.control = NPU_HAL_XILINX_DMA_CONTROL_DMA;
+            else if (strcmp(value, "bar") == 0) dma.control = NPU_HAL_XILINX_DMA_CONTROL_BAR;
+            else status = -EINVAL;
+        }
+        else if (strcmp(argument, "--dma-pci-device") == 0)
+            dma.pci_device = value;
+        else if (strcmp(argument, "--dma-control-bar") == 0) {
+            status = parse_u32(value, &dma.control_bar);
+            if (status == 0 && dma.control_bar > 5U)
+                status = -EINVAL;
+        }
+        else if (strcmp(argument, "--dma-control-offset") == 0)
+            status = parse_u64(value, &dma.control_offset);
+        else if (strcmp(argument, "--dma-control-resource") == 0)
+            dma.control_resource = value;
+        else if (strcmp(argument, "--dma-wide-bar") == 0) {
+            if (strcmp(value, "none") == 0)
+                dma.wide_bar = NPU_HAL_XILINX_DMA_NO_BAR;
+            else {
+                status = parse_u32(value, &dma.wide_bar);
+                if (status == 0 && dma.wide_bar > 5U)
+                    status = -EINVAL;
+            }
+        }
+        else if (strcmp(argument, "--dma-wide-offset") == 0)
+            status = parse_u64(value, &dma.wide_offset);
+        else if (strcmp(argument, "--dma-wide-resource") == 0)
+            dma.wide_resource = value;
         else if (strcmp(argument, "--dma-queue") == 0) {
             qdma_arguments = 1;
             status = parse_u32(value, &dma.queue);
@@ -376,11 +417,36 @@ int main(int argc, char **argv)
         }
         if (!new_arguments)
             dma.completion = NPU_HAL_XILINX_DMA_COMPLETION_LEGACY;
+        /* QDMA fpga AUTO is resolved by the HAL, which checks for the BAR. */
+        if (dma.control == NPU_HAL_XILINX_DMA_CONTROL_AUTO &&
+            !(dma.driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA &&
+              dma.profile == NPU_HAL_XILINX_DMA_PROFILE_FPGA))
+            dma.control = NPU_HAL_XILINX_DMA_CONTROL_DMA;
         fprintf(stderr, "dayan_server: DMA backend=xilinx-dma driver=%s profile=%s completion=%s\n",
                 dma.driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA ? "qdma" : "xdma",
                 dma.profile == NPU_HAL_XILINX_DMA_PROFILE_FPGA ? "fpga" : "simulator",
                 dma.completion == NPU_HAL_XILINX_DMA_COMPLETION_IRQ ? "irq" :
                 dma.completion == NPU_HAL_XILINX_DMA_COMPLETION_POLLING ? "polling (1 us requested sleep)" : "legacy");
+        if (dma.control == NPU_HAL_XILINX_DMA_CONTROL_AUTO) {
+            fprintf(stderr, "dayan_server: control=auto (bar%u if present, else dma at +0x%llx)\n",
+                    dma.control_bar, (unsigned long long)dma.mmio_address_offset);
+        } else if (dma.control == NPU_HAL_XILINX_DMA_CONTROL_BAR) {
+            fprintf(stderr, "dayan_server: control=bar%u+0x%llx (%s), 32-bit accesses\n",
+                    dma.control_bar, (unsigned long long)dma.control_offset,
+                    dma.control_resource ? dma.control_resource :
+                    dma.pci_device ? dma.pci_device : "PCI function from device name");
+            if (dma.wide_resource)
+                fprintf(stderr, "dayan_server: 64-bit registers through %s+0x%llx\n",
+                        dma.wide_resource, (unsigned long long)dma.wide_offset);
+            else if (dma.wide_bar != NPU_HAL_XILINX_DMA_NO_BAR)
+                fprintf(stderr, "dayan_server: 64-bit registers through bar%u+0x%llx\n",
+                        dma.wide_bar, (unsigned long long)dma.wide_offset);
+            else
+                fprintf(stderr, "dayan_server: 64-bit registers as two 32-bit accesses\n");
+        } else {
+            fprintf(stderr, "dayan_server: control=dma, aperture at +0x%llx\n",
+                    (unsigned long long)dma.mmio_address_offset);
+        }
     }
     memset(&action, 0, sizeof(action));
     action.sa_handler = stop_signal;

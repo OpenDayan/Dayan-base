@@ -26,10 +26,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-struct dma_endpoint { int h2c, c2h, control, event; };
+/* bar maps the Cluster aperture when the control path is a PCI BAR; wide
+ * maps it again through the BAR that carries single 64-bit accesses. */
+struct dma_endpoint {
+    int h2c, c2h, control, event;
+    volatile unsigned char *bar, *wide;
+};
 struct dma_state {
     uint32_t count, completion;
     uint64_t offset;
@@ -43,6 +50,8 @@ static void dma_close(void *opaque)
     if (!s) return;
     for (i = 0; i < s->count; ++i) {
         struct dma_endpoint *e = &s->endpoints[i];
+        if (e->bar) munmap((void *)(uintptr_t)e->bar, DAYAN_CLUSTER_APERTURE_SIZE);
+        if (e->wide) munmap((void *)(uintptr_t)e->wide, DAYAN_CLUSTER_APERTURE_SIZE);
         if (e->event >= 0) close(e->event);
         if (e->control >= 0) close(e->control);
         if (e->c2h >= 0) close(e->c2h);
@@ -58,6 +67,96 @@ static int device_path(char *path, size_t capacity, const char *directory,
     return n > 0 && (size_t)n < capacity ? 0 : -ENAMETOOLONG;
 }
 
+/* sysfs resource file of a BAR, or the override file. */
+static int bar_resource(char *path, size_t capacity,
+                        const npu_hal_xilinx_dma_options_t *o, const char *name,
+                        uint32_t bar, const char *override);
+
+/*
+ * AUTO uses the control BAR when a QDMA fpga function exposes it, and the
+ * MM queue otherwise: PDIs without BAR1 reach the aperture through the queue
+ * at address + mmio_address_offset.
+ */
+static int control_uses_bar(const npu_hal_xilinx_dma_options_t *o, const char *name)
+{
+    char path[PATH_MAX];
+    int bar;
+    if (o->control != NPU_HAL_XILINX_DMA_CONTROL_AUTO)
+        return o->control == NPU_HAL_XILINX_DMA_CONTROL_BAR;
+    if (o->driver != NPU_HAL_XILINX_DMA_DRIVER_QDMA ||
+        o->profile != NPU_HAL_XILINX_DMA_PROFILE_FPGA) return 0;
+    if (bar_resource(path, sizeof(path), o, name, o->control_bar, o->control_resource) < 0)
+        return 0;
+    bar = access(path, F_OK) == 0;
+    if (bar)
+        fprintf(stderr, "xilinx-dma: %s: control BAR %s found, aperture through BAR\n",
+                name, path);
+    else
+        fprintf(stderr, "xilinx-dma: %s: %s not found, aperture through the MM queue at +0x%llx\n",
+                name, path, (unsigned long long)o->mmio_address_offset);
+    return bar;
+}
+
+static int bar_resource(char *path, size_t capacity,
+                        const npu_hal_xilinx_dma_options_t *o, const char *name,
+                        uint32_t bar, const char *override)
+{
+    unsigned int domain = 0, bus, device, function;
+    char tail;
+    int n;
+    if (override) {
+        n = snprintf(path, capacity, "%s", override);
+        return n > 0 && (size_t)n < capacity ? 0 : -ENAMETOOLONG;
+    }
+    if (o->pci_device) {
+        if (sscanf(o->pci_device, "%x:%x:%x.%x%c", &domain, &bus, &device, &function, &tail) != 4) {
+            domain = 0;
+            if (sscanf(o->pci_device, "%x:%x.%x%c", &bus, &device, &function, &tail) != 3)
+                return -EINVAL;
+        }
+    } else {
+        unsigned long index;
+        char *end;
+        if (strncmp(name, "qdma", 4) != 0) return -EINVAL;
+        errno = 0;
+        index = strtoul(name + 4, &end, 16);
+        if (errno || end == name + 4 || *end) return -EINVAL;
+        domain = (unsigned int)(index >> 20);
+        bus = (unsigned int)(index >> 12) & 0xffU;
+        device = (unsigned int)(index >> 4) & 0xffU;
+        function = (unsigned int)index & 0xfU;
+    }
+    if (domain > 0xffffU || bus > 0xffU || device > 0x1fU || function > 7U)
+        return -EINVAL;
+    n = snprintf(path, capacity, "%s/%04x:%02x:%02x.%x/resource%u",
+                 NPU_HAL_XILINX_DMA_PCI_DEVICES, domain, bus, device, function,
+                 bar);
+    return n > 0 && (size_t)n < capacity ? 0 : -ENAMETOOLONG;
+}
+
+static int map_aperture(volatile unsigned char **out, const char *path, uint64_t offset)
+{
+    struct stat st;
+    void *map;
+    int status = 0;
+    int fd;
+    if (offset & ((uint64_t)sysconf(_SC_PAGESIZE) - 1U)) return -EINVAL;
+    fd = open(path, O_RDWR | O_SYNC | O_CLOEXEC);
+    if (fd < 0) return -errno;
+    if (fstat(fd, &st) != 0) status = -errno;
+    else if (st.st_size < 0 || (uint64_t)st.st_size < offset ||
+             (uint64_t)st.st_size - offset < DAYAN_CLUSTER_APERTURE_SIZE)
+        status = -ENXIO;
+    if (status == 0) {
+        map = mmap(NULL, DAYAN_CLUSTER_APERTURE_SIZE, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, (off_t)offset);
+        if (map == MAP_FAILED) status = -errno;
+        else *out = map;
+    }
+    close(fd);
+    return status;
+}
+
 static int open_endpoint(struct dma_endpoint *e,
                          const npu_hal_xilinx_dma_options_t *o, uint32_t cluster)
 {
@@ -70,6 +169,31 @@ static int open_endpoint(struct dma_endpoint *e,
         qdma ? snprintf(name, sizeof(name), "qdma01000") :
                snprintf(name, sizeof(name), "xdma%u", (uint32_t)index);
     if (n <= 0 || (size_t)n >= sizeof(name)) return -ENAMETOOLONG;
+    if (control_uses_bar(o, name)) {
+        status = bar_resource(path, sizeof(path), o, name, o->control_bar,
+                              o->control_resource);
+        if (status == 0) status = map_aperture(&e->bar, path, o->control_offset);
+        if (status < 0) {
+            fprintf(stderr, "xilinx-dma: cannot map the control BAR of %s (%s, offset 0x%llx): %s\n",
+                    name, o->control_resource || o->pci_device || status != -EINVAL ?
+                        path : "no PCI function", (unsigned long long)o->control_offset,
+                    strerror(-status));
+            return status;
+        }
+        if (o->wide_bar != NPU_HAL_XILINX_DMA_NO_BAR || o->wide_resource) {
+            status = bar_resource(path, sizeof(path), o, name, o->wide_bar,
+                                  o->wide_resource);
+            if (status == 0) status = map_aperture(&e->wide, path, o->wide_offset);
+            if (status == -ENOENT) {
+                fprintf(stderr, "xilinx-dma: %s not found; 64-bit registers are "
+                        "written as two 32-bit accesses\n", path);
+            } else if (status < 0) {
+                fprintf(stderr, "xilinx-dma: cannot map the 64-bit BAR of %s (%s, offset 0x%llx): %s\n",
+                        name, path, (unsigned long long)o->wide_offset, strerror(-status));
+                return status;
+            }
+        }
+    }
     status = device_path(path, sizeof(path), o->device_directory, name,
                          qdma ? "-MM-" : "_h2c_", qdma ? o->queue : o->channel);
     if (status < 0) return status;
@@ -80,7 +204,7 @@ static int open_endpoint(struct dma_endpoint *e,
     if (status < 0) return status;
     e->c2h = open(path, O_RDONLY | O_CLOEXEC);
     if (e->c2h < 0) return -errno;
-    if (!qdma) {
+    if (!qdma && !e->bar) {
         n = snprintf(path, sizeof(path), "%s/%s_user", o->device_directory, name);
         if (n <= 0 || (size_t)n >= sizeof(path)) return -ENAMETOOLONG;
         e->control = open(path, O_RDWR | O_CLOEXEC);
@@ -127,18 +251,21 @@ static int dma_open(npu_hal_options_t *options, void **out)
         (o->profile != NPU_HAL_XILINX_DMA_PROFILE_SIMULATOR && o->profile != NPU_HAL_XILINX_DMA_PROFILE_FPGA) ||
         o->completion < NPU_HAL_XILINX_DMA_COMPLETION_IRQ ||
         o->completion > NPU_HAL_XILINX_DMA_COMPLETION_LEGACY ||
+        o->control > NPU_HAL_XILINX_DMA_CONTROL_BAR || o->control_bar > 5U ||
+        (o->wide_bar > 5U && o->wide_bar != NPU_HAL_XILINX_DMA_NO_BAR) ||
         !o->device_directory || !*o->device_directory || !o->cluster_device_stride ||
         (o->device_name && (!*o->device_name || strchr(o->device_name, '/')))) return -EINVAL;
     /* A named PCI function is not implicitly mapped to several clusters. */
     if (options->cluster_count != 1 && (o->device_name ||
-        o->driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA)) return -ENOTSUP;
+        o->driver == NPU_HAL_XILINX_DMA_DRIVER_QDMA ||
+        o->control == NPU_HAL_XILINX_DMA_CONTROL_BAR)) return -ENOTSUP;
     s = calloc(1, sizeof(*s) + options->cluster_count * sizeof(s->endpoints[0]));
     if (!s) return -ENOMEM;
     s->count = options->cluster_count;
     s->offset = o->mmio_address_offset;
     s->completion = o->completion;
     for (i = 0; i < s->count; ++i)
-        s->endpoints[i] = (struct dma_endpoint){-1, -1, -1, -1};
+        s->endpoints[i] = (struct dma_endpoint){-1, -1, -1, -1, NULL, NULL};
     for (i = 0; i < s->count; ++i) {
         status = open_endpoint(&s->endpoints[i], o, i);
         if (status < 0) { dma_close(s); return status; }
@@ -173,6 +300,70 @@ static int translate(struct dma_state *s, uint64_t address, size_t size, uint64_
     return 0;
 }
 
+/*
+ * The AXI-Lite path only carries aligned 32-bit accesses: partial words are
+ * read, merged and written back.  A single naturally aligned 8-byte access is
+ * a 64-bit register (mailboxes, Atomic Cache control, PCU); it goes through
+ * the wide BAR as one 64-bit MMIO access, or, without one, as two 32-bit
+ * accesses, low word first.
+ */
+static uint64_t wide_read64(const struct dma_endpoint *e, uint64_t offset)
+{
+    uint64_t value = *(const volatile uint64_t *)(e->wide + offset);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return value;
+}
+static void wide_write64(const struct dma_endpoint *e, uint64_t offset, uint64_t value)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    *(volatile uint64_t *)(e->wide + offset) = value;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+static uint32_t bar_read32(const struct dma_endpoint *e, uint64_t offset)
+{
+    uint32_t value = *(const volatile uint32_t *)(e->bar + offset);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return value;
+}
+static void bar_write32(const struct dma_endpoint *e, uint64_t offset, uint32_t value)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    *(volatile uint32_t *)(e->bar + offset) = value;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+static int bar_copy(const struct dma_endpoint *e, uint64_t address,
+                    unsigned char *data, size_t size, int write)
+{
+    if (address >= DAYAN_CLUSTER_APERTURE_SIZE ||
+        size > DAYAN_CLUSTER_APERTURE_SIZE - address) return -EFAULT;
+    if (e->wide && size == 8U && !(address & 7U)) {
+        uint64_t value;
+        if (write) {
+            memcpy(&value, data, sizeof(value));
+            wide_write64(e, address, value);
+        } else {
+            value = wide_read64(e, address);
+            memcpy(data, &value, sizeof(value));
+        }
+        return 0;
+    }
+    while (size) {
+        uint64_t word = address & ~UINT64_C(3);
+        size_t shift = (size_t)(address & 3U), chunk = 4U - shift;
+        uint32_t value = 0;
+        if (chunk > size) chunk = size;
+        if (!write || chunk != 4U) value = bar_read32(e, word);
+        if (write) {
+            memcpy((unsigned char *)&value + shift, data, chunk);
+            bar_write32(e, word, value);
+        } else {
+            memcpy(data, (unsigned char *)&value + shift, chunk);
+        }
+        data += chunk; address += chunk; size -= chunk;
+    }
+    return 0;
+}
+
 static int dma_copy(void *opaque, uint32_t cluster, uint64_t address, void *data, size_t size, int write)
 {
     struct dma_state *s = opaque;
@@ -185,6 +376,12 @@ static int dma_copy(void *opaque, uint32_t cluster, uint64_t address, void *data
         int status;
         if (address < NPU_HAL_XILINX_DMA_MMIO_LIMIT && chunk > NPU_HAL_XILINX_DMA_MMIO_LIMIT - address)
             chunk = (size_t)(NPU_HAL_XILINX_DMA_MMIO_LIMIT - address);
+        if (s->endpoints[cluster].bar && address < NPU_HAL_XILINX_DMA_MMIO_LIMIT) {
+            status = bar_copy(&s->endpoints[cluster], address, cursor, chunk, write);
+            if (status < 0) return status;
+            cursor += chunk; address += chunk; size -= chunk;
+            continue;
+        }
         status = translate(s, address, chunk, &offset);
         if (status < 0) return status;
         status = write ? npu_hal_xilinx_dma_pwrite(s->endpoints[cluster].h2c, offset, cursor, chunk) :
@@ -295,6 +492,8 @@ static int dma_prepare(void *opaque, uint32_t c, uint64_t a, size_t n,
     uint64_t offset;
     int status;
     if (!s || !t || c >= s->count) return -EINVAL;
+    /* The DMA queue does not reach the aperture behind the control BAR. */
+    if (s->endpoints[c].bar && a < NPU_HAL_XILINX_DMA_MMIO_LIMIT) return -ENOTSUP;
     status = translate(s, a, n, &offset);
     if (status < 0) return status;
     memset(t, 0, sizeof(*t));

@@ -34,5 +34,10 @@ int npu_hal_xilinx_dma_options_init(npu_hal_xilinx_dma_options_t *options,
                                 "/dev" : "/tmp/virtual_npu";
     options->mmio_address_offset = profile == NPU_HAL_XILINX_DMA_PROFILE_FPGA ?
                                   UINT64_C(0x4000000000) : 0;
+    options->control = NPU_HAL_XILINX_DMA_CONTROL_AUTO;
+    options->control_bar = NPU_HAL_XILINX_DMA_QDMA_CONTROL_BAR;
+    options->control_offset = NPU_HAL_XILINX_DMA_QDMA_CONTROL_OFFSET;
+    options->wide_bar = NPU_HAL_XILINX_DMA_QDMA_WIDE_BAR;
+    options->wide_offset = NPU_HAL_XILINX_DMA_QDMA_WIDE_OFFSET;
     return 0;
 }
