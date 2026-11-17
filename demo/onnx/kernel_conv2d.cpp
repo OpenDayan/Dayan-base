@@ -724,7 +724,6 @@ static void run(const Conv2dTileConfig *config, const uint16_t *input,
         tasks != (four_core ? 4U : 1U))
         check(-22);
 
-    // Conv DMA requires identity mapping, even after a MatMul kernel.
     __tx_lsu_tcsr_write<LSU_URAMWRITESWIZZLEMBS>(0);
     __tx_lsu_tcsr_write<LSU_URAMREADSWIZZLEMBS>(0);
 
