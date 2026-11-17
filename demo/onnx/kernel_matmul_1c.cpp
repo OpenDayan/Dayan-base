@@ -347,7 +347,7 @@ DAYAN_KERNEL_NAMED_RESOURCE_TASK_DESC(
 // MAT requires N to be a multiple of 16. The host sends only the remaining
 // 1..15 columns here, so no padded columns are calculated. Logical Tasks split
 // exact output elements; this path is intentionally small and tail-only.
-__kernel__ void rvnpu_gemm_tail_bf16(const uint16_t *a, const uint16_t *bt,
+__kernel__ void dayan_gemm_tail_bf16(const uint16_t *a, const uint16_t *bt,
                                      float *c, uint32_t m, uint32_t n,
                                      uint32_t k)
 {
@@ -379,4 +379,4 @@ __kernel__ void rvnpu_gemm_tail_bf16(const uint16_t *a, const uint16_t *bt,
 #endif
 }
 
-DAYAN_KERNEL_TASK_DESC(rvnpu_gemm_tail_bf16, 4, 0, 0, 0, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_gemm_tail_bf16, 4, 0, 0, 0, 1, 0, 0, 0);

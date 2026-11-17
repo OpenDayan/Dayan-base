@@ -247,7 +247,7 @@ __device__ static void softmax_chunk(const float *input, float *output,
 #endif
 } // namespace
 
-__kernel__ void rvnpu_softmax_axis1_fp32(const float *input, float *output,
+__kernel__ void dayan_softmax_axis1_fp32(const float *input, float *output,
                                          uint32_t outer, uint32_t axis,
                                          uint32_t inner) {
     // 空张量直接返回，不算参数错误。
@@ -298,4 +298,4 @@ __kernel__ void rvnpu_softmax_axis1_fp32(const float *input, float *output,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_softmax_axis1_fp32, 4, 0, 0, 32768U, 1, 0, 0, 1);
+DAYAN_KERNEL_TASK_DESC(dayan_softmax_axis1_fp32, 4, 0, 0, 32768U, 1, 0, 0, 1);

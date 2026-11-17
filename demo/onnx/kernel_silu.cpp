@@ -206,7 +206,7 @@ static void silu_split(const float *input,float *output,uint64_t n,uint64_t uram
 
 #endif
 
-__kernel__ void rvnpu_silu_f32(const float *x,float *y,uint32_t d0,uint32_t d1,uint32_t d2,uint32_t d3) {
+__kernel__ void dayan_silu_f32(const float *x,float *y,uint32_t d0,uint32_t d1,uint32_t d2,uint32_t d3) {
 #if defined(__DAYAN_DEVICE__)
     const uint32_t tasks=dayan_task_dim(DAYAN_TASK_X);
     if(!((dayan_task_mode()==1&&tasks==1U)||(dayan_task_mode()==4&&tasks==4U))||
@@ -235,4 +235,4 @@ __kernel__ void rvnpu_silu_f32(const float *x,float *y,uint32_t d0,uint32_t d1,u
     }
 #endif
 }
-DAYAN_VECTOR_DESC(rvnpu_silu_f32);
+DAYAN_VECTOR_DESC(dayan_silu_f32);

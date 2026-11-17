@@ -513,7 +513,7 @@ __device__ static bool maxpool5x5s1p2_dense(
 #endif
 } // namespace
 
-__kernel__ void rvnpu_maxpool2d_nchw_fp32(
+__kernel__ void dayan_maxpool2d_nchw_fp32(
     const float *input, float *output, uint32_t batch, uint32_t channels,
     uint32_t input_h, uint32_t input_w, uint32_t output_h, uint32_t output_w,
     uint32_t kernel_h, uint32_t kernel_w, uint32_t stride_h, uint32_t stride_w,
@@ -654,4 +654,4 @@ __kernel__ void rvnpu_maxpool2d_nchw_fp32(
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_maxpool2d_nchw_fp32, 4, 0, 0, 65536U, 2, 0, 0, 1);
+DAYAN_KERNEL_TASK_DESC(dayan_maxpool2d_nchw_fp32, 4, 0, 0, 65536U, 2, 0, 0, 1);

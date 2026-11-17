@@ -234,7 +234,7 @@ __device__ static uint32_t transpose_021_tile(uint32_t d1, uint64_t uram_size) {
 #endif
 } // namespace
 
-__kernel__ void rvnpu_transpose_fp32(const float *input, float *output,
+__kernel__ void dayan_transpose_fp32(const float *input, float *output,
                                      uint32_t d0, uint32_t d1, uint32_t d2,
                                      uint32_t d3, uint32_t mode) {
     if (mode > 2) {
@@ -299,9 +299,9 @@ __kernel__ void rvnpu_transpose_fp32(const float *input, float *output,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_transpose_fp32, 4, 0, 0, 262144U, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_transpose_fp32, 4, 0, 0, 262144U, 1, 0, 0, 0);
 
-__kernel__ void rvnpu_transpose_10_int64(const int64_t *input, int64_t *output,
+__kernel__ void dayan_transpose_10_int64(const int64_t *input, int64_t *output,
                                         uint32_t d0, uint32_t d1) {
     // 空张量（例如 NonZero 得到 0 列后再转置）直接返回。
     if (d0 == 0 || d1 == 0)
@@ -321,4 +321,4 @@ __kernel__ void rvnpu_transpose_10_int64(const int64_t *input, int64_t *output,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_transpose_10_int64, 4, 0, 0, 0, 0, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_transpose_10_int64, 4, 0, 0, 0, 0, 0, 0, 0);

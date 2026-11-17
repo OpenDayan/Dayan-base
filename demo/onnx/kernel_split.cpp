@@ -141,7 +141,7 @@ __device__ static void copy_run(const float *source, float *destination,
 #endif
 } // namespace
 
-__kernel__ void rvnpu_split_fp32(const float *input, float *output,
+__kernel__ void dayan_split_fp32(const float *input, float *output,
                                  uint32_t outer, uint32_t input_axis,
                                  uint32_t output_axis, uint32_t inner,
                                  uint32_t axis_offset) {
@@ -175,4 +175,4 @@ __kernel__ void rvnpu_split_fp32(const float *input, float *output,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_split_fp32, 4, 0, 0, 0, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_split_fp32, 4, 0, 0, 0, 1, 0, 0, 0);

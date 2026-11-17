@@ -111,7 +111,7 @@ __device__ static inline uint64_t shard_end(uint64_t total) {
 #endif
 } // namespace
 
-__kernel__ void rvnpu_resize_nearest_nchw_fp32(const float *input,
+__kernel__ void dayan_resize_nearest_nchw_fp32(const float *input,
                                                float *output, uint32_t batch,
                                                uint32_t channels,
                                                uint32_t input_h,
@@ -182,4 +182,4 @@ __kernel__ void rvnpu_resize_nearest_nchw_fp32(const float *input,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_resize_nearest_nchw_fp32, 4, 0, 0, 65536U, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_resize_nearest_nchw_fp32, 4, 0, 0, 65536U, 1, 0, 0, 0);

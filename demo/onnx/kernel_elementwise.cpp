@@ -419,7 +419,7 @@ static void elementwise_entry(const float *a, const float *b, float *c, uint64_t
 } // namespace elementwise_detail
 #endif
 
-__kernel__ void rvnpu_add_fp32(const float *a, const float *b, float *c, uint64_t n)
+__kernel__ void dayan_add_fp32(const float *a, const float *b, float *c, uint64_t n)
 {
 #if defined(__DAYAN_DEVICE__)
     using namespace elementwise_detail;
@@ -427,9 +427,9 @@ __kernel__ void rvnpu_add_fp32(const float *a, const float *b, float *c, uint64_
 #endif
 }
 
-DAYAN_VECTOR_DESC(rvnpu_add_fp32);
+DAYAN_VECTOR_DESC(dayan_add_fp32);
 
-__kernel__ void rvnpu_mul_fp32(const float *a, const float *b, float *c, uint64_t n)
+__kernel__ void dayan_mul_fp32(const float *a, const float *b, float *c, uint64_t n)
 {
 #if defined(__DAYAN_DEVICE__)
     using namespace elementwise_detail;
@@ -437,9 +437,9 @@ __kernel__ void rvnpu_mul_fp32(const float *a, const float *b, float *c, uint64_
 #endif
 }
 
-DAYAN_VECTOR_DESC(rvnpu_mul_fp32);
+DAYAN_VECTOR_DESC(dayan_mul_fp32);
 
-__kernel__ void rvnpu_sub_fp32(const float *a, const float *b, float *c, uint64_t n)
+__kernel__ void dayan_sub_fp32(const float *a, const float *b, float *c, uint64_t n)
 {
 #if defined(__DAYAN_DEVICE__)
     using namespace elementwise_detail;
@@ -447,18 +447,18 @@ __kernel__ void rvnpu_sub_fp32(const float *a, const float *b, float *c, uint64_
 #endif
 }
 
-DAYAN_VECTOR_PIPELINE_DESC(rvnpu_sub_fp32);
+DAYAN_VECTOR_PIPELINE_DESC(dayan_sub_fp32);
 
-__kernel__ void rvnpu_relu_fp32(const float *input, float *output, uint64_t n)
+__kernel__ void dayan_relu_fp32(const float *input, float *output, uint64_t n)
 {
 #if defined(__DAYAN_DEVICE__)
     using namespace elementwise_detail;
     legacy_relu_entry(input, output, n);
 #endif
 }
-DAYAN_VECTOR_DESC(rvnpu_relu_fp32);
+DAYAN_VECTOR_DESC(dayan_relu_fp32);
 
-__kernel__ void rvnpu_hardsigmoid_fp32(const float *input, float *output, uint64_t n,
+__kernel__ void dayan_hardsigmoid_fp32(const float *input, float *output, uint64_t n,
                                        uint64_t coeff_bits)
 {
 #if defined(__DAYAN_DEVICE__)
@@ -466,18 +466,18 @@ __kernel__ void rvnpu_hardsigmoid_fp32(const float *input, float *output, uint64
     legacy_hardsigmoid_entry(input, output, n, coeff_bits);
 #endif
 }
-DAYAN_VECTOR_DESC(rvnpu_hardsigmoid_fp32);
+DAYAN_VECTOR_DESC(dayan_hardsigmoid_fp32);
 
-__kernel__ void rvnpu_hardswish_fp32(const float *input, float *output, uint64_t n)
+__kernel__ void dayan_hardswish_fp32(const float *input, float *output, uint64_t n)
 {
 #if defined(__DAYAN_DEVICE__)
     using namespace elementwise_detail;
     legacy_hardswish_entry(input, output, n);
 #endif
 }
-DAYAN_VECTOR_DESC(rvnpu_hardswish_fp32);
+DAYAN_VECTOR_DESC(dayan_hardswish_fp32);
 
-__kernel__ void rvnpu_div_fp32(const float *a, const float *b, float *c, uint64_t n)
+__kernel__ void dayan_div_fp32(const float *a, const float *b, float *c, uint64_t n)
 {
 #if defined(__DAYAN_DEVICE__)
     using namespace elementwise_detail;
@@ -500,9 +500,9 @@ __kernel__ void rvnpu_div_fp32(const float *a, const float *b, float *c, uint64_
     }
 #endif
 }
-DAYAN_VECTOR_DESC(rvnpu_div_fp32);
+DAYAN_VECTOR_DESC(dayan_div_fp32);
 
-__kernel__ void rvnpu_binary_broadcast_fp32(const float *a, const float *b, float *c,
+__kernel__ void dayan_binary_broadcast_fp32(const float *a, const float *b, float *c,
                                             uint32_t a0, uint32_t a1, uint32_t a2,
                                             uint32_t a3, uint32_t b0, uint32_t b1,
                                             uint32_t b2, uint32_t b3, uint32_t op)
@@ -581,4 +581,4 @@ __kernel__ void rvnpu_binary_broadcast_fp32(const float *a, const float *b, floa
 #endif
 }
 
-DAYAN_VECTOR_DESC(rvnpu_binary_broadcast_fp32);
+DAYAN_VECTOR_DESC(dayan_binary_broadcast_fp32);

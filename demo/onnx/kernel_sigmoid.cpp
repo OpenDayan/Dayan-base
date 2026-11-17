@@ -168,7 +168,7 @@ static void sigmoid_pipeline(const SigmoidConfig &cfg, uint64_t uram)
 } // namespace sigmoid_detail
 #endif
 
-__kernel__ void rvnpu_sigmoid_f32(const float *x, float *y, uint32_t d0, uint32_t d1,
+__kernel__ void dayan_sigmoid_f32(const float *x, float *y, uint32_t d0, uint32_t d1,
                                   uint32_t d2, uint32_t d3)
 {
 #if defined(__DAYAN_DEVICE__)
@@ -193,5 +193,5 @@ __kernel__ void rvnpu_sigmoid_f32(const float *x, float *y, uint32_t d0, uint32_
     sigmoid_pipeline(cfg, uram);
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_sigmoid_f32, 4, 0, 0, SigmoidShape::kUramBytes, 1, 0, 0,
+DAYAN_KERNEL_TASK_DESC(dayan_sigmoid_f32, 4, 0, 0, SigmoidShape::kUramBytes, 1, 0, 0,
                        1);

@@ -128,7 +128,7 @@ __device__ static inline uint32_t shard_end(uint32_t total) {
 #endif
 } // namespace
 
-__kernel__ void rvnpu_im2col_nchw_fp32(const float *input, float *columns,
+__kernel__ void dayan_im2col_nchw_fp32(const float *input, float *columns,
                                        uint32_t channels, uint32_t input_h,
                                        uint32_t input_w, uint32_t output_h,
                                        uint32_t output_w, uint32_t kernel_h,
@@ -225,4 +225,4 @@ __kernel__ void rvnpu_im2col_nchw_fp32(const float *input, float *columns,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_im2col_nchw_fp32, 4, 0, 0, 65536U, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_im2col_nchw_fp32, 4, 0, 0, 65536U, 1, 0, 0, 0);

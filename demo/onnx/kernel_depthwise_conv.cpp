@@ -147,7 +147,7 @@ static bool valid_config(const DepthwiseConv2dConfig *config)
 } // namespace
 #endif
 
-__kernel__ void rvnpu_depthwise_conv2d_nchw_fp32(
+__kernel__ void dayan_depthwise_conv2d_nchw_fp32(
     const DepthwiseConv2dConfig *config, const float *input,
     const float *weight, const float *bias, float *output)
 {
@@ -286,5 +286,5 @@ __kernel__ void rvnpu_depthwise_conv2d_nchw_fp32(
 
 // One resident Proc per Core keeps MACRO/LSU state private to each channel
 // shard while the fixed four-Core launch provides model-level parallelism.
-DAYAN_KERNEL_TASK_DESC(rvnpu_depthwise_conv2d_nchw_fp32, 1, 0, 0,
+DAYAN_KERNEL_TASK_DESC(dayan_depthwise_conv2d_nchw_fp32, 1, 0, 0,
                        32768U, 1, 0, 0, 1);

@@ -99,7 +99,7 @@ static void configure_macro_reduce(uint64_t elements)
 } // namespace
 #endif
 
-__kernel__ void rvnpu_reduce_mean_nchw_fp32(const float *input, float *output,
+__kernel__ void dayan_reduce_mean_nchw_fp32(const float *input, float *output,
                                             uint64_t channels, uint64_t hw)
 {
 #if defined(__DAYAN_DEVICE__)
@@ -152,5 +152,5 @@ __kernel__ void rvnpu_reduce_mean_nchw_fp32(const float *input, float *output,
 
 // One resident reduction Proc per Core avoids unsafe same-Hart MACRO reduce
 // context sharing while the four-Core launch still partitions channels.
-DAYAN_KERNEL_TASK_DESC(rvnpu_reduce_mean_nchw_fp32, 1, 0, 0, 32768U,
+DAYAN_KERNEL_TASK_DESC(dayan_reduce_mean_nchw_fp32, 1, 0, 0, 32768U,
                        1, 0, 0, 1);

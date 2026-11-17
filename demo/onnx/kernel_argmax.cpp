@@ -304,7 +304,7 @@ __device__ static inline void configure_reduce(uint32_t elements) {
 #endif
 } // namespace
 
-__kernel__ void rvnpu_argmax_lastdim_fp32(const float *input, int64_t *output,
+__kernel__ void dayan_argmax_lastdim_fp32(const float *input, int64_t *output,
                                           uint32_t rows, uint32_t columns,
                                           uint32_t extra) {
     // 空张量直接返回，不算参数错误。
@@ -368,4 +368,4 @@ __kernel__ void rvnpu_argmax_lastdim_fp32(const float *input, int64_t *output,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_argmax_lastdim_fp32, 4, 0, 0, 32768U, 1, 0, 0, 1);
+DAYAN_KERNEL_TASK_DESC(dayan_argmax_lastdim_fp32, 4, 0, 0, 32768U, 1, 0, 0, 1);

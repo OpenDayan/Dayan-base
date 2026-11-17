@@ -111,7 +111,7 @@ __device__ static void slice_last_axis(const T *input, T *output,
 #endif
 } // namespace
 
-__kernel__ void rvnpu_slice_fp32(const float *input, float *output,
+__kernel__ void dayan_slice_fp32(const float *input, float *output,
                                  uint32_t outer, uint32_t input_axis,
                                  uint32_t start, uint32_t length,
                                  uint32_t step, uint32_t inner) {
@@ -147,9 +147,9 @@ __kernel__ void rvnpu_slice_fp32(const float *input, float *output,
                     inner);
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_slice_fp32, 4, 0, 0, 0, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_slice_fp32, 4, 0, 0, 0, 1, 0, 0, 0);
 
-__kernel__ void rvnpu_slice_int64(const int64_t *input, int64_t *output,
+__kernel__ void dayan_slice_int64(const int64_t *input, int64_t *output,
                                   uint32_t outer, uint32_t input_axis,
                                   uint32_t start, uint32_t length,
                                   uint32_t step, uint32_t inner) {
@@ -185,4 +185,4 @@ __kernel__ void rvnpu_slice_int64(const int64_t *input, int64_t *output,
                     inner);
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_slice_int64, 4, 0, 0, 0, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_slice_int64, 4, 0, 0, 0, 1, 0, 0, 0);

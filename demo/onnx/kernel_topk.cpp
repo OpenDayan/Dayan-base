@@ -200,7 +200,7 @@ __device__ static bool first_unselected(uint64_t selected_at,
 #endif
 } // namespace
 
-__kernel__ void rvnpu_topk_lastdim_fp32(const float *input, float *values,
+__kernel__ void dayan_topk_lastdim_fp32(const float *input, float *values,
                                         int64_t *indices, uint32_t rows,
                                         uint32_t columns, uint32_t k) {
     if (rows == 0 || k == 0)
@@ -274,4 +274,4 @@ __kernel__ void rvnpu_topk_lastdim_fp32(const float *input, float *values,
     }
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_topk_lastdim_fp32, 4, 0, 0, 65536U, 1, 0, 0, 1);
+DAYAN_KERNEL_TASK_DESC(dayan_topk_lastdim_fp32, 4, 0, 0, 65536U, 1, 0, 0, 1);

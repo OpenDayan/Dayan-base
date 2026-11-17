@@ -480,7 +480,7 @@ static bool is_suppressed(const float *candidate, const float *boxes,
 #endif
 } // namespace
 
-__kernel__ void rvnpu_nms_fp32(
+__kernel__ void dayan_nms_fp32(
     const float *boxes, float *scores, int64_t *selected_indices,
     uint64_t *selected_count, uint32_t num_boxes, uint32_t num_classes,
     uint32_t max_output_per_class, uint32_t iou_threshold_bits,
@@ -664,4 +664,4 @@ __kernel__ void rvnpu_nms_fp32(
     return;
 }
 
-DAYAN_KERNEL_TASK_DESC(rvnpu_nms_fp32, 4, 0, 0, 256U * 1024U, 1, 0, 0, 1);
+DAYAN_KERNEL_TASK_DESC(dayan_nms_fp32, 4, 0, 0, 256U * 1024U, 1, 0, 0, 1);

@@ -95,7 +95,7 @@ __device__ static void gather_nd(const float *data, const int64_t *indices,
 #endif
 } // namespace
 
-__kernel__ void rvnpu_gather_nd_fp32(const float *data, const int64_t *indices,
+__kernel__ void dayan_gather_nd_fp32(const float *data, const int64_t *indices,
                                      float *output, uint32_t rows,
                                      uint32_t index_depth, uint32_t d0,
                                      uint32_t d1, uint32_t d2) {
@@ -119,9 +119,9 @@ __kernel__ void rvnpu_gather_nd_fp32(const float *data, const int64_t *indices,
     dayan_cache_flush(output, output_bytes);
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_gather_nd_fp32, 4, 0, 0, 0, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_gather_nd_fp32, 4, 0, 0, 0, 1, 0, 0, 0);
 
-__kernel__ void rvnpu_gather_nd_int64(const int64_t *data,
+__kernel__ void dayan_gather_nd_int64(const int64_t *data,
                                       const int64_t *indices, int64_t *output,
                                       uint32_t rows, uint32_t index_depth,
                                       uint32_t d0, uint32_t d1, uint32_t d2) {
@@ -165,4 +165,4 @@ __kernel__ void rvnpu_gather_nd_int64(const int64_t *data,
     dayan_cache_flush(output, output_bytes);
 #endif
 }
-DAYAN_KERNEL_TASK_DESC(rvnpu_gather_nd_int64, 4, 0, 0, 0, 1, 0, 0, 0);
+DAYAN_KERNEL_TASK_DESC(dayan_gather_nd_int64, 4, 0, 0, 0, 1, 0, 0, 0);
