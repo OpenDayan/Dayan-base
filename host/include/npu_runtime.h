@@ -334,6 +334,13 @@ int npu_buffer_create_view(npu_buffer_t *buffer, uint64_t offset,
                            uint64_t size, npu_buffer_t **view_out);
 int npu_buffer_destroy(npu_buffer_t *buffer);
 int npu_buffer_get_size(const npu_buffer_t *buffer, uint64_t *size_out);
+/* Device-visible address, including a view's byte offset; not a Host pointer.
+ * Uses the Buffer VA when MMU translation is enabled. Keep the root Buffer
+ * alive until all indirect Device accesses finish. Indirect references do not
+ * establish scheduling dependencies or retain the Buffer automatically.
+ * Returns -ENOSYS with older Servers that do not support this query. */
+int npu_buffer_get_device_address(const npu_buffer_t *buffer,
+                                   uint64_t *address_out);
 
 int npu_stream_create(npu_context_t *context, const npu_stream_desc_t *desc,
                       npu_stream_t **stream_out);

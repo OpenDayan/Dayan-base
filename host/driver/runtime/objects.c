@@ -424,6 +424,28 @@ int npu_buffer_get_size(const npu_buffer_t *buffer, uint64_t *size_out)
     return 0;
 }
 
+int npu_buffer_get_device_address(const npu_buffer_t *buffer,
+                                   uint64_t *address_out)
+{
+    uint64_t address = 0;
+    int status;
+
+    if (!address_out)
+        return -EINVAL;
+    *address_out = 0;
+    if (!buffer || !runtime_context_valid(buffer->context))
+        return -EINVAL;
+    status = runtime_control_call(buffer->context->runtime,
+                                  NPU_IPC_BUFFER_DEVICE_ADDRESS, buffer->id,
+                                  0, 0, &address, sizeof(address), 0);
+    if (status < 0)
+        return status;
+    if (address > UINT64_MAX - buffer->base_offset)
+        return -EOVERFLOW;
+    *address_out = address + buffer->base_offset;
+    return 0;
+}
+
 int npu_stream_create(npu_context_t *context, const npu_stream_desc_t *desc,
                       npu_stream_t **stream_out)
 {

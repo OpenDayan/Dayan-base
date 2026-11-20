@@ -27,8 +27,8 @@ DEVICE_ISA_CHECK := ./check_device_isa.sh
 # One source per executable, without variant-specific compiler flags.
 SIMPLE_DEMOS := print_demo add_fp32_macro add_fp32_vec \
 	task_grid_probe context_thread_probe tensor_interrupt_probe \
-	lsu_bandwidth vec_peak scheduler_yield_bench shared_notify_latency \
-	launch_latency matmul_bf16_1c matmul_bf16_4c matmul_fp8_4c matmul_fp4_4c
+	lsu_bandwidth embedding_dma_bandwidth vec_peak scheduler_yield_bench shared_notify_latency \
+	launch_latency matmul_bf16_1c matmul_bf16_4c matmul_fp8_4c matmul_fp4_1c matmul_fp4_4c
 SIMPLE_TARGETS := $(addprefix $(BUILD)/,$(SIMPLE_DEMOS))
 
 FLASH_ATTENTION_DEMOS := flash_attention flash_attention_tgmt_barrier \

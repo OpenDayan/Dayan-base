@@ -2271,6 +2271,23 @@ static int dispatch_control(dayan_server_t *server,
             buffer_destroy_locked(server, session, header->object_id) :
             -EMSGSIZE;
         break;
+    case NPU_IPC_BUFFER_DEVICE_ADDRESS: {
+        struct server_buffer *buffer = find_buffer(session, header->object_id);
+        npu_hal_allocation_info_t info;
+
+        if (!payload_exact(header, 0))
+            status = -EMSGSIZE;
+        else if (!buffer || buffer->context->closing)
+            status = -ENOENT;
+        else {
+            status = npu_hal_memory_info(server->hal, buffer->allocation, &info);
+            if (status == 0) {
+                *(uint64_t *)response = buffer->va ? buffer->va : info.address;
+                *response_size = sizeof(uint64_t);
+            }
+        }
+        break;
+    }
     case NPU_IPC_STREAM_CREATE:
         if (payload_exact(header, sizeof(npu_ipc_stream_create_t)))
             status = stream_create_locked(server, session, payload,

@@ -112,6 +112,7 @@ Runtime 不访问寄存器或中断设备。公开入口由
   \code{npu_buffer_create} & 按描述符向 Server 申请逻辑 Buffer。 \\
   \code{npu_buffer_destroy} & 在无引用命令后释放 Buffer。 \\
   \code{npu_buffer_get_size} & 返回 Buffer 创建时的字节数。 \\
+  \code{npu_buffer_get_device_address} & 查询设备可见地址，包含 View 偏移；开启 MMU 时返回虚拟地址。用于 Host 构造间接指针，调用方须维持原 Buffer 生命周期及访问依赖。 \\
 \end{dayantable}
 
 \subsection{Stream 与数据搬运}

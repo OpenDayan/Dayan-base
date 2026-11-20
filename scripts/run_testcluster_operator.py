@@ -137,6 +137,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--log-dir", type=Path)
     result.add_argument("--startup-timeout", type=float, default=30.0)
     result.add_argument("--server-timeout-ms", type=int, default=60000)
+    result.add_argument("--normal-memory-size-mib", type=int)
+    result.add_argument("--uram-size", type=parse_int)
+    result.add_argument("--enable-mmu", type=int, choices=(0, 1))
     result.add_argument(
         "--continue-interval-seconds",
         type=float,
@@ -328,7 +331,8 @@ def run_operator(
         assert process.stdout is not None
         try:
             while True:
-                chunk = process.stdout.read(64 * 1024)
+                # Forward available output immediately so tail -F shows progress.
+                chunk = process.stdout.read1(64 * 1024)
                 if not chunk:
                     break
                 log.write(chunk)
@@ -371,6 +375,10 @@ def main() -> int:
         raise RunnerError("--startup-timeout must be positive")
     if arguments.server_timeout_ms <= 0:
         raise RunnerError("--server-timeout-ms must be positive")
+    if arguments.normal_memory_size_mib is not None and arguments.normal_memory_size_mib <= 0:
+        raise RunnerError("--normal-memory-size-mib must be positive")
+    if arguments.uram_size is not None and arguments.uram_size <= 0:
+        raise RunnerError("--uram-size must be positive")
     if arguments.fuse_settle < 0:
         raise RunnerError("--fuse-settle cannot be negative")
 
@@ -496,6 +504,13 @@ def main() -> int:
                 ),
                 "--timeout-ms",
                 str(arguments.server_timeout_ms),
+                *(
+                    ["--normal-memory-size-mib", str(arguments.normal_memory_size_mib)]
+                    if arguments.normal_memory_size_mib is not None
+                    else []
+                ),
+                *(["--uram-size", str(arguments.uram_size)] if arguments.uram_size is not None else []),
+                *(["--enable-mmu", str(arguments.enable_mmu)] if arguments.enable_mmu is not None else []),
             ],
             cwd=repo,
             stdout=server_log,
@@ -587,6 +602,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Let wrappers terminate the runner while preserving its finally cleanup.
+    def handle_termination(signum, frame):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handle_termination)
     try:
         raise SystemExit(main())
     except RunnerError as error:

@@ -505,6 +505,54 @@ int main(void)
         npu_buffer_desc_init(&desc, sizeof(input));
         assert(npu_buffer_create(context, &desc, &buffer) == 0);
     }
+    {
+        npu_buffer_t *view = 0;
+        npu_buffer_t *nested = 0;
+        npu_runtime_t *foreign_runtime = 0;
+        struct server_session *session;
+        struct server_buffer *server_buffer;
+        uint64_t address = UINT64_MAX;
+        uint64_t physical;
+        uint64_t saved_va;
+        const uint64_t virtual_address = UINT64_C(0x123400001000);
+
+        assert(npu_buffer_get_device_address(0, &address) == -EINVAL);
+        assert(address == 0);
+        assert(npu_buffer_get_device_address(buffer, 0) == -EINVAL);
+        assert(npu_buffer_get_device_address(buffer, &physical) == 0);
+        assert(physical == 0x1000);
+        assert(npu_buffer_create_view(buffer, 1, sizeof(input) - 1, &view) == 0);
+        assert(npu_buffer_create_view(view, 2, sizeof(input) - 3, &nested) == 0);
+        assert(npu_buffer_get_device_address(view, &address) == 0);
+        assert(address == physical + 1);
+        assert(npu_buffer_get_device_address(nested, &address) == 0);
+        assert(address == physical + 3);
+
+        /* The query must use the Device VA, including all 64 bits. */
+        pthread_mutex_lock(&server->mutex);
+        session = runtime_session_locked(server, runtime);
+        assert(session && session->contexts);
+        server_buffer = session->contexts->buffers;
+        assert(server_buffer && server_buffer->id == buffer->id);
+        saved_va = server_buffer->va;
+        server_buffer->va = virtual_address;
+        pthread_mutex_unlock(&server->mutex);
+        assert(npu_buffer_get_device_address(nested, &address) == 0);
+        assert(address == virtual_address + 3);
+        pthread_mutex_lock(&server->mutex);
+        server_buffer->va = saved_va;
+        pthread_mutex_unlock(&server->mutex);
+
+        assert(runtime_control_call(runtime, NPU_IPC_BUFFER_DEVICE_ADDRESS,
+                                    buffer->id, &physical, sizeof(physical),
+                                    &address, sizeof(address), 0) == -EMSGSIZE);
+        assert(npu_runtime_open(&foreign_runtime, &runtime_options) == 0);
+        assert(runtime_control_call(foreign_runtime, NPU_IPC_BUFFER_DEVICE_ADDRESS,
+                                    buffer->id, 0, 0, &address, sizeof(address), 0) == -ENOENT);
+        assert(npu_runtime_close(foreign_runtime) == 0);
+        assert(npu_buffer_destroy(nested) == 0);
+        assert(npu_buffer_destroy(view) == 0);
+    }
     assert(npu_stream_create(context, 0, &stream) == 0);
     {
         static const char message[] = "Device output belongs to Runtime\n";
@@ -728,7 +776,16 @@ int main(void)
     parallel_stream = 0;
 
     assert(npu_stream_destroy(stream) == 0);
-    assert(npu_buffer_destroy(buffer) == 0);
+    {
+        npu_buffer_t *orphan = 0;
+        uint64_t address = UINT64_MAX;
+
+        assert(npu_buffer_create_view(buffer, 0, sizeof(input), &orphan) == 0);
+        assert(npu_buffer_destroy(buffer) == 0);
+        assert(npu_buffer_get_device_address(orphan, &address) == -ENOENT);
+        assert(address == 0);
+        assert(npu_buffer_destroy(orphan) == 0);
+    }
     assert(npu_context_destroy(context) == 0);
     context = 0;
     buffer = 0;

@@ -1,6 +1,7 @@
 npu_buffer_create
 npu_buffer_desc_init
 npu_buffer_destroy
+npu_buffer_get_device_address
 npu_buffer_get_size
 npu_context_create
 npu_context_desc_init

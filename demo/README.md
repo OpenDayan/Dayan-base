@@ -21,8 +21,10 @@ demo/
 ├── matmul_bf16_1c.cpp           # 独立分片 BF16，支持 1c/4c Task group
 ├── matmul_bf16_4c.cpp           # 四核协作 BF16
 ├── matmul_fp8_4c.cpp            # 四核协作 E4M3
+├── matmul_fp4_1c.cpp            # 单核打包 E2M1，按 URAM 容量选择 tile
 ├── matmul_fp4_4c.cpp            # 四核协作打包 E2M1
 ├── lsu_bandwidth.cpp           # LSU 带宽
+├── embedding_dma_bandwidth.cpp # 单核、双线程、双指针缓冲随机 gather/scatter
 ├── vec_peak.cpp                # VEC 稳态吞吐
 ├── launch_latency.cpp          # 连续算子启动延迟
 ├── shared_notify_latency.cpp   # 跨核 Shared Resource 通知
@@ -130,6 +132,200 @@ build/host/dyperf/dyperf -o matmul-trace.json -- \
 `uint64_t dayan_get_time(void)`。它通过 `rdcycle` 返回当前 Hart 的周期计数，不做纳秒
 换算，也不等待执行单元完成；跨核相减要求平台的计数器同源且对齐。
 demo 不自行定义 `read_cycle` 或直接读取周期 CSR。
+
+## 随机 Embedding DMA 带宽
+
+`embedding_dma_bandwidth.cpp` 测试单核从大表随机读取、或向大表随机写入数据。
+默认表大小为 **20,000,000,000 B**，依次遍历 **64B、128B、512B、2KB、4KB**，
+每种粒度执行四种模式，共 **20 项测试**。所有粒度复用同一张大表和辅助 Buffer。
+
+默认每遍工作集（仅数据，不含指针）为 **1,392,640 B = 1.328125 MB**，沿用原始
+128 B 场景的 `64 * 200 * (1 - 15%) = 10,880` 项规模，通过改变 Entry 数保持一致：
+
+| 访问粒度 | Entry 数 / 遍 | 数据字节数 / 遍 | 指针字节数 / 遍 |
+| --- | ---: | ---: | ---: |
+| 64B | 21,760 | 1,392,640 | 174,080 |
+| 128B | 10,880 | 1,392,640 | 87,040 |
+| 512B | 2,720 | 1,392,640 | 21,760 |
+| 2KB | 680 | 1,392,640 | 5,440 |
+| 4KB | 340 | 1,392,640 | 2,720 |
+
+自定义工作集时，`Entry 数 = 工作集字节数 / 访问粒度`，四舍五入到整数项，
+实际数据量与目标相差至多半个 Entry。工作集至少为所选最大粒度，每种粒度最多 1,048,576 项。
+输入视为已去重，算子自身不做去重。
+
+本次仿真采用 **DRAMSim3**，配置为
+`/workspace/npu-cluster-sim/configs/lpddr5-6400-2ch-32g.ini`，即 2 通道、32GB 版本。
+
+随机指针由 Host 按粒度 G 分别生成：以 `SEED` 初始化 `std::mt19937_64`，再通过
+`std::uniform_int_distribution<uint64_t>` 在 `[0, floor(TABLE_BYTES / G) - 1]` 上抽取行号。
+整张表中所有完整的 G 字节块均参与抽样，尾部不足 G 字节的区域不使用。
+用 `unordered_set` 拒绝重复行号并重新抽取，直到得到当前粒度所需的不同地址，形成均匀无放回样本。
+表基址按 4KB 对齐，地址为 `table_device_base + row_id * G`，保证按访问粒度对齐。
+按抽中顺序保存，不按地址排序、不分组、
+不采用固定地址步长，保留随机访问顺序。指针数组本身连续存储并由 DMA 分批读取，
+随机性体现在它指向的 Embedding 行。
+
+默认 `SEED=1`，相同标准库实现下可复现同一序列；修改 `SEED` 可获取另一组样本。
+每种粒度有各自的样本，同一粒度的四个模式、预热及重复遍数复用同一组指针，便于比较不同 DMA 路径。
+
+默认依次测试四种路径，也可以通过启动参数单独选择：
+
+| 模式 | 数据路径 | 数据 DRAM 读 / 项 | 数据 DRAM 写 / 项 | 指针 DRAM 读 / 项 |
+| --- | --- | ---: | ---: | ---: |
+| `gather-uram` | 随机 DRAM → URAM，完成后丢弃 | G B | 0 B | 8 B |
+| `scatter-uram` | URAM → 随机 DRAM | 0 B | G B | 8 B |
+| `gather-dram` | 随机 DRAM → 连续 DRAM | G B | G B | 8 B |
+| `scatter-dram` | 连续 DRAM → 随机 DRAM | G B | G B | 8 B |
+
+两个线程各自拥有指针缓冲，独立执行：
+
+```text
+线程 0：DMA 获取前半段指针 → 等待 → 派发所选数据 DMA → 等待 → 下一批
+线程 1：DMA 获取后半段指针 → 等待 → 派发所选数据 DMA → 等待 → 下一批
+```
+
+两线程不互相交接、不使用线程间 barrier 或 Named Resource。每个线程独占 384 KiB URAM
+和两组逻辑 LSU TCSR，总共预留 768 KiB。它们使用同一核心的 LSU，不代表两个物理 DMA 引擎。
+每批通过一条地址表 DMA 搬运多个 G 字节数据项，等待完成后才能复用指针缓冲。
+
+- URAM 模式：每线程项数为 `floor(384 * 1024 / (G + 8))`，指针区向上对齐 64 B，
+  后接数据区。D2U 将数据读入该缓冲，下一批覆盖；U2D 重复使用该缓冲的数据。
+- D2D 模式：每线程全部 384 KiB 用作指针缓冲，容纳 49,152 项，不分配数据 URAM 缓冲。
+
+| 粒度 | URAM 项数 / 线程 / 批 | 指针区 B / 线程 | 数据区 B / 线程 |
+| --- | ---: | ---: | ---: |
+| 64B | 5,461 | 43,712 | 349,504 |
+| 128B | 2,891 | 23,168 | 370,048 |
+| 512B | 756 | 6,080 | 387,072 |
+| 2KB | 191 | 1,536 | 391,168 |
+| 4KB | 95 | 768 | 389,120 |
+
+默认工作集下，各粒度每遍 URAM 模式均提交 4 批数据 DMA，D2D 模式均提交 2 批。
+每一遍仍重新 DMA 获取指针，指针开销没有移到计时外。
+指针尾块使用短 DMA，DRAM 端不越过有效长度，不要求调用方填充指针数组。
+
+Device 入口为：
+
+```cpp
+embedding_dma_bandwidth(const uint64_t *pointers, uint64_t count,
+                        uint8_t *packed, uint64_t mode,
+                        uint64_t iterations, uint64_t entry_bytes,
+                        EmbeddingDmaResult *result);
+```
+
+- `pointers`：设备内存中的 64-bit 绝对 D-side 地址数组，数组至少 8 B 对齐。
+  每项指向可访问的 `entry_bytes` 字节数据，所有被间接引用的 Buffer 必须保留在同一个 Context 内。
+- `entry_bytes`：64、128、512、2048 或 4096，控制 DMA 单项长度、地址表步长和 URAM 分块。
+- `mode=0`：D2D Gather；`mode=1`：D2D Scatter；`mode=2`：D2U Gather；`mode=3`：U2D Scatter。
+- `packed`：D2D 模式使用至少 `count * entry_bytes` B、64 B 对齐的连续设备区域。
+  `mode=0` 将 `pointers[i]` gather 到 `packed + i*entry_bytes`；`mode=1` 反向 scatter。
+  `mode=2` 忽略该参数，Host wrapper 传入有效的结果 Buffer 句柄即可。
+  `mode=3` 在启动两个线程前，用 DMA 从 packed 的各半段起点预装一批数据到对应 URAM，
+  完成后才开始计时；每线程后续各批重复使用这批源数据，尾批只使用有效项。
+  Host 生成相同周期的 FP32 位模式作参考，不在设备端生成测试数据。
+  除被忽略的参数外，packed、指针数组、结果区和随机表互不重叠；写入目标也不得重叠。
+- `iterations`：同一指针序列的重复遍数，必须大于零；`count=0` 在 Device 入口是空操作。
+  默认重复 10 遍，用于降低短测量波动；它不是每遍重新生成随机地址。
+- `result`：总周期、访问项数、访问粒度以及各线程完成项数。两个线程的时间戳在同一 Hart，
+  周期取最早开始至最晚完成，包含指针 DMA、数据 DMA、等待和调度间隙。
+
+一键构建并运行独立仿真环境：
+
+```sh
+./run_test.sh embedding_dma_bandwidth
+./run_test.sh embedding_dma_bandwidth --granularity 4KB
+```
+
+该入口自动创建独立设备目录、socket 和模拟器工作目录，使用 DRAMSim3 的 2ch、32GB 配置，
+运行结束后清理进程和挂载。报告和日志保存于打印的 `build/test-runs/` 子目录。
+
+也可单独构建并连接已有 Server：
+
+```sh
+make -C demo ../build/demo/embedding_dma_bandwidth
+build/demo/embedding_dma_bandwidth
+# 默认：all 20000000000 10880 10 1000000000 1 --granularity all
+# 位置参数：[MODE [TABLE_BYTES [COUNT128 [ITERATIONS [CLOCK_HZ [SEED]]]]]]
+# 只跑某个粒度的四种模式：
+build/demo/embedding_dma_bandwidth --granularity 4KB
+# 各粒度使用 2 MB 目标工作集，仍执行全部四种模式：
+build/demo/embedding_dma_bandwidth --working-set 2097152
+# 只跑各粒度的 D2U Gather，目标工作集为 10000 * 128 B：
+build/demo/embedding_dma_bandwidth gather-uram 20000000000 10000 10
+# 复现原 128 B 的模式选择及 Entry 数参数：
+build/demo/embedding_dma_bandwidth both 20000000000 10880 10 --granularity 128
+# 指定 Markdown 报告位置（默认写当前目录的 embedding_dma_bandwidth.md）：
+build/demo/embedding_dma_bandwidth --report demo/embedding_dma_bandwidth.md
+```
+
+`--granularity` 支持 `all`、字节数 `64/128/512/2048/4096` 或名称 `64B/128B/512B/2KB/4KB`。
+位置参数 `COUNT128` 保持原来的 128 B 参考项数含义，目标工作集为 `COUNT128 * 128`；
+指定 `--working-set BYTES` 时改用显式字节数。`read/write/both` 仍选择原 D2D 模式，
+默认对所有粒度生效。`--verify-uram` 保留独立、不计时的 D2U 回读验证。
+
+Host 通过 `npu_buffer_get_device_address()` 获取表的设备可见基址，生成绝对地址数组，
+用 H2D 上传指针数组及被访问行的初始数据，无需创建或传输 20 GB 的 Host 镜像。
+设备端只有带宽测试 kernel；没有数据准备 kernel 或标量核读写 URAM 的初始化循环。
+开启 MMU 时地址查询返回 Buffer 的虚拟地址，Host 不假设物理地址或固定表基址。
+使用新增地址查询接口需重启更新后的 `dayan_server`；旧 Server 会返回明确的升级提示。
+每个方向先预热一遍，再执行计时启动；准备、Host 传输、预热和结果校验均在计时外。
+写测试使用与初值不同的数据；D2D Gather 和两个 Scatter 模式读回全部数据做 FP32 位模式
+比较，并直接按 Host offset 抽查 17 个表项，检查地址转换。Scatter 的验证 Gather 不计时。
+默认 D2U 只核对完成状态和项数，**丢弃数据且不回写 DRAM**；若需数值验证，显式添加
+`--verify-uram`，另起一次不计时的 D2U/U2D 回读启动，逐项比较全部数据。
+测试使用独立分配的表，写模式会覆盖其中被选中的行。
+
+成功运行后，终端和 Markdown 文件输出工作集配置表及两张带宽表，默认带宽表各有 20 行：
+
+- 工作集表：访问粒度、Entry 数、每遍实际数据字节数、指针字节数和 URAM 批容量。
+- 数据表：访问粒度、模式、总周期、`Payload B/cycle`、`Payload MB/s`、
+  `Total Read MB/s`、`Total Write MB/s`、`Total Utilization` 和 `Data Utilization`。
+  Total 包含数据及指针流量；Payload 和 Data Utilization 只包含数据。
+  有效载荷为 `count * entry_bytes * iterations`；D2D 的 DRAM 数据流量为读、写各一份。
+- 指针表：访问粒度、模式、指针总字节数 `count * 8 * iterations`、指针 B/cycle、指针 MB/s、
+  指针带宽利用率，作为 Total 指标中指针部分的独立明细。
+
+采用 **1 MB = 1024 KB = 1024 * 1024 B**。双通道 LPDDR5-6400 的基准保持为
+**51,200,000,000 B/s（原 51.2 GB/s）**，换算为 **48,828.125 MB/s**：
+
+```text
+Total Read = 数据读取 MB/s + 指针读取 MB/s
+Total Write = 数据写入 MB/s（指针无写入流量）
+Total Utilization = (Total Read + Total Write) / 48828.125 * 100%
+Data Utilization = (数据读取 MB/s + 数据写入 MB/s) / 48828.125 * 100%
+Pointer Utilization = 指针读取 MB/s / 48828.125 * 100%
+```
+
+所有指标共享同一测量周期，包含指针 DMA、数据 DMA、等待和调度。
+准备、预热、U2D 源预装、结果写回和校验不计时。D2D 的 Data Utilization 包含数据的读、写两份流量。
+
+默认按 **1 GHz** 折算：`MB/s = (B/cycle) * CLOCK_HZ / 1048576`。
+可通过 `CLOCK_HZ` 修改频率，设为 0 则省略 MB/s 和利用率。
+默认报告文件为当前目录的 `embedding_dma_bandwidth.md`，使用 `--report FILE` 可改路径；
+每次成功运行会覆盖指定报告。报告同时记录 DRAMSim3 配置和指针生成方法。
+
+默认 20 GB 表还需指针、packed Buffer 和运行时内存；例如 cmodel 可配置 24 GiB：
+
+```sh
+NPU_CMODEL_HARTS=1 NPU_CMODEL_MEMORY_MIB=24576 ./run_cmodel_server.sh
+# 另一终端：
+build/demo/embedding_dma_bandwidth
+```
+
+如果报 `allocation failed: embedding table ... status=-12`，这是设备 DRAM 分配失败。
+`URAM capacity per Core: 768 KiB` 是片上容量，两者分别管理。
+XDMA Server 不指定 `--normal-memory-size-mib` 时，Normal 内存池默认只有 **4 GiB**。
+在后端确实提供 24 GiB 地址空间时，可在原 Server 启动参数后增加
+`--normal-memory-size-mib 24576`，例如：
+
+```sh
+./run_server.sh --normal-memory-size-mib 24576
+```
+
+该参数只改变分配器的内存范围，不能扩展真实硬件或 RTL 后端的 DRAM。
+后端容量不足时，显式使用较小的 `TABLE_BYTES` 做功能验证；算子不会自动缩小表后
+继续把结果标成 20 GB 场景。失败信息会注明步骤、Buffer 名称和申请字节数。
 
 ## 连续算子启动性能
 
@@ -664,6 +860,43 @@ done
 
 每轮应通过数值校验，FP4 的行尾 padding 也应保持完整。Dayan-emu 可验证数值和
 执行顺序，但其 QEMU CPU 不模拟这类数据缓存残留，不能单独验证此问题。
+
+## FP4 单核心矩阵乘
+
+`matmul_fp4_1c.cpp` 基于 `matmul_fp4_4c.cpp`，使用一个 `kSingleCore` Task
+（grid 为 `{1,1,1}`）计算完整的 `A[M][K] × BT[N][K] -> C[M][N]`。
+保留两个 Loader、根 Calc Proc 和一个 Post Thread，仅使用 6 个 Local Resource，
+不申请 Shared Resource 或 Atomic Cache，也不进行跨核复制或 barrier。
+
+Host 通过 `demo_uram_capacity()` 调用 `npu_runtime_get_uram_capacity()` 获取
+每核 URAM 容量，选择对应的 kernel descriptor 和 tile；小于 768 KiB 时拒绝启动。
+这里查询的是每核容量，不是当前空闲字节数。Device 同时通过 `dayan_uram_size()`
+检查本次分配的空间，使用调度到的物理 Core 的 URAM 窗口偏移。
+
+| URAM 容量 | M×N×K tile | A 双缓冲时的 slice | B 双缓冲时的 slice | 实际 URAM：A/B 双缓冲 |
+| --- | --- | --- | --- | --- |
+| 1.5 MiB | 512×512×640 | 512×256×640 | 256×512×640 | 1504 / 1504 KiB |
+| 768 KiB | 192×512×640 | 192×256×640 | 96×512×640 | 664 / 764 KiB |
+
+当 `M < N` 时双缓冲 A、沿 N 分两片；否则双缓冲 B、沿 M 分两片。
+每片保留 FP32 C，首个 K 块用 MM 初始化，后续用 MMA 累加，最后由 Post 写回。
+输入沿 K 打包 E2M1，低半字节在先，支持奇数 K 和 M/N/K 尾块，N 须为 16 的倍数。
+Host 保留原四核版本的输入生成、CPU 参考校验、DRAM 通道偏移和 C 行尾 padding 检查。
+
+单核不需要维持跨核物理字节复制的布局，因此 A/BT 使用 VisualSwizzle 搜索得到的
+`M9/B1/S1`。两种容量、两条分支中所有输入缓冲均按 1 KiB 对齐且大小为其整数倍，
+映射不会越过缓冲边界；每拍 Bank 峰值保持 1x，连续四块最小覆盖由 identity 的
+22/32 提高到 28/32。C 的 1024B/2048B 行跨度分别使用 `M7/B3/S3`、`M7/B3/S4`，
+峰值由 8x 降为 1x、覆盖 32/32。LSU 与 MAT 使用相同映射；这些是布局模型指标。
+
+```sh
+make -C demo ../build/demo/matmul_fp4_1c
+# 终端一：启动单核 cmodel
+NPU_CMODEL_HARTS=1 ./run_cmodel_server.sh
+# 终端二：默认尺寸为 1024×2048×6144，也可指定 M N K
+build/demo/matmul_fp4_1c
+build/demo/matmul_fp4_1c 513 528 1281
+```
 
 ## Gated DeltaNet: TGMT, SW + Vec TGMT, and SW
 
